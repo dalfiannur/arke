@@ -23,6 +23,7 @@
 //! | [`schedule`] | `System` + `Schedule` deterministik (M-2); `System::each` bertipe (M-4) |
 //! | [`serialize`] | `Value` + trait `Serialize` + JSON tulis-tangan (M-6) |
 //! | [`snapshot`] | `Snapshot` World berversi, round-trip setia (M-6) |
+//! | [`error`] | `EcsError` berkonteks yang menyebut komponen (M-7) |
 //! | `storage` (privat) | Kolom kontigu bertipe (`TypedColumn`) |
 //! | `archetype` (privat) | Tabel per-kombinasi-komponen |
 //!
@@ -34,6 +35,7 @@
 
 pub mod component;
 pub mod entity;
+pub mod error;
 pub mod query;
 pub mod schedule;
 pub mod serialize;
@@ -45,6 +47,7 @@ mod storage;
 
 pub use component::{Component, ComponentId};
 pub use entity::Entity;
+pub use error::EcsError;
 pub use query::{Access, QueryData};
 pub use schedule::{Schedule, System};
 pub use serialize::{Serialize, Value};

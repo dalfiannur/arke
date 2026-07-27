@@ -75,12 +75,14 @@ impl SerdeRegistry {
 }
 
 /// Snapshot keadaan sebuah `World` (RFC-0007 §4).
+#[derive(Debug, Clone, PartialEq)]
 pub struct Snapshot {
     pub(crate) schema_version: u32,
     pub(crate) entities: Vec<EntitySnapshot>,
 }
 
 /// Snapshot satu entity: handle + komponen-komponennya yang terserialisasi.
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct EntitySnapshot {
     pub(crate) index: u32,
     pub(crate) generation: u32,

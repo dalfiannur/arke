@@ -29,13 +29,13 @@ Membuat kegagalan runtime **menyebut komponen yang terlibat**, mengaktifkan STD-
 
 ## Kriteria selesai (Definition of Done)
 
-- [ ] `EcsError` mengimplementasikan `Display` & `std::error::Error`; pesannya menyebut nama tipe komponen.
-- [ ] Konflik borrow query (`query_pair::<A, A>`) panik dengan pesan yang menyebut tipe komponen (bukti STD-0008) — disertai tes.
-- [ ] `try_snapshot` mengembalikan `Err(ComponentNotRegistered { component })` yang menyebut namanya bila ada komponen hidup tak-terdaftar (bukti STD-0008) — disertai tes.
-- [ ] `try_snapshot` mengembalikan `Ok` bila semua komponen hidup terdaftar; setara `snapshot()`.
-- [ ] Tetap **tanpa `unsafe`** & bebas dependensi eksternal (STD-0003).
-- [ ] RFC-0008 & ADR-0008 ditulis serta konsisten dengan kode.
-- [ ] Semua tes hijau.
+- [x] `EcsError` mengimplementasikan `Display` & `std::error::Error`; pesannya menyebut nama tipe komponen.
+- [x] Konflik borrow query (`query_pair::<A, A>`) panik dengan pesan yang menyebut tipe komponen (bukti STD-0008) — disertai tes.
+- [x] `try_snapshot` mengembalikan `Err(ComponentNotRegistered { component })` yang menyebut namanya bila ada komponen hidup tak-terdaftar (bukti STD-0008) — `tests/snapshot.rs`.
+- [x] `try_snapshot` mengembalikan `Ok` bila semua komponen hidup terdaftar; setara `snapshot()`.
+- [x] Tetap **tanpa `unsafe`** & bebas dependensi eksternal (STD-0003).
+- [x] RFC-0008 & ADR-0008 ditulis serta konsisten dengan kode.
+- [x] Semua tes hijau (39 tes) secara lokal.
 
 ## Ketergantungan
 

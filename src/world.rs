@@ -10,6 +10,7 @@
 use crate::archetype::Archetype;
 use crate::component::{Component, ComponentId, ComponentRegistry};
 use crate::entity::Entity;
+use crate::error::EcsError;
 use crate::serialize::Serialize;
 use crate::snapshot::{EntitySnapshot, SCHEMA_VERSION, SerdeRegistry, Snapshot};
 use crate::storage::TypedColumn;
@@ -228,10 +229,14 @@ impl World {
     pub fn query_pair<A: Component, B: Component>(&mut self) -> impl Iterator<Item = (&A, &mut B)> {
         let ca = self.registry.get::<A>();
         let cb = self.registry.get::<B>();
-        if let (Some(a), Some(b)) = (ca, cb) {
-            assert_ne!(
-                a, b,
-                "query_pair: A dan B tidak boleh komponen yang sama (alias &mut)"
+        if let (Some(a), Some(b)) = (ca, cb)
+            && a == b
+        {
+            panic!(
+                "{}",
+                EcsError::QueryConflict {
+                    component: std::any::type_name::<A>(),
+                }
             );
         }
         self.archetypes
@@ -357,6 +362,28 @@ impl World {
             schema_version: SCHEMA_VERSION,
             entities,
         }
+    }
+
+    /// Seperti [`World::snapshot`], tetapi **menolak** bila ada entity hidup
+    /// dengan komponen yang belum di-`register_serializable` — mengembalikan
+    /// [`EcsError::ComponentNotRegistered`] yang menyebut namanya (STD-0008),
+    /// mencegah kehilangan data diam.
+    pub fn try_snapshot(&self) -> Result<Snapshot, EcsError> {
+        for meta in &self.entities {
+            if !meta.alive {
+                continue;
+            }
+            if let Some(loc) = meta.location {
+                for &cid in self.archetypes[loc.archetype].component_ids() {
+                    if self.serde.info_for(cid).is_none() {
+                        return Err(EcsError::ComponentNotRegistered {
+                            component: self.registry.name(cid),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(self.snapshot())
     }
 
     /// Memuat `snapshot` ke `World` ini, merekonstruksi entity (dengan handle
@@ -604,9 +631,9 @@ mod tests {
         assert_eq!(world.get::<Velocity>(f), Some(&Velocity(5, 5)));
     }
 
-    // Menolak alias &mut ke komponen yang sama (invarian paralelisme aman).
+    // Menolak alias &mut ke komponen yang sama; pesan menyebut tipe (STD-0008).
     #[test]
-    #[should_panic(expected = "alias")]
+    #[should_panic(expected = "Position")]
     fn query_pair_menolak_alias_ke_komponen_sama() {
         let mut world = World::new();
         let e = world.spawn();

@@ -44,6 +44,8 @@ pub(crate) struct ComponentRegistry {
     ids: HashMap<TypeId, ComponentId>,
     /// Konstruktor kolom kosong per komponen, terindeks oleh `ComponentId`.
     constructors: Vec<fn() -> Box<dyn Column>>,
+    /// Nama tipe per komponen, terindeks oleh `ComponentId` (untuk error berkonteks).
+    names: Vec<&'static str>,
 }
 
 impl ComponentRegistry {
@@ -56,6 +58,7 @@ impl ComponentRegistry {
         let id = ComponentId(self.constructors.len() as u32);
         self.ids.insert(type_id, id);
         self.constructors.push(|| Box::new(TypedColumn::<T>::new()));
+        self.names.push(std::any::type_name::<T>());
         id
     }
 
@@ -67,5 +70,10 @@ impl ComponentRegistry {
     /// Membuat kolom kosong untuk komponen `id`.
     pub(crate) fn new_column(&self, id: ComponentId) -> Box<dyn Column> {
         (self.constructors[id.raw() as usize])()
+    }
+
+    /// Nama tipe komponen `id` (untuk pesan error berkonteks).
+    pub(crate) fn name(&self, id: ComponentId) -> &'static str {
+        self.names[id.raw() as usize]
     }
 }

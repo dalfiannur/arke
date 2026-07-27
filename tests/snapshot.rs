@@ -85,3 +85,31 @@ fn snapshot_tanpa_schema_version_ditolak() {
     // STD-0001: format tanpa versi harus ditolak.
     assert!(Snapshot::from_json(r#"{"entities":[]}"#).is_none());
 }
+
+#[derive(PartialEq, Debug)]
+struct Untracked(i32); // tidak impl Serialize, tidak diregistrasi
+
+#[test]
+fn try_snapshot_menolak_komponen_tak_terdaftar_menyebut_namanya() {
+    // STD-0008: error menyebut komponen yang terlibat.
+    let mut world = World::new();
+    let e = world.spawn();
+    world.insert(e, Untracked(7));
+
+    let err = world.try_snapshot().unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Untracked"),
+        "pesan tak menyebut komponen: {msg}"
+    );
+}
+
+#[test]
+fn try_snapshot_ok_bila_semua_terdaftar() {
+    let mut world = World::new();
+    world.register_serializable::<Position>();
+    let e = world.spawn();
+    world.insert(e, Position { x: 1, y: 2 });
+
+    assert!(world.try_snapshot().is_ok());
+}
