@@ -18,7 +18,7 @@
 //! | --- | --- |
 //! | [`entity`] | `Entity` sebagai generational index |
 //! | [`component`] | Tipe komponen & identitasnya (registrasi otomatis) |
-//! | [`world`] | Otoritas atas entity/komponen + `spawn`/`insert`/`get`/`remove`/query |
+//! | [`world`] | Otoritas atas entity/komponen + `spawn`/`insert`/`get`/`remove`/query + `par_for_each` |
 //! | [`schedule`] | `System` + `Schedule` deterministik (M-2) |
 //! | `storage` (privat) | Kolom kontigu bertipe (`TypedColumn`) |
 //! | `archetype` (privat) | Tabel per-kombinasi-komponen |

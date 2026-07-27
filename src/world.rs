@@ -252,6 +252,40 @@ impl World {
             .flatten()
     }
 
+    /// Menerapkan `f` pada komponen `T` setiap entity pemiliknya, **secara
+    /// paralel** (RFC-0004).
+    ///
+    /// Baris tiap archetype dibagi menjadi chunk yang diproses di
+    /// `std::thread::scope` — aman via `chunks_mut`, tanpa `unsafe`. `f` harus
+    /// memproses tiap elemen secara independen; dengan syarat itu hasilnya
+    /// deterministik dan setara eksekusi serial (STD-0006).
+    pub fn par_for_each<T: Component>(&mut self, f: impl Fn(&mut T) + Sync) {
+        let Some(cid) = self.registry.get::<T>() else {
+            return;
+        };
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let f = &f;
+        std::thread::scope(|scope| {
+            for archetype in self.archetypes.iter_mut() {
+                let Some(col) = archetype.column_index(cid) else {
+                    continue;
+                };
+                let slice = archetype.slice_mut::<T>(col);
+                if slice.is_empty() {
+                    continue;
+                }
+                let chunk_size = slice.len().div_ceil(threads);
+                for chunk in slice.chunks_mut(chunk_size) {
+                    scope.spawn(move || {
+                        for item in chunk {
+                            f(item);
+                        }
+                    });
+                }
+            }
+        });
+    }
+
     /// Mengembalikan referensi ke komponen `T` milik `entity`, bila ada.
     pub fn get<T: Component>(&self, entity: Entity) -> Option<&T> {
         if !self.contains(entity) {
@@ -489,6 +523,26 @@ mod tests {
         let e = world.spawn();
         world.insert(e, Position(1, 1));
         let _ = world.query_pair::<Position, Position>().count();
+    }
+
+    #[derive(PartialEq, Debug)]
+    struct Value(i32);
+
+    #[test]
+    fn par_for_each_menerapkan_ke_semua_pemilik() {
+        let mut world = World::new();
+        let mut ents = Vec::new();
+        for i in 0..100 {
+            let e = world.spawn();
+            world.insert(e, Value(i));
+            ents.push(e);
+        }
+
+        world.par_for_each::<Value>(|v| v.0 += 1000);
+
+        for (i, e) in ents.iter().enumerate() {
+            assert_eq!(world.get::<Value>(*e), Some(&Value(i as i32 + 1000)));
+        }
     }
 
     // STD-0005 (guard): urutan iterasi query stabil antar-run.

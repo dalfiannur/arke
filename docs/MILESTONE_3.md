@@ -31,13 +31,13 @@ Mengaktifkan paralelisme nyata secara **aman**: iterasi komponen yang membagi ba
 
 ## Kriteria selesai (Definition of Done)
 
-- [ ] `par_for_each::<T>` menerapkan `f` pada setiap pemilik `T` (lintas semua archetype).
-- [ ] Implementasi memakai `std::thread::scope` + `chunks_mut` — **tanpa `unsafe`** (di bawah `deny(unsafe_code)`).
-- [ ] Hasil paralel identik dengan hasil serial untuk closure per-elemen independen (bukti STD-0006) — disertai tes.
-- [ ] Deterministik antar-run (tes lintas-run).
-- [ ] Core tetap `--no-default-features` & bebas dependensi eksternal (STD-0003).
-- [ ] RFC-0004 & ADR-0004 ditulis serta konsisten dengan kode.
-- [ ] Semua tes hijau.
+- [x] `par_for_each::<T>` menerapkan `f` pada setiap pemilik `T` (lintas semua archetype).
+- [x] Implementasi memakai `std::thread::scope` + `chunks_mut` — **tanpa `unsafe`** (dikompilasi di bawah `deny(unsafe_code)`).
+- [x] Hasil paralel identik dengan hasil serial untuk closure per-elemen independen (bukti STD-0006) — [`tests/parallel.rs`](../tests/parallel.rs).
+- [x] Deterministik antar-run (tes lintas-run).
+- [x] Core tetap `--no-default-features` & bebas dependensi eksternal (STD-0003).
+- [x] RFC-0004 & ADR-0004 ditulis serta konsisten dengan kode.
+- [x] Semua tes hijau (24 tes) secara lokal.
 
 ## Ketergantungan
 
