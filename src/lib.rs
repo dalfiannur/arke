@@ -19,7 +19,8 @@
 //! | [`entity`] | `Entity` sebagai generational index |
 //! | [`component`] | Tipe komponen & identitasnya (registrasi otomatis) |
 //! | [`world`] | Otoritas atas entity/komponen + `spawn`/`insert`/`get`/`remove`/query + `par_for_each` |
-//! | [`schedule`] | `System` + `Schedule` deterministik (M-2) |
+//! | [`query`] | `QueryData` berbasis-tipe + `Access` tersimpul (M-4) |
+//! | [`schedule`] | `System` + `Schedule` deterministik (M-2); `System::each` bertipe (M-4) |
 //! | `storage` (privat) | Kolom kontigu bertipe (`TypedColumn`) |
 //! | `archetype` (privat) | Tabel per-kombinasi-komponen |
 //!
@@ -31,6 +32,7 @@
 
 pub mod component;
 pub mod entity;
+pub mod query;
 pub mod schedule;
 pub mod world;
 
@@ -39,5 +41,6 @@ mod storage;
 
 pub use component::{Component, ComponentId};
 pub use entity::Entity;
+pub use query::{Access, QueryData};
 pub use schedule::{Schedule, System};
 pub use world::World;

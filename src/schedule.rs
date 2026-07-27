@@ -9,27 +9,7 @@ use std::any::TypeId;
 
 use crate::Component;
 use crate::World;
-
-/// Deklarasi akses data sebuah sistem, sebagai himpunan `TypeId` komponen.
-#[derive(Default)]
-struct Access {
-    reads: Vec<TypeId>,
-    writes: Vec<TypeId>,
-}
-
-impl Access {
-    /// Apakah dua akses berkonflik: berbagi komponen yang ditulis salah satu.
-    fn conflicts(&self, other: &Access) -> bool {
-        shares(&self.writes, &other.writes)
-            || shares(&self.writes, &other.reads)
-            || shares(&self.reads, &other.writes)
-    }
-}
-
-/// Apakah dua daftar `TypeId` beririsan.
-fn shares(a: &[TypeId], b: &[TypeId]) -> bool {
-    a.iter().any(|id| b.contains(id))
-}
+use crate::query::{Access, QueryData};
 
 /// Unit logika yang berjalan atas sebuah [`World`].
 pub struct System {
@@ -56,6 +36,18 @@ impl System {
     pub fn writes<T: Component>(mut self) -> Self {
         self.access.writes.push(TypeId::of::<T>());
         self
+    }
+
+    /// Membangun sistem yang menerapkan `f` pada setiap entity yang cocok dengan
+    /// query `Q`, dengan **akses tersimpul dari tipe** `Q` (RFC-0005).
+    ///
+    /// Contoh: `System::each::<(&Position, &mut Velocity)>(|(p, v)| v.0 += p.0)`
+    /// otomatis terdaftar sebagai membaca `Position` dan menulis `Velocity`.
+    pub fn each<Q: QueryData>(mut f: impl FnMut(Q::Item<'_>) + 'static) -> Self {
+        Self {
+            run: Box::new(move |world: &mut World| Q::each(world, &mut f)),
+            access: Q::access(),
+        }
     }
 }
 
@@ -154,6 +146,27 @@ mod tests {
         schedule.run(&mut world);
 
         assert_eq!(world.get::<Counter>(e), Some(&Counter(1)));
+    }
+
+    #[test]
+    fn system_each_menerapkan_dan_menyimpulkan_akses() {
+        let mut world = World::new();
+        let e = world.spawn();
+        world.insert(e, Counter(0));
+
+        let mut s = Schedule::new();
+        s.add(System::each::<&mut Counter>(|c| c.0 += 5));
+        s.run(&mut world);
+
+        assert_eq!(world.get::<Counter>(e), Some(&Counter(5)));
+    }
+
+    #[test]
+    fn stage_dari_akses_tersimpul_tipe() {
+        let mut s = Schedule::new();
+        s.add(System::each::<&mut Counter>(|_| {})); // tulis Counter → stage 0
+        s.add(System::each::<&Counter>(|_| {})); // baca Counter → konflik → stage 1
+        assert_eq!(s.stages(), vec![vec![0], vec![1]]);
     }
 
     #[test]

@@ -31,13 +31,13 @@ Mewujudkan model "System = fungsi atas Query" (ARCHITECTURE_BIBLE §3.1): sistem
 
 ## Kriteria selesai (Definition of Done)
 
-- [ ] `QueryData::access()` menyimpulkan baca/tulis yang benar untuk `&T`, `&mut T`, `(&A, &B)`, `(&A, &mut B)`.
-- [ ] `QueryData::each` mengiterasi hanya entity yang cocok dan menghasilkan `Item` yang benar.
-- [ ] `System::each::<Q>(f)` membangun sistem yang, saat dijalankan, menerapkan `f` per entity cocok.
-- [ ] `Schedule` menempatkan sistem berbasis-tipe ke stage yang benar dari akses tersimpul (mis. dua sistem yang menulis komponen sama → stage berbeda; dua pembaca → satu stage).
-- [ ] Implementasi tetap **tanpa `unsafe`** (di bawah `deny(unsafe_code)`) dan bebas dependensi (STD-0003).
-- [ ] RFC-0005 & ADR-0005 ditulis serta konsisten dengan kode.
-- [ ] Semua tes hijau.
+- [x] `QueryData::access()` menyimpulkan baca/tulis yang benar untuk `&T`, `&mut T`, `(&A, &B)`, `(&A, &mut B)`.
+- [x] `QueryData::each` mengiterasi hanya entity yang cocok dan menghasilkan `Item` yang benar.
+- [x] `System::each::<Q>(f)` membangun sistem yang, saat dijalankan, menerapkan `f` per entity cocok.
+- [x] `Schedule` menempatkan sistem berbasis-tipe ke stage yang benar dari akses tersimpul (konflik tulis → stage berbeda; pembaca berbeda → satu stage). Lihat `tests/systems.rs`.
+- [x] Implementasi tetap **tanpa `unsafe`** (dikompilasi di bawah `deny(unsafe_code)`) dan bebas dependensi (STD-0003).
+- [x] RFC-0005 & ADR-0005 ditulis serta konsisten dengan kode.
+- [x] Semua tes hijau (32 tes) secara lokal.
 
 ## Ketergantungan
 

@@ -286,6 +286,21 @@ impl World {
         });
     }
 
+    /// Mengiterasi pasangan `(&A, &B)` pada setiap entity yang memiliki **kedua**
+    /// komponen. Keduanya dibaca (dua peminjaman bersama, tanpa `unsafe`).
+    pub fn query_pair_ref<A: Component, B: Component>(&self) -> impl Iterator<Item = (&A, &B)> {
+        let ca = self.registry.get::<A>();
+        let cb = self.registry.get::<B>();
+        self.archetypes
+            .iter()
+            .filter_map(move |arch| {
+                let ia = arch.column_index(ca?)?;
+                let ib = arch.column_index(cb?)?;
+                Some(arch.slice::<A>(ia).iter().zip(arch.slice::<B>(ib).iter()))
+            })
+            .flatten()
+    }
+
     /// Mengembalikan referensi ke komponen `T` milik `entity`, bila ada.
     pub fn get<T: Component>(&self, entity: Entity) -> Option<&T> {
         if !self.contains(entity) {
