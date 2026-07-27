@@ -35,3 +35,4 @@ ADR bersifat **immutable** setelah Accepted: jangan menulis ulang isinya. Jika k
 | [ADR-0009](ADR-0009-derive-serialize.md) | `derive(Serialize)` tanpa dependensi eksternal | Accepted |
 | [ADR-0010](ADR-0010-resources.md) | Resources sebagai parameter sistem | Accepted |
 | [ADR-0011](ADR-0011-derive-enum-attributes.md) | `derive(Serialize)` untuk enum + atribut field | Accepted |
+| [ADR-0012](ADR-0012-derive-rename-all.md) | `derive(Serialize)` — rename_all & atribut level-tipe | Accepted |

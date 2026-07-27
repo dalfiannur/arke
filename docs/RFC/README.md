@@ -44,3 +44,4 @@ Draft → Discussion → Accepted | Rejected | Superseded
 | [RFC-0009](RFC-0009-derive-serialize.md) | `derive(Serialize)` tanpa dependensi eksternal | Accepted |
 | [RFC-0010](RFC-0010-resources.md) | Resources sebagai parameter sistem | Accepted |
 | [RFC-0011](RFC-0011-derive-enum-attributes.md) | `derive(Serialize)` untuk enum + atribut field | Accepted |
+| [RFC-0012](RFC-0012-derive-rename-all.md) | `derive(Serialize)` — rename_all & atribut level-tipe | Accepted |
