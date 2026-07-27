@@ -456,6 +456,21 @@ impl World {
         Entity::new(index, generation)
     }
 
+    /// `ComponentId` untuk `T` bila terdaftar (dipakai query generik RFC-0013).
+    pub(crate) fn component_id<T: Component>(&self) -> Option<ComponentId> {
+        self.registry.get::<T>()
+    }
+
+    /// Nama tipe komponen `cid` (untuk pesan error query berkonteks).
+    pub(crate) fn component_name(&self, cid: ComponentId) -> &'static str {
+        self.registry.name(cid)
+    }
+
+    /// Slice mutabel seluruh archetype (dipakai query generik RFC-0013).
+    pub(crate) fn archetypes_mut(&mut self) -> &mut [Archetype] {
+        &mut self.archetypes
+    }
+
     /// Menemukan archetype dengan himpunan komponen `ids` (terurut), atau
     /// membuatnya bila belum ada. Mengembalikan indeksnya.
     fn find_or_create_archetype(&mut self, ids: &[ComponentId]) -> usize {

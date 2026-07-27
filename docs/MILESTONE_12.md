@@ -30,14 +30,14 @@ Menggeneralisasi `QueryData` ke tuple sembarang-arity dengan mutabilitas campura
 
 ## Kriteria selesai (Definition of Done)
 
-- [ ] `(&mut A, &mut B)` mengiterasi & memutasi kedua komponen — teruji.
-- [ ] Tuple arity 3 & 4 (baca & mutabilitas campuran) — teruji.
-- [ ] Hanya entity yang memiliki **semua** komponen tuple yang diiterasi — teruji.
-- [ ] Alias (mis. `(&mut A, &mut A)`) → panik menyebut komponen (STD-0008) — teruji.
-- [ ] Bekerja lewat `System::each::<Q>` untuk tuple arity 3 — teruji.
-- [ ] Tetap **tanpa `unsafe`** (`get_disjoint_mut`); 0 dependensi eksternal.
-- [ ] RFC-0013 & ADR-0013 ditulis serta konsisten dengan kode.
-- [ ] Semua tes hijau.
+- [x] `(&mut A, &mut B)` mengiterasi & memutasi kedua komponen — teruji.
+- [x] Tuple arity 3 & 4 (baca & mutabilitas campuran) — teruji (`tests/queries.rs`).
+- [x] Hanya entity yang memiliki **semua** komponen tuple yang diiterasi — teruji.
+- [x] Alias (`(&mut A, &mut A)`) → panik menyebut komponen (STD-0008) — teruji.
+- [x] Bekerja lewat `System::each::<Q>` untuk tuple arity 3 & 4 — teruji.
+- [x] Tetap **tanpa `unsafe`** (`get_disjoint_mut`); 0 dependensi eksternal. *(MSRV dinaikkan ke 1.86 untuk `get_disjoint_mut`.)*
+- [x] RFC-0013 & ADR-0013 ditulis serta konsisten dengan kode.
+- [x] Semua tes hijau (61 tes).
 
 ## Ketergantungan
 

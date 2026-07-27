@@ -74,8 +74,9 @@ use crate::World;
 
 /// Bentuk data yang dapat diquery, dengan akses tersimpul dari tipe (RFC-0005).
 ///
-/// Diterapkan untuk `&T`, `&mut T`, dan tuple 2-elemen. Iterasi bersifat
-/// **internal**: `each` memanggil `f` untuk setiap entity yang cocok.
+/// Diterapkan untuk `&T`, `&mut T`, dan **tuple sembarang-arity** (2–8) dengan
+/// mutabilitas campuran (RFC-0013). Iterasi bersifat **internal**: `each`
+/// memanggil `f` untuk setiap entity yang cocok.
 pub trait QueryData {
     /// Item yang dihasilkan per entity yang cocok, meminjam dari `World`.
     type Item<'w>;
@@ -115,33 +116,127 @@ impl<T: Component> QueryData for &mut T {
     }
 }
 
-impl<A: Component, B: Component> QueryData for (&A, &mut B) {
-    type Item<'w> = (&'w A, &'w mut B);
+// ---- Query tuple generik (RFC-0013) --------------------------------------
 
-    fn access() -> Access {
-        Access::new().with_read::<A>().with_write::<B>()
+use crate::component::ComponentId;
+use crate::error::EcsError;
+use crate::storage::{Column, TypedColumn};
+
+/// Satu elemen (`&T` atau `&mut T`) dari sebuah query tuple.
+///
+/// Detail implementasi: hanya `&T`/`&mut T` yang mengimplementasikannya;
+/// pengguna tak perlu menyentuhnya langsung (dipakai sebagai *bound* oleh impl
+/// `QueryData` tuple).
+#[doc(hidden)]
+#[allow(private_interfaces)]
+pub trait QueryTerm {
+    /// Item yang dihasilkan per baris.
+    type Item<'w>;
+    /// Menambahkan akses (baca/tulis) term ini.
+    fn access(access: &mut Access);
+    /// `ComponentId` komponen term ini, bila terdaftar.
+    fn component_id(world: &World) -> Option<ComponentId>;
+    /// Iterator atas item dari sebuah referensi kolom mutabel.
+    fn iter(col: &mut Box<dyn Column>) -> impl Iterator<Item = Self::Item<'_>>;
+}
+
+#[allow(private_interfaces)]
+impl<T: Component> QueryTerm for &T {
+    type Item<'w> = &'w T;
+    fn access(access: &mut Access) {
+        access.reads.push(TypeId::of::<T>());
     }
+    fn component_id(world: &World) -> Option<ComponentId> {
+        world.component_id::<T>()
+    }
+    fn iter(col: &mut Box<dyn Column>) -> impl Iterator<Item = &T> {
+        col.as_any()
+            .downcast_ref::<TypedColumn<T>>()
+            .expect("tipe kolom tak cocok")
+            .0
+            .iter()
+    }
+}
 
-    fn each(world: &mut World, mut f: impl FnMut(Self::Item<'_>)) {
-        for pair in world.query_pair::<A, B>() {
-            f(pair);
+#[allow(private_interfaces)]
+impl<T: Component> QueryTerm for &mut T {
+    type Item<'w> = &'w mut T;
+    fn access(access: &mut Access) {
+        access.writes.push(TypeId::of::<T>());
+    }
+    fn component_id(world: &World) -> Option<ComponentId> {
+        world.component_id::<T>()
+    }
+    fn iter(col: &mut Box<dyn Column>) -> impl Iterator<Item = &mut T> {
+        col.as_any_mut()
+            .downcast_mut::<TypedColumn<T>>()
+            .expect("tipe kolom tak cocok")
+            .0
+            .iter_mut()
+    }
+}
+
+/// Menolak query di mana dua term merujuk komponen yang sama (alias `&mut`),
+/// dengan pesan yang menyebut komponen (STD-0008).
+fn assert_no_alias(world: &World, cids: &[ComponentId]) {
+    for (i, &c) in cids.iter().enumerate() {
+        if cids[..i].contains(&c) {
+            panic!(
+                "{}",
+                EcsError::QueryConflict {
+                    component: world.component_name(c),
+                }
+            );
         }
     }
 }
 
-impl<A: Component, B: Component> QueryData for (&A, &B) {
-    type Item<'w> = (&'w A, &'w B);
+/// Menghasilkan `impl QueryData` untuk tuple dengan arity tertentu.
+macro_rules! impl_query_tuple {
+    ($($T:ident $cid:ident $var:ident),+) => {
+        impl<$($T: QueryTerm),+> QueryData for ($($T,)+) {
+            type Item<'w> = ($($T::Item<'w>,)+);
 
-    fn access() -> Access {
-        Access::new().with_read::<A>().with_read::<B>()
-    }
+            fn access() -> Access {
+                let mut access = Access::new();
+                $(<$T as QueryTerm>::access(&mut access);)+
+                access
+            }
 
-    fn each(world: &mut World, mut f: impl FnMut(Self::Item<'_>)) {
-        for pair in world.query_pair_ref::<A, B>() {
-            f(pair);
+            fn each(world: &mut World, mut f: impl FnMut(Self::Item<'_>)) {
+                let ($(::core::option::Option::Some($cid),)+) =
+                    ($(<$T as QueryTerm>::component_id(world),)+)
+                else {
+                    return;
+                };
+                let cids = [$($cid),+];
+                assert_no_alias(world, &cids);
+
+                for archetype in world.archetypes_mut() {
+                    let idxs = [$(archetype.column_index($cid)),+];
+                    if idxs.iter().any(::core::option::Option::is_none) {
+                        continue;
+                    }
+                    let cols = idxs.map(|o| o.unwrap());
+                    let [$($var),+] = archetype.columns_disjoint_mut(cols);
+                    let ($(mut $var,)+) = ($(<$T as QueryTerm>::iter($var),)+);
+                    loop {
+                        match ($($var.next(),)+) {
+                            ($(::core::option::Option::Some($var),)+) => f(($($var,)+)),
+                            _ => break,
+                        }
+                    }
+                }
+            }
         }
-    }
+    };
 }
+
+impl_query_tuple!(A ca va, B cb vb);
+impl_query_tuple!(A ca va, B cb vb, C cc vc);
+impl_query_tuple!(A ca va, B cb vb, C cc vc, D cd vd);
+impl_query_tuple!(A ca va, B cb vb, C cc vc, D cd vd, E ce ve);
+impl_query_tuple!(A ca va, B cb vb, C cc vc, D cd vd, E ce ve, F cf vf);
 
 #[cfg(test)]
 mod tests {
@@ -191,11 +286,11 @@ mod tests {
 
     #[test]
     fn ref_menyimpulkan_baca_ref_mut_menyimpulkan_tulis() {
-        let a = <&Pos>::access();
+        let a = <&Pos as QueryData>::access();
         assert!(a.reads.contains(&TypeId::of::<Pos>()));
         assert!(a.writes.is_empty());
 
-        let b = <&mut Pos>::access();
+        let b = <&mut Pos as QueryData>::access();
         assert!(b.writes.contains(&TypeId::of::<Pos>()));
         assert!(b.reads.is_empty());
     }
