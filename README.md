@@ -16,7 +16,7 @@ Dua pendirian yang membedakannya:
 ## Contoh
 
 ```rust
-use rust_ecs::{Schedule, System, World};
+use arke::{Schedule, System, World};
 
 #[derive(Debug, PartialEq)]
 struct Position(i32, i32);

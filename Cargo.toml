@@ -1,5 +1,5 @@
 [package]
-name = "rust-ecs"
+name = "arke"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
@@ -10,7 +10,7 @@ keywords = ["ecs", "entity-component-system", "deterministic", "gamedev", "simul
 categories = ["data-structures", "game-development"]
 
 [lib]
-name = "rust_ecs"
+name = "arke"
 
 # Standalone core: TIDAK ADA dependensi eksternal (STD-0003).
 # Integrasi eksternal, bila ada nanti, hidup di crate/feature adapter terpisah.

@@ -3,7 +3,7 @@
 
 #![forbid(unsafe_code)]
 
-use rust_ecs::{Serialize, Snapshot, Value, World};
+use arke::{Serialize, Snapshot, Value, World};
 
 #[derive(PartialEq, Debug, Clone)]
 struct Position {

@@ -3,7 +3,7 @@
 
 #![forbid(unsafe_code)]
 
-use rust_ecs::{Schedule, System, World};
+use arke::{Schedule, System, World};
 
 #[derive(PartialEq, Debug)]
 struct Position(i32);

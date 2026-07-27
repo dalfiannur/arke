@@ -4,7 +4,7 @@
 
 #![forbid(unsafe_code)]
 
-use rust_ecs::World;
+use arke::World;
 
 #[derive(Debug, PartialEq)]
 struct Position(i32, i32);

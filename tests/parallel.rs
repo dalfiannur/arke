@@ -7,7 +7,7 @@
 
 #![forbid(unsafe_code)]
 
-use rust_ecs::World;
+use arke::World;
 
 #[derive(PartialEq, Debug)]
 struct N(u64);
