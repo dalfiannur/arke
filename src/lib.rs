@@ -14,17 +14,19 @@
 //!
 //! ## Peta modul (Milestone M-1)
 //!
-//! | Modul | Tanggung jawab | Status |
-//! | --- | --- | --- |
-//! | [`entity`] | `Entity` sebagai generational index | kontrak tersedia |
-//! | [`component`] | Tipe komponen & identitasnya | kontrak tersedia |
-//! | [`world`] | Otoritas atas entity, komponen, resource | dalam pengerjaan |
-//! | `storage` | Kolom kontigu bertipe (`unsafe` internal dikurung di sini) | menyusul |
-//! | `archetype` | Tabel per-kombinasi-komponen | menyusul |
-//! | `query` | Akses berpola & terverifikasi atas komponen | menyusul |
+//! | Modul | Tanggung jawab |
+//! | --- | --- |
+//! | [`entity`] | `Entity` sebagai generational index |
+//! | [`component`] | Tipe komponen & identitasnya (registrasi otomatis) |
+//! | [`world`] | Otoritas atas entity/komponen + `spawn`/`insert`/`get`/`remove`/query |
+//! | `storage` (privat) | Kolom kontigu bertipe (`TypedColumn`) |
+//! | `archetype` (privat) | Tabel per-kombinasi-komponen |
 //!
-//! Modul yang berstatus "menyusul" ditambahkan saat implementasi mencapainya
-//! (dikembangkan secara test-first).
+//! Query M-1 hadir sebagai method pada [`World`] ([`World::query`],
+//! [`World::query_mut`], [`World::query_pair`]). Seluruh implementasi M-1
+//! **bebas `unsafe`**: pemisahan kolom disjoint memakai `split_at_mut`. Trait
+//! `QueryData` generik atas tuple sembarang-arity direncanakan untuk milestone
+//! berikutnya.
 
 pub mod component;
 pub mod entity;

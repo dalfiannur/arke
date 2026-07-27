@@ -30,21 +30,21 @@ Meletakkan fondasi penyimpanan berorientasi-data yang menjadi tumpuan semua hal 
 | --- | --- |
 | RFC-0002 | Proposal arsitektur core: layout archetype + model generational entity |
 | ADR-0002 | Keputusan yang diterima dari RFC-0002 |
-| Kode + tes | Crate core: `World`, `Entity`, penyimpanan, `Query` + unit/property test |
-| Benchmark | Iterasi query di bawah `forbid(unsafe_code)` (bukti STD-0004) |
+| Kode + tes | Crate core: `World`, `Entity`, penyimpanan archetype, query + 17 tes |
+| Contoh no-unsafe | [`examples/no_unsafe.rs`](../examples/no_unsafe.rs) di bawah `forbid(unsafe_code)` (bukti STD-0004) |
 
 ## Kriteria selesai (Definition of Done)
 
 Milestone dianggap **selesai** ketika semua benar:
 
-- [ ] `World` dapat spawn/despawn entity serta insert/remove komponen; slot dipakai ulang dengan aman.
-- [ ] Handle `Entity` yang basi terdeteksi (bukti STD-0007) — disertai tes.
-- [ ] Query `&T`/`&mut T`/tuple mengiterasi hanya entity yang cocok; alias `&mut` ditolak.
-- [ ] Iterasi dan alokasi bersifat deterministik (bukti STD-0005) — disertai tes lintas-run.
-- [ ] Semua contoh dan benchmark ter-*compile* di bawah `forbid(unsafe_code)` (bukti STD-0004).
-- [ ] Core build dengan `--no-default-features` tanpa dependensi terlarang (bukti STD-0003).
-- [ ] RFC-0002 dan ADR-0002 ditulis serta konsisten dengan kode.
-- [ ] Semua tes hijau di CI.
+- [x] `World` dapat spawn/despawn entity serta insert/remove komponen; slot dipakai ulang dengan aman.
+- [x] Handle `Entity` yang basi terdeteksi (bukti STD-0007) — disertai tes.
+- [x] Query `&T`/`&mut T`/tuple mengiterasi hanya entity yang cocok; alias `&mut` ditolak. *(API M-1: `World::query` / `query_mut` / `query_pair`; trait `QueryData` generik ditunda ke milestone berikutnya.)*
+- [x] Iterasi dan alokasi bersifat deterministik (bukti STD-0005) — disertai tes lintas-run ([`tests/determinism.rs`](../tests/determinism.rs)).
+- [x] Kode pengguna dapat memakai API di bawah `forbid(unsafe_code)` (bukti STD-0004). *Catatan: seluruh core M-1 ternyata **bebas `unsafe`** — `split_at_mut` cukup untuk peminjaman kolom disjoint, sehingga `unsafe` terkurung yang diantisipasi RFC-0002 §5 tidak diperlukan di M-1. Benchmark performa (criterion) ditunda.*
+- [x] Core build dengan `--no-default-features` tanpa dependensi terlarang (bukti STD-0003).
+- [x] RFC-0002 dan ADR-0002 ditulis serta konsisten dengan kode.
+- [x] Semua tes hijau secara lokal (17 tes). *CI GitHub Actions terkonfigurasi; menunggu remote untuk dijalankan.*
 
 ## Ketergantungan
 

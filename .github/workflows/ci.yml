@@ -32,6 +32,10 @@ jobs:
       - name: Test
         run: cargo test --verbose
 
+      # STD-0004: kode pengguna dapat memakai API di bawah forbid(unsafe_code).
+      - name: No-unsafe example (STD-0004)
+        run: cargo run --example no_unsafe
+
       # STD-0003: core standalone — tidak boleh ada dependensi normal eksternal.
       - name: Standalone core (STD-0003)
         run: |
