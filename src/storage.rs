@@ -1,19 +1,26 @@
 //! Kolom komponen yang kontigu & bertipe, di-*type-erase* di balik trait
 //! [`Column`] (RFC-0002 §3).
 //!
-//! Setiap kolom menyimpan nilai satu tipe komponen dalam `Vec<T>` yang kontigu.
-//! Query men-*downcast* kolom **sekali per archetype** menjadi `&[T]`/`&mut [T]`,
-//! sehingga iterasi berjalan atas slice bertipe konkret — jalur ergonomis
-//! sekaligus jalur cepat (invarian §2). Trait `Column` sendiri hanya dipakai
-//! untuk menyimpan kolom-kolom heterogen dalam satu `Vec`.
+//! Data kolom disimpan di balik [`UnsafeCell`] (RFC-0015) agar `&mut [T]`
+//! interior dapat dibentuk dari `&World` bersama — prasyarat eksekutor paralel
+//! tingkat-sistem. **Seluruh `unsafe` proyek dikurung di modul ini.**
+//!
+//! Kontrak keamanan (ditegakkan pemanggil crate):
+//! - Jalur ber-`&mut self` ([`TypedColumn::data_mut`]) bersifat **aman** —
+//!   `UnsafeCell::get_mut` menjamin eksklusivitas.
+//! - Jalur baca ber-`&self` ([`TypedColumn::data`]) sound karena dalam eksekusi
+//!   **serial** hanya satu akses aktif, dan dalam **paralel** penjadwal menjamin
+//!   akses disjoint (tak ada penulis komponen yang sama).
+
+#![allow(unsafe_code)]
 
 use std::any::Any;
+use std::cell::UnsafeCell;
 
 /// Kolom komponen yang tersimpan dalam sebuah archetype.
 ///
 /// Type-erased agar archetype dapat menyimpan kolom dari tipe-tipe berbeda
-/// dalam satu koleksi. Operasi bertipe (baca/tulis nilai) dilakukan lewat
-/// [`Column::as_any`]/[`Column::as_any_mut`] lalu `downcast`.
+/// dalam satu koleksi.
 pub(crate) trait Column: Any {
     /// Referensi `Any` untuk downcast ke `TypedColumn<T>` konkret.
     fn as_any(&self) -> &dyn Any;
@@ -27,13 +34,27 @@ pub(crate) trait Column: Any {
     fn swap_remove(&mut self, row: usize);
 }
 
-/// Kolom konkret untuk komponen bertipe `T`.
-pub(crate) struct TypedColumn<T>(pub(crate) Vec<T>);
+/// Kolom konkret untuk komponen bertipe `T`, data di balik `UnsafeCell`.
+pub(crate) struct TypedColumn<T>(UnsafeCell<Vec<T>>);
 
 impl<T> TypedColumn<T> {
     /// Membuat kolom kosong.
     pub(crate) fn new() -> Self {
-        Self(Vec::new())
+        Self(UnsafeCell::new(Vec::new()))
+    }
+
+    /// Akses **mutabel** ke data (aman — butuh `&mut self`).
+    pub(crate) fn data_mut(&mut self) -> &mut Vec<T> {
+        self.0.get_mut()
+    }
+
+    /// Akses **baca** ke data lewat `&self`.
+    ///
+    /// Aman dipakai crate selama tak ada `&mut` konkuren ke data yang sama
+    /// (dijamin oleh eksekusi serial atau disjoint-nya penjadwal, RFC-0015).
+    pub(crate) fn data(&self) -> &Vec<T> {
+        // SAFETY: lihat kontrak modul & doc di atas — tak ada `&mut` beralias.
+        unsafe { &*self.0.get() }
     }
 }
 
@@ -51,10 +72,11 @@ impl<T: 'static> Column for TypedColumn<T> {
             .as_any_mut()
             .downcast_mut::<TypedColumn<T>>()
             .expect("push_from: kolom sumber bertipe berbeda");
-        self.0.push(src.0.swap_remove(row));
+        let value = src.data_mut().swap_remove(row);
+        self.data_mut().push(value);
     }
 
     fn swap_remove(&mut self, row: usize) {
-        self.0.swap_remove(row);
+        self.data_mut().swap_remove(row);
     }
 }

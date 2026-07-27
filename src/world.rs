@@ -250,16 +250,16 @@ impl World {
                 let ia = arch.column_index(ca?)?;
                 let ib = arch.column_index(cb?)?;
                 let (col_a, col_b) = arch.columns_two_mut(ia, ib);
-                let a_slice: &[A] = &col_a
+                let a_slice: &[A] = col_a
                     .as_any()
                     .downcast_ref::<TypedColumn<A>>()
                     .expect("tipe kolom A tak cocok")
-                    .0;
-                let b_slice: &mut [B] = &mut col_b
+                    .data();
+                let b_slice: &mut [B] = col_b
                     .as_any_mut()
                     .downcast_mut::<TypedColumn<B>>()
                     .expect("tipe kolom B tak cocok")
-                    .0;
+                    .data_mut();
                 Some(a_slice.iter().zip(b_slice.iter_mut()))
             })
             .flatten()
@@ -327,7 +327,7 @@ impl World {
             .column(col)
             .as_any()
             .downcast_ref::<TypedColumn<T>>()?
-            .0
+            .data()
             .get(location.row)
     }
 

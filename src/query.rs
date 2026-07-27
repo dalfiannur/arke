@@ -190,7 +190,7 @@ impl<T: Component> QueryTerm for &T {
         col.as_any()
             .downcast_ref::<TypedColumn<T>>()
             .expect("tipe kolom tak cocok")
-            .0
+            .data()
             .iter()
     }
 }
@@ -208,7 +208,7 @@ impl<T: Component> QueryTerm for &mut T {
         col.as_any_mut()
             .downcast_mut::<TypedColumn<T>>()
             .expect("tipe kolom tak cocok")
-            .0
+            .data_mut()
             .iter_mut()
     }
 }

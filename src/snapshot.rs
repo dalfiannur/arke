@@ -47,7 +47,7 @@ impl SerdeRegistry {
                         .as_any()
                         .downcast_ref::<TypedColumn<T>>()
                         .expect("tipe kolom tak cocok saat snapshot");
-                    typed.0[row].to_value()
+                    typed.data()[row].to_value()
                 },
             },
         );

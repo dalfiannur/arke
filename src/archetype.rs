@@ -57,20 +57,20 @@ impl Archetype {
     /// Downcast dilakukan **sekali per archetype**; iterasi berlangsung atas
     /// `&[T]` konkret (RFC-0002 §4).
     pub(crate) fn slice<T: 'static>(&self, col: usize) -> &[T] {
-        &self.columns[col]
+        self.columns[col]
             .as_any()
             .downcast_ref::<TypedColumn<T>>()
             .expect("slice: tipe kolom tak cocok")
-            .0
+            .data()
     }
 
     /// Slice mutabel bertipe untuk kolom pada posisi `col`.
     pub(crate) fn slice_mut<T: 'static>(&mut self, col: usize) -> &mut [T] {
-        &mut self.columns[col]
+        self.columns[col]
             .as_any_mut()
             .downcast_mut::<TypedColumn<T>>()
             .expect("slice_mut: tipe kolom tak cocok")
-            .0
+            .data_mut()
     }
 
     /// Meminjam `N` kolom berbeda secara mutabel sekaligus (RFC-0013).
@@ -118,7 +118,7 @@ impl Archetype {
             .as_any_mut()
             .downcast_mut::<TypedColumn<T>>()
             .expect("push_component: tipe kolom tak cocok")
-            .0
+            .data_mut()
             .push(value);
     }
 
@@ -161,7 +161,7 @@ impl Archetype {
                         .as_any_mut()
                         .downcast_mut::<TypedColumn<T>>()
                         .expect("tipe kolom tak cocok")
-                        .0
+                        .data_mut()
                         .swap_remove(row),
                 );
             } else {
@@ -196,7 +196,7 @@ impl Archetype {
             .as_any_mut()
             .downcast_mut::<TypedColumn<T>>()
             .expect("tipe kolom tak cocok")
-            .0
+            .data_mut()
             .swap_remove(row);
         self.entities.swap_remove(row);
         (value, self.entities.get(row).copied())
