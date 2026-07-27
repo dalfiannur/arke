@@ -30,3 +30,4 @@ ADR bersifat **immutable** setelah Accepted: jangan menulis ulang isinya. Jika k
 | [ADR-0004](ADR-0004-data-parallel-iteration.md) | Iterasi data-parallel yang aman | Accepted |
 | [ADR-0005](ADR-0005-type-based-systems.md) | Sistem berbasis-tipe dengan akses tersimpul | Accepted |
 | [ADR-0006](ADR-0006-defer-system-parallelism.md) | Menunda paralelisme tingkat-sistem hingga `UnsafeCell` + miri | Accepted |
+| [ADR-0007](ADR-0007-world-snapshot.md) | Snapshot & serialisasi World | Accepted |

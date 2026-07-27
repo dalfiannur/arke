@@ -39,3 +39,4 @@ Draft → Discussion → Accepted | Rejected | Superseded
 | [RFC-0004](RFC-0004-data-parallel-iteration.md) | Iterasi data-parallel yang aman | Accepted |
 | [RFC-0005](RFC-0005-type-based-systems.md) | Sistem berbasis-tipe dengan akses tersimpul | Accepted |
 | [RFC-0006](RFC-0006-system-level-parallelism.md) | Paralelisme tingkat-sistem (analisis & penundaan) | Accepted (ditunda) |
+| [RFC-0007](RFC-0007-world-snapshot.md) | Snapshot & serialisasi World | Accepted |
