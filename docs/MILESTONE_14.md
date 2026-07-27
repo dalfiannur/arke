@@ -21,12 +21,12 @@ Mengubah penyimpanan kolom ke `UnsafeCell` agar `&mut` interior dapat dibentuk d
 
 ## Kriteria selesai (Definition of Done)
 
-- [ ] `TypedColumn` memakai `UnsafeCell`; semua akses kolom terupdate.
-- [ ] Perilaku identik: seluruh 65 tes tetap hijau.
-- [ ] `unsafe` **hanya** di modul `storage`; modul lain & jalur pengguna tetap tanpa `unsafe` (STD-0004).
-- [ ] Setiap blok `unsafe` menyertakan argumen keamanan.
-- [ ] Job **miri** CI hijau.
-- [ ] RFC-0015 & ADR-0015 ditulis; RN-0001 di-*graduate*.
+- [x] `TypedColumn` memakai `UnsafeCell`; semua akses kolom terupdate.
+- [x] Perilaku identik: seluruh 65 tes tetap hijau.
+- [x] `unsafe` **hanya** satu blok di modul `storage`; modul lain & jalur pengguna tetap tanpa `unsafe` (STD-0004) — dikonfirmasi grep.
+- [x] Blok `unsafe` menyertakan argumen keamanan (kontrak modul + `// SAFETY`).
+- [x] Job **miri** CI hijau — soundness `data()` terverifikasi.
+- [x] RFC-0015 & ADR-0015 ditulis; RN-0001 di-*graduate*.
 
 ## Ketergantungan
 
