@@ -47,6 +47,44 @@ impl Archetype {
         &*self.columns[col]
     }
 
+    /// Slice bertipe untuk kolom pada posisi `col`.
+    ///
+    /// Downcast dilakukan **sekali per archetype**; iterasi berlangsung atas
+    /// `&[T]` konkret (RFC-0002 §4).
+    pub(crate) fn slice<T: 'static>(&self, col: usize) -> &[T] {
+        &self.columns[col]
+            .as_any()
+            .downcast_ref::<TypedColumn<T>>()
+            .expect("slice: tipe kolom tak cocok")
+            .0
+    }
+
+    /// Slice mutabel bertipe untuk kolom pada posisi `col`.
+    pub(crate) fn slice_mut<T: 'static>(&mut self, col: usize) -> &mut [T] {
+        &mut self.columns[col]
+            .as_any_mut()
+            .downcast_mut::<TypedColumn<T>>()
+            .expect("slice_mut: tipe kolom tak cocok")
+            .0
+    }
+
+    /// Meminjam dua kolom berbeda secara mutabel sekaligus, dikembalikan dalam
+    /// urutan `(i, j)`. Aman via `split_at_mut` — tanpa `unsafe`.
+    pub(crate) fn columns_two_mut(
+        &mut self,
+        i: usize,
+        j: usize,
+    ) -> (&mut Box<dyn Column>, &mut Box<dyn Column>) {
+        assert_ne!(i, j, "columns_two_mut membutuhkan kolom berbeda");
+        if i < j {
+            let (left, right) = self.columns.split_at_mut(j);
+            (&mut left[i], &mut right[0])
+        } else {
+            let (left, right) = self.columns.split_at_mut(i);
+            (&mut right[0], &mut left[j])
+        }
+    }
+
     /// Menambahkan baris untuk `entity` dan mengembalikan indeks barisnya.
     ///
     /// Kolom-kolom diisi terpisah oleh pemanggil (yang memegang nilai bertipe).
@@ -122,6 +160,16 @@ impl Archetype {
             taken.expect("komponen `removed` ada di archetype"),
             self.entities.get(row).copied(),
         )
+    }
+
+    /// Menghapus baris `row` (membuang semua komponennya) via `swap_remove`,
+    /// mengembalikan entity yang tergeser ke `row`, bila ada.
+    pub(crate) fn swap_remove_row(&mut self, row: usize) -> Option<Entity> {
+        for col in &mut self.columns {
+            col.swap_remove(row);
+        }
+        self.entities.swap_remove(row);
+        self.entities.get(row).copied()
     }
 
     /// Menghapus baris `row` dari archetype berkolom-tunggal, mengembalikan

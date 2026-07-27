@@ -23,6 +23,8 @@ pub(crate) trait Column: Any {
     ///
     /// `src` harus kolom bertipe sama; nilainya diambil via `swap_remove`.
     fn push_from(&mut self, src: &mut dyn Column, row: usize);
+    /// Membuang nilai pada `row` via `swap_remove`.
+    fn swap_remove(&mut self, row: usize);
 }
 
 /// Kolom konkret untuk komponen bertipe `T`.
@@ -50,5 +52,9 @@ impl<T: 'static> Column for TypedColumn<T> {
             .downcast_mut::<TypedColumn<T>>()
             .expect("push_from: kolom sumber bertipe berbeda");
         self.0.push(src.0.swap_remove(row));
+    }
+
+    fn swap_remove(&mut self, row: usize) {
+        self.0.swap_remove(row);
     }
 }

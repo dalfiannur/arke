@@ -8,7 +8,7 @@
 //! archetype — ditambahkan secara test-first selama Milestone M-1.
 
 use crate::archetype::Archetype;
-use crate::component::{Component, ComponentRegistry};
+use crate::component::{Component, ComponentId, ComponentRegistry};
 use crate::entity::Entity;
 use crate::storage::TypedColumn;
 
@@ -74,9 +74,15 @@ impl World {
             return;
         }
         let index = entity.index();
+        // Bersihkan baris komponen entity dari archetype-nya, bila ada.
+        if let Some(loc) = self.entities[index as usize].location {
+            let moved = self.archetypes[loc.archetype].swap_remove_row(loc.row);
+            self.fix_swapped(moved, loc.archetype, loc.row);
+        }
         let meta = &mut self.entities[index as usize];
         meta.alive = false;
         meta.generation += 1;
+        meta.location = None;
         self.free.push(index);
     }
 
@@ -179,6 +185,73 @@ impl World {
         Some(value)
     }
 
+    /// Mengiterasi referensi ke komponen `T` pada setiap entity yang memilikinya.
+    ///
+    /// Urutan iterasi deterministik: archetype dalam urutan pembuatan, baris
+    /// `0..len` (STD-0005). Downcast kolom dilakukan sekali per archetype.
+    pub fn query<T: Component>(&self) -> impl Iterator<Item = &T> {
+        let cid = self.registry.get::<T>();
+        self.archetypes
+            .iter()
+            .filter_map(move |arch| {
+                let col = arch.column_index(cid?)?;
+                Some(arch.slice::<T>(col).iter())
+            })
+            .flatten()
+    }
+
+    /// Mengiterasi referensi mutabel ke komponen `T` pada setiap entity yang
+    /// memilikinya. Urutan deterministik seperti [`World::query`].
+    pub fn query_mut<T: Component>(&mut self) -> impl Iterator<Item = &mut T> {
+        let cid = self.registry.get::<T>();
+        self.archetypes
+            .iter_mut()
+            .filter_map(move |arch| {
+                let col = arch.column_index(cid?)?;
+                Some(arch.slice_mut::<T>(col).iter_mut())
+            })
+            .flatten()
+    }
+
+    /// Mengiterasi pasangan `(&A, &mut B)` pada setiap entity yang memiliki
+    /// **kedua** komponen. Membaca `A`, memodifikasi `B`.
+    ///
+    /// # Panics
+    ///
+    /// Panik bila `A` dan `B` adalah tipe komponen yang sama — itu berarti alias
+    /// `&mut` ke komponen yang sama, yang ditolak (invarian *paralelisme aman*).
+    ///
+    /// Kedua kolom dipinjam disjoint via `split_at_mut` — tanpa `unsafe`.
+    pub fn query_pair<A: Component, B: Component>(&mut self) -> impl Iterator<Item = (&A, &mut B)> {
+        let ca = self.registry.get::<A>();
+        let cb = self.registry.get::<B>();
+        if let (Some(a), Some(b)) = (ca, cb) {
+            assert_ne!(
+                a, b,
+                "query_pair: A dan B tidak boleh komponen yang sama (alias &mut)"
+            );
+        }
+        self.archetypes
+            .iter_mut()
+            .filter_map(move |arch| {
+                let ia = arch.column_index(ca?)?;
+                let ib = arch.column_index(cb?)?;
+                let (col_a, col_b) = arch.columns_two_mut(ia, ib);
+                let a_slice: &[A] = &col_a
+                    .as_any()
+                    .downcast_ref::<TypedColumn<A>>()
+                    .expect("tipe kolom A tak cocok")
+                    .0;
+                let b_slice: &mut [B] = &mut col_b
+                    .as_any_mut()
+                    .downcast_mut::<TypedColumn<B>>()
+                    .expect("tipe kolom B tak cocok")
+                    .0;
+                Some(a_slice.iter().zip(b_slice.iter_mut()))
+            })
+            .flatten()
+    }
+
     /// Mengembalikan referensi ke komponen `T` milik `entity`, bila ada.
     pub fn get<T: Component>(&self, entity: Entity) -> Option<&T> {
         if !self.contains(entity) {
@@ -198,7 +271,7 @@ impl World {
 
     /// Menemukan archetype dengan himpunan komponen `ids` (terurut), atau
     /// membuatnya bila belum ada. Mengembalikan indeksnya.
-    fn find_or_create_archetype(&mut self, ids: &[crate::component::ComponentId]) -> usize {
+    fn find_or_create_archetype(&mut self, ids: &[ComponentId]) -> usize {
         if let Some(i) = self
             .archetypes
             .iter()
@@ -341,5 +414,94 @@ mod tests {
         assert_eq!(world.remove::<Position>(e), Some(Position(7, 8)));
         assert_eq!(world.get::<Position>(e), None);
         assert!(world.contains(e));
+    }
+
+    #[test]
+    fn query_ref_mengiterasi_semua_pemilik_komponen() {
+        let mut world = World::new();
+        let a = world.spawn();
+        world.insert(a, Position(1, 1));
+        let b = world.spawn();
+        world.insert(b, Position(2, 2));
+        let c = world.spawn();
+        world.insert(c, Velocity(9, 9)); // bukan pemilik Position
+
+        let mut xs: Vec<i32> = world.query::<Position>().map(|p| p.0).collect();
+        xs.sort();
+        assert_eq!(xs, vec![1, 2]);
+    }
+
+    #[test]
+    fn query_tidak_menyertakan_entity_yang_didespawn() {
+        let mut world = World::new();
+        let a = world.spawn();
+        world.insert(a, Position(1, 1));
+        let b = world.spawn();
+        world.insert(b, Position(2, 2));
+
+        world.despawn(a);
+
+        let xs: Vec<i32> = world.query::<Position>().map(|p| p.0).collect();
+        assert_eq!(xs, vec![2]);
+        // Entity b tetap terbaca dengan benar setelah slot a dibersihkan.
+        assert_eq!(world.get::<Position>(b), Some(&Position(2, 2)));
+    }
+
+    #[test]
+    fn query_mut_memodifikasi_komponen() {
+        let mut world = World::new();
+        let a = world.spawn();
+        world.insert(a, Position(1, 1));
+        let b = world.spawn();
+        world.insert(b, Position(2, 2));
+
+        for p in world.query_mut::<Position>() {
+            p.0 += 10;
+        }
+
+        let mut xs: Vec<i32> = world.query::<Position>().map(|p| p.0).collect();
+        xs.sort();
+        assert_eq!(xs, vec![11, 12]);
+    }
+
+    #[test]
+    fn query_pair_membaca_a_dan_memodifikasi_b_hanya_pada_yang_cocok() {
+        let mut world = World::new();
+        let e = world.spawn();
+        world.insert(e, Position(1, 2));
+        world.insert(e, Velocity(10, 20));
+        let f = world.spawn();
+        world.insert(f, Velocity(5, 5)); // tanpa Position → tak cocok
+
+        for (pos, vel) in world.query_pair::<Position, Velocity>() {
+            vel.0 += pos.0;
+        }
+
+        assert_eq!(world.get::<Velocity>(e), Some(&Velocity(11, 20)));
+        assert_eq!(world.get::<Velocity>(f), Some(&Velocity(5, 5)));
+    }
+
+    // Menolak alias &mut ke komponen yang sama (invarian paralelisme aman).
+    #[test]
+    #[should_panic(expected = "alias")]
+    fn query_pair_menolak_alias_ke_komponen_sama() {
+        let mut world = World::new();
+        let e = world.spawn();
+        world.insert(e, Position(1, 1));
+        let _ = world.query_pair::<Position, Position>().count();
+    }
+
+    // STD-0005 (guard): urutan iterasi query stabil antar-run.
+    #[test]
+    fn urutan_iterasi_query_deterministik() {
+        fn run() -> Vec<i32> {
+            let mut world = World::new();
+            for i in 0..5 {
+                let e = world.spawn();
+                world.insert(e, Position(i, i));
+            }
+            world.query::<Position>().map(|p| p.0).collect()
+        }
+        assert_eq!(run(), run());
     }
 }
