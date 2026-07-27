@@ -20,14 +20,14 @@ Meng-cache archetype yang cocok untuk sebuah query (di-update inkremental) agar 
 
 ## Kriteria selesai (Definition of Done)
 
-- [ ] `each_cached` memberi hasil identik dengan `each` (tanpa cache) — teruji.
-- [ ] Menjalankan query berulang dengan `QueryState` yang sama memberi hasil konsisten — teruji.
-- [ ] Archetype baru (dibuat antar-run) tertangkap oleh scan inkremental — teruji.
-- [ ] `System::each` yang dijalankan berkali-kali dengan entity baru memproses entity baru (cache ter-update) — teruji.
-- [ ] Determinisme & urutan iterasi identik dengan sebelumnya (STD-0005).
-- [ ] Tetap **tanpa `unsafe` baru**; jalur pengguna aman.
-- [ ] RFC-0017 & ADR-0017 ditulis serta konsisten dengan kode.
-- [ ] Semua tes + miri hijau.
+- [x] `each_cached` memberi hasil identik dengan `each` (tanpa cache) — teruji (`each_cached_identik_dengan_each_tanpa_cache`).
+- [x] Menjalankan query berulang dengan `QueryState` yang sama memberi hasil konsisten — teruji (idem).
+- [x] Archetype baru (dibuat antar-run) tertangkap oleh scan inkremental — teruji (`each_cached_menangkap_archetype_baru_inkremental`).
+- [x] `System::each` yang dijalankan berkali-kali dengan entity baru memproses entity baru (cache ter-update) — teruji (`system_each_cache_menangkap_entity_dan_archetype_baru_antar_run`).
+- [x] Determinisme & urutan iterasi identik dengan sebelumnya (STD-0005) — 68 tes hijau, tak berubah.
+- [x] Tetap **tanpa `unsafe` baru**; jalur pengguna aman (jalur `unsafe` terkurung tak tersentuh).
+- [x] RFC-0017 & ADR-0017 ditulis serta konsisten dengan kode.
+- [x] Semua tes + miri hijau (miri di CI).
 
 ## Ketergantungan
 

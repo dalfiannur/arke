@@ -79,6 +79,21 @@ fn shares(a: &[TypeId], b: &[TypeId]) -> bool {
 
 use crate::World;
 
+/// Cache archetype yang cocok untuk sebuah query (RFC-0017).
+///
+/// Diperluas **inkremental**: karena archetype bersifat append-only dan
+/// set-komponennya immutable, sebuah archetype yang cocok tetap cocok selamanya
+/// — cache hanya perlu **diperluas** saat archetype baru muncul, tak pernah
+/// diinvalidasi. Simpan lintas-run (mis. di sebuah [`System`](crate::System))
+/// agar query berulang jadi O(archetype cocok), bukan O(semua archetype).
+#[derive(Default)]
+pub struct QueryState {
+    /// Indeks archetype (di [`World::archetypes`](crate::World)) yang cocok.
+    matched: Vec<usize>,
+    /// Jumlah archetype yang sudah diperiksa (batas scan inkremental).
+    scanned: usize,
+}
+
 /// Bentuk data yang dapat diquery, dengan akses tersimpul dari tipe (RFC-0005).
 ///
 /// Diterapkan untuk `&T`, `&mut T`, dan **tuple sembarang-arity** (2–8) dengan
@@ -92,8 +107,26 @@ pub trait QueryData {
     fn access() -> Access;
 
     /// Menerapkan `f` pada setiap entity yang cocok **dan** lolos filter `F`,
-    /// lewat `&World` **berbagi** (RFC-0016). Ini implementasi inti.
-    fn each_filtered_shared<F: QueryFilter>(world: &World, f: impl FnMut(Self::Item<'_>));
+    /// memakai `state` sebagai cache archetype yang di-scan **inkremental**
+    /// (RFC-0017). Ini implementasi inti.
+    ///
+    /// Alur: resolve `ComponentId` (bila komponen fetch/`With` belum terdaftar,
+    /// return tanpa memajukan `scanned`) → scan `archetype[state.scanned..]`,
+    /// tambahkan yang cocok ke `state.matched` → iterasi **hanya**
+    /// `state.matched`.
+    fn each_cached<F: QueryFilter>(
+        world: &World,
+        state: &mut QueryState,
+        f: impl FnMut(Self::Item<'_>),
+    );
+
+    /// Menerapkan `f` pada setiap entity yang cocok **dan** lolos filter `F`,
+    /// lewat `&World` **berbagi** (RFC-0016). Wrapper sekali-pakai atas
+    /// [`Self::each_cached`] dengan [`QueryState`] baru (memindai semua).
+    fn each_filtered_shared<F: QueryFilter>(world: &World, f: impl FnMut(Self::Item<'_>)) {
+        let mut state = QueryState::default();
+        Self::each_cached::<F>(world, &mut state, f);
+    }
 
     /// Seperti [`Self::each_filtered_shared`] tetapi dari `&mut World` eksklusif.
     fn each_filtered<F: QueryFilter>(world: &mut World, f: impl FnMut(Self::Item<'_>)) {
@@ -113,7 +146,7 @@ impl<T: Component> QueryData for &T {
         Access::new().with_read::<T>()
     }
 
-    fn each_filtered_shared<F: QueryFilter>(world: &World, mut f: impl FnMut(&T)) {
+    fn each_cached<F: QueryFilter>(world: &World, state: &mut QueryState, mut f: impl FnMut(&T)) {
         let Some(cid) = world.component_id::<T>() else {
             return;
         };
@@ -121,13 +154,18 @@ impl<T: Component> QueryData for &T {
             Some(v) => v,
             None => return,
         };
-        for archetype in world.archetypes() {
-            let Some(col) = archetype.column_index(cid) else {
-                continue;
-            };
-            if !filter_matches(archetype, &with, &without) {
-                continue;
+        let archetypes = world.archetypes();
+        for (i, archetype) in archetypes.iter().enumerate().skip(state.scanned) {
+            if archetype.column_index(cid).is_some() && filter_matches(archetype, &with, &without) {
+                state.matched.push(i);
             }
+        }
+        state.scanned = archetypes.len();
+        for &ai in &state.matched {
+            let archetype = &archetypes[ai];
+            let col = archetype
+                .column_index(cid)
+                .expect("archetype cocok memuat kolom");
             for item in <&T as QueryTerm>::iter_shared(archetype.column(col)) {
                 f(item);
             }
@@ -142,7 +180,11 @@ impl<T: Component> QueryData for &mut T {
         Access::new().with_write::<T>()
     }
 
-    fn each_filtered_shared<F: QueryFilter>(world: &World, mut f: impl FnMut(&mut T)) {
+    fn each_cached<F: QueryFilter>(
+        world: &World,
+        state: &mut QueryState,
+        mut f: impl FnMut(&mut T),
+    ) {
         let Some(cid) = world.component_id::<T>() else {
             return;
         };
@@ -150,13 +192,18 @@ impl<T: Component> QueryData for &mut T {
             Some(v) => v,
             None => return,
         };
-        for archetype in world.archetypes() {
-            let Some(col) = archetype.column_index(cid) else {
-                continue;
-            };
-            if !filter_matches(archetype, &with, &without) {
-                continue;
+        let archetypes = world.archetypes();
+        for (i, archetype) in archetypes.iter().enumerate().skip(state.scanned) {
+            if archetype.column_index(cid).is_some() && filter_matches(archetype, &with, &without) {
+                state.matched.push(i);
             }
+        }
+        state.scanned = archetypes.len();
+        for &ai in &state.matched {
+            let archetype = &archetypes[ai];
+            let col = archetype
+                .column_index(cid)
+                .expect("archetype cocok memuat kolom");
             for item in <&mut T as QueryTerm>::iter_shared(archetype.column(col)) {
                 f(item);
             }
@@ -345,8 +392,9 @@ macro_rules! impl_query_tuple {
                 access
             }
 
-            fn each_filtered_shared<Fil: QueryFilter>(
+            fn each_cached<Fil: QueryFilter>(
                 world: &World,
+                state: &mut QueryState,
                 mut f: impl FnMut(Self::Item<'_>),
             ) {
                 let ($(::core::option::Option::Some($cid),)+) =
@@ -361,15 +409,24 @@ macro_rules! impl_query_tuple {
                     ::core::option::Option::None => return,
                 };
 
-                for archetype in world.archetypes() {
-                    let idxs = [$(archetype.column_index($cid)),+];
-                    if idxs.iter().any(::core::option::Option::is_none) {
-                        continue;
+                let archetypes = world.archetypes();
+                for (i, archetype) in archetypes.iter().enumerate().skip(state.scanned) {
+                    let present = [$(archetype.column_index($cid)),+]
+                        .iter()
+                        .all(::core::option::Option::is_some);
+                    if present && filter_matches(archetype, &with, &without) {
+                        state.matched.push(i);
                     }
-                    if !filter_matches(archetype, &with, &without) {
-                        continue;
-                    }
-                    let [$($colidx),+] = idxs.map(|o| o.unwrap());
+                }
+                state.scanned = archetypes.len();
+
+                for &ai in &state.matched {
+                    let archetype = &archetypes[ai];
+                    let [$($colidx),+] = [$(
+                        archetype
+                            .column_index($cid)
+                            .expect("archetype cocok memuat kolom"),
+                    )+];
                     let ($(mut $var,)+) = (
                         $(<$T as QueryTerm>::iter_shared(archetype.column($colidx)),)+
                     );
@@ -395,6 +452,53 @@ impl_query_tuple!(A ca va ia, B cb vb ib, C cc vc ic, D cd vd id, E ce ve ie, F 
 mod tests {
     use super::*;
     use crate::World;
+
+    #[test]
+    fn each_cached_menangkap_archetype_baru_inkremental() {
+        let mut world = World::new();
+        let e1 = world.spawn();
+        world.insert(e1, Pos(1));
+
+        let mut state = QueryState::default();
+        let mut sum = 0;
+        <&Pos>::each_cached::<()>(&world, &mut state, |p| sum += p.0);
+        assert_eq!(sum, 1);
+
+        // Entity baru dengan komponen berbeda → archetype {Pos, Vel} baru.
+        let e2 = world.spawn();
+        world.insert(e2, Pos(10));
+        world.insert(e2, Vel(0));
+
+        let mut sum = 0;
+        <&Pos>::each_cached::<()>(&world, &mut state, |p| sum += p.0);
+        assert_eq!(sum, 11); // archetype baru tertangkap scan inkremental
+    }
+
+    #[test]
+    fn each_cached_identik_dengan_each_tanpa_cache() {
+        let mut world = World::new();
+        for i in 0..5 {
+            let e = world.spawn();
+            world.insert(e, Pos(i));
+            if i % 2 == 0 {
+                world.insert(e, Vel(i * 10));
+            }
+        }
+
+        let mut lewat_each = Vec::new();
+        <&Pos>::each(&mut world, |p| lewat_each.push(p.0));
+
+        let mut lewat_cache = Vec::new();
+        let mut state = QueryState::default();
+        <&Pos>::each_cached::<()>(&world, &mut state, |p| lewat_cache.push(p.0));
+
+        assert_eq!(lewat_each, lewat_cache);
+
+        // Memakai ulang QueryState yang sama → hasil identik & konsisten.
+        let mut lagi = Vec::new();
+        <&Pos>::each_cached::<()>(&world, &mut state, |p| lagi.push(p.0));
+        assert_eq!(lewat_each, lagi);
+    }
 
     #[derive(PartialEq, Debug)]
     struct Pos(i32);

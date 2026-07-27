@@ -14,7 +14,7 @@ use std::any::TypeId;
 
 use crate::Component;
 use crate::World;
-use crate::query::{Access, QueryData, QueryFilter};
+use crate::query::{Access, QueryData, QueryFilter, QueryState};
 
 /// Cara sebuah sistem mengakses `World`.
 enum Runner {
@@ -56,9 +56,11 @@ impl System {
     ///
     /// Contoh: `System::each::<(&Position, &mut Velocity)>(|(p, v)| v.0 += p.0)`.
     pub fn each<Q: QueryData>(mut f: impl FnMut(Q::Item<'_>) + Send + 'static) -> Self {
+        // Cache archetype yang cocok, persist lintas-run per-sistem (RFC-0017).
+        let mut state = QueryState::default();
         Self {
             runner: Runner::Shared(Box::new(move |world: &World| {
-                Q::each_filtered_shared::<()>(world, &mut f);
+                Q::each_cached::<()>(world, &mut state, &mut f);
             })),
             access: Q::access(),
         }
@@ -69,9 +71,11 @@ impl System {
     pub fn each_filtered<Q: QueryData, F: QueryFilter + 'static>(
         mut f: impl FnMut(Q::Item<'_>) + Send + 'static,
     ) -> Self {
+        // Cache archetype yang cocok, persist lintas-run per-sistem (RFC-0017).
+        let mut state = QueryState::default();
         Self {
             runner: Runner::Shared(Box::new(move |world: &World| {
-                Q::each_filtered_shared::<F>(world, &mut f);
+                Q::each_cached::<F>(world, &mut state, &mut f);
             })),
             access: Q::access(),
         }
@@ -233,6 +237,7 @@ mod tests {
     struct Counter(i32);
     struct Position;
     struct Velocity;
+    struct Tag;
     #[derive(PartialEq, Debug)]
     struct Tally(i32);
 
@@ -354,6 +359,28 @@ mod tests {
         s.run(&mut world);
 
         assert_eq!(world.get::<Counter>(e), Some(&Counter(5)));
+    }
+
+    #[test]
+    fn system_each_cache_menangkap_entity_dan_archetype_baru_antar_run() {
+        let mut world = World::new();
+        let e1 = world.spawn();
+        world.insert(e1, Counter(0));
+
+        let mut s = Schedule::new();
+        s.add(System::each::<&mut Counter>(|c| c.0 += 1));
+
+        s.run(&mut world); // run 1: cache terisi archetype {Counter}
+        assert_eq!(world.get::<Counter>(e1), Some(&Counter(1)));
+
+        // Entity baru di archetype {Counter, Tag} baru, dibuat antar-run.
+        let e2 = world.spawn();
+        world.insert(e2, Counter(10));
+        world.insert(e2, Tag);
+
+        s.run(&mut world); // run 2: scan inkremental menangkap archetype baru
+        assert_eq!(world.get::<Counter>(e1), Some(&Counter(2)));
+        assert_eq!(world.get::<Counter>(e2), Some(&Counter(11)));
     }
 
     #[test]
