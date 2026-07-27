@@ -1,5 +1,8 @@
 # Arke
 
+[![crates.io](https://img.shields.io/crates/v/arke.svg)](https://crates.io/crates/arke)
+[![docs.rs](https://img.shields.io/docsrs/arke)](https://docs.rs/arke)
+
 ECS (Entity-Component-System) **standalone, deterministik, berbasis archetype** untuk Rust.
 
 Dua pendirian yang membedakannya:
