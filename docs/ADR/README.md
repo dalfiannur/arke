@@ -27,3 +27,4 @@ ADR bersifat **immutable** setelah Accepted: jangan menulis ulang isinya. Jika k
 | [ADR-0001](ADR-0001-documentation-first.md) | Tata-kelola documentation-first | Accepted |
 | [ADR-0002](ADR-0002-core-storage-architecture.md) | Arsitektur penyimpanan inti — archetype + generational entity | Accepted |
 | [ADR-0003](ADR-0003-deterministic-scheduler.md) | Scheduler deterministik dengan analisis konflik | Accepted |
+| [ADR-0004](ADR-0004-data-parallel-iteration.md) | Iterasi data-parallel yang aman | Accepted |
