@@ -56,6 +56,19 @@ impl<T> TypedColumn<T> {
         // SAFETY: lihat kontrak modul & doc di atas — tak ada `&mut` beralias.
         unsafe { &*self.0.get() }
     }
+
+    /// Akses **mutabel** ke data lewat `&self` (jalur paralel, RFC-0016).
+    ///
+    /// # Safety
+    ///
+    /// Pemanggil menjamin **tak ada** akses lain (baca maupun tulis) ke data
+    /// kolom ini yang aktif bersamaan — dijamin oleh cek-alias query (kolom
+    /// distinct) dan disjoint-nya stage penjadwal.
+    #[allow(clippy::mut_from_ref)] // interior mutability via UnsafeCell (RFC-0016)
+    pub(crate) unsafe fn data_mut_shared(&self) -> &mut Vec<T> {
+        // SAFETY: eksklusivitas dijamin pemanggil (kontrak di atas).
+        unsafe { &mut *self.0.get() }
+    }
 }
 
 impl<T: 'static> Column for TypedColumn<T> {

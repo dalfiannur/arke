@@ -73,17 +73,6 @@ impl Archetype {
             .data_mut()
     }
 
-    /// Meminjam `N` kolom berbeda secara mutabel sekaligus (RFC-0013).
-    /// Aman via `get_disjoint_mut` — tanpa `unsafe`. `idx` harus valid & unik.
-    pub(crate) fn columns_disjoint_mut<const N: usize>(
-        &mut self,
-        idx: [usize; N],
-    ) -> [&mut Box<dyn Column>; N] {
-        self.columns
-            .get_disjoint_mut(idx)
-            .expect("indeks kolom harus valid & unik")
-    }
-
     /// Meminjam dua kolom berbeda secara mutabel sekaligus, dikembalikan dalam
     /// urutan `(i, j)`. Aman via `split_at_mut` — tanpa `unsafe`.
     pub(crate) fn columns_two_mut(

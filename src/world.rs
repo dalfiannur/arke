@@ -466,9 +466,9 @@ impl World {
         self.registry.name(cid)
     }
 
-    /// Slice mutabel seluruh archetype (dipakai query generik RFC-0013).
-    pub(crate) fn archetypes_mut(&mut self) -> &mut [Archetype] {
-        &mut self.archetypes
+    /// Slice bersama seluruh archetype (jalur query berbagi, RFC-0016).
+    pub(crate) fn archetypes(&self) -> &[Archetype] {
+        &self.archetypes
     }
 
     /// Menemukan archetype dengan himpunan komponen `ids` (terurut), atau

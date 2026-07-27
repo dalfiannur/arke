@@ -3,6 +3,13 @@
 //! [`Access`] menyatakan komponen apa yang dibaca/ditulis sebuah query atau
 //! sistem — dipakai [`crate::schedule`] untuk analisis konflik. [`QueryData`]
 //! menyimpulkan `Access` dari **tipe** query dan menyediakan iterasi internal.
+//!
+//! `unsafe` di modul ini **terkurung** pada [`QueryTerm::iter_shared`] untuk
+//! term `&mut T` (memanggil `TypedColumn::data_mut_shared`); sound karena term
+//! query mengakses kolom **distinct** (cek-alias) dan penjadwal menjamin akses
+//! disjoint lintas-sistem (RFC-0016). Diverifikasi miri di CI.
+
+#![allow(unsafe_code)]
 
 use std::any::TypeId;
 
@@ -84,9 +91,14 @@ pub trait QueryData {
     /// Akses (baca/tulis) yang disimpulkan dari tipe `Self`.
     fn access() -> Access;
 
-    /// Menerapkan `f` pada setiap entity yang cocok **dan** lolos filter `F`
-    /// (RFC-0014).
-    fn each_filtered<F: QueryFilter>(world: &mut World, f: impl FnMut(Self::Item<'_>));
+    /// Menerapkan `f` pada setiap entity yang cocok **dan** lolos filter `F`,
+    /// lewat `&World` **berbagi** (RFC-0016). Ini implementasi inti.
+    fn each_filtered_shared<F: QueryFilter>(world: &World, f: impl FnMut(Self::Item<'_>));
+
+    /// Seperti [`Self::each_filtered_shared`] tetapi dari `&mut World` eksklusif.
+    fn each_filtered<F: QueryFilter>(world: &mut World, f: impl FnMut(Self::Item<'_>)) {
+        Self::each_filtered_shared::<F>(&*world, f);
+    }
 
     /// Menerapkan `f` pada setiap entity yang cocok (tanpa filter).
     fn each(world: &mut World, f: impl FnMut(Self::Item<'_>)) {
@@ -101,7 +113,7 @@ impl<T: Component> QueryData for &T {
         Access::new().with_read::<T>()
     }
 
-    fn each_filtered<F: QueryFilter>(world: &mut World, mut f: impl FnMut(&T)) {
+    fn each_filtered_shared<F: QueryFilter>(world: &World, mut f: impl FnMut(&T)) {
         let Some(cid) = world.component_id::<T>() else {
             return;
         };
@@ -109,14 +121,14 @@ impl<T: Component> QueryData for &T {
             Some(v) => v,
             None => return,
         };
-        for archetype in world.archetypes_mut() {
+        for archetype in world.archetypes() {
             let Some(col) = archetype.column_index(cid) else {
                 continue;
             };
             if !filter_matches(archetype, &with, &without) {
                 continue;
             }
-            for item in archetype.slice::<T>(col).iter() {
+            for item in <&T as QueryTerm>::iter_shared(archetype.column(col)) {
                 f(item);
             }
         }
@@ -130,7 +142,7 @@ impl<T: Component> QueryData for &mut T {
         Access::new().with_write::<T>()
     }
 
-    fn each_filtered<F: QueryFilter>(world: &mut World, mut f: impl FnMut(&mut T)) {
+    fn each_filtered_shared<F: QueryFilter>(world: &World, mut f: impl FnMut(&mut T)) {
         let Some(cid) = world.component_id::<T>() else {
             return;
         };
@@ -138,14 +150,14 @@ impl<T: Component> QueryData for &mut T {
             Some(v) => v,
             None => return,
         };
-        for archetype in world.archetypes_mut() {
+        for archetype in world.archetypes() {
             let Some(col) = archetype.column_index(cid) else {
                 continue;
             };
             if !filter_matches(archetype, &with, &without) {
                 continue;
             }
-            for item in archetype.slice_mut::<T>(col).iter_mut() {
+            for item in <&mut T as QueryTerm>::iter_shared(archetype.column(col)) {
                 f(item);
             }
         }
@@ -173,8 +185,8 @@ pub trait QueryTerm {
     fn access(access: &mut Access);
     /// `ComponentId` komponen term ini, bila terdaftar.
     fn component_id(world: &World) -> Option<ComponentId>;
-    /// Iterator atas item dari sebuah referensi kolom mutabel.
-    fn iter(col: &mut Box<dyn Column>) -> impl Iterator<Item = Self::Item<'_>>;
+    /// Iterator atas item dari sebuah kolom **berbagi** (`&dyn Column`, RFC-0016).
+    fn iter_shared(col: &dyn Column) -> impl Iterator<Item = Self::Item<'_>>;
 }
 
 #[allow(private_interfaces)]
@@ -186,7 +198,7 @@ impl<T: Component> QueryTerm for &T {
     fn component_id(world: &World) -> Option<ComponentId> {
         world.component_id::<T>()
     }
-    fn iter(col: &mut Box<dyn Column>) -> impl Iterator<Item = &T> {
+    fn iter_shared(col: &dyn Column) -> impl Iterator<Item = &T> {
         col.as_any()
             .downcast_ref::<TypedColumn<T>>()
             .expect("tipe kolom tak cocok")
@@ -204,12 +216,15 @@ impl<T: Component> QueryTerm for &mut T {
     fn component_id(world: &World) -> Option<ComponentId> {
         world.component_id::<T>()
     }
-    fn iter(col: &mut Box<dyn Column>) -> impl Iterator<Item = &mut T> {
-        col.as_any_mut()
-            .downcast_mut::<TypedColumn<T>>()
-            .expect("tipe kolom tak cocok")
-            .data_mut()
-            .iter_mut()
+    fn iter_shared(col: &dyn Column) -> impl Iterator<Item = &mut T> {
+        let typed = col
+            .as_any()
+            .downcast_ref::<TypedColumn<T>>()
+            .expect("tipe kolom tak cocok");
+        // SAFETY: term query mengakses kolom distinct (cek-alias) dan stage
+        // penjadwal menjamin akses disjoint → tak ada peminjaman lain ke data
+        // kolom ini (RFC-0016). Diverifikasi miri.
+        unsafe { typed.data_mut_shared() }.iter_mut()
     }
 }
 
@@ -316,9 +331,11 @@ fn filter_matches(archetype: &Archetype, with: &[ComponentId], without: &[Compon
     with.iter().all(|&c| archetype.contains(c)) && without.iter().all(|&c| !archetype.contains(c))
 }
 
-/// Menghasilkan `impl QueryData` untuk tuple dengan arity tertentu.
+/// Menghasilkan `impl QueryData` untuk tuple dengan arity tertentu (jalur
+/// berbagi: tiap term mengakses kolom **distinct** lewat `&dyn Column`,
+/// RFC-0016).
 macro_rules! impl_query_tuple {
-    ($($T:ident $cid:ident $var:ident),+) => {
+    ($($T:ident $cid:ident $var:ident $colidx:ident),+) => {
         impl<$($T: QueryTerm),+> QueryData for ($($T,)+) {
             type Item<'w> = ($($T::Item<'w>,)+);
 
@@ -328,7 +345,10 @@ macro_rules! impl_query_tuple {
                 access
             }
 
-            fn each_filtered<Fil: QueryFilter>(world: &mut World, mut f: impl FnMut(Self::Item<'_>)) {
+            fn each_filtered_shared<Fil: QueryFilter>(
+                world: &World,
+                mut f: impl FnMut(Self::Item<'_>),
+            ) {
                 let ($(::core::option::Option::Some($cid),)+) =
                     ($(<$T as QueryTerm>::component_id(world),)+)
                 else {
@@ -341,7 +361,7 @@ macro_rules! impl_query_tuple {
                     ::core::option::Option::None => return,
                 };
 
-                for archetype in world.archetypes_mut() {
+                for archetype in world.archetypes() {
                     let idxs = [$(archetype.column_index($cid)),+];
                     if idxs.iter().any(::core::option::Option::is_none) {
                         continue;
@@ -349,9 +369,10 @@ macro_rules! impl_query_tuple {
                     if !filter_matches(archetype, &with, &without) {
                         continue;
                     }
-                    let cols = idxs.map(|o| o.unwrap());
-                    let [$($var),+] = archetype.columns_disjoint_mut(cols);
-                    let ($(mut $var,)+) = ($(<$T as QueryTerm>::iter($var),)+);
+                    let [$($colidx),+] = idxs.map(|o| o.unwrap());
+                    let ($(mut $var,)+) = (
+                        $(<$T as QueryTerm>::iter_shared(archetype.column($colidx)),)+
+                    );
                     loop {
                         match ($($var.next(),)+) {
                             ($(::core::option::Option::Some($var),)+) => f(($($var,)+)),
@@ -364,11 +385,11 @@ macro_rules! impl_query_tuple {
     };
 }
 
-impl_query_tuple!(A ca va, B cb vb);
-impl_query_tuple!(A ca va, B cb vb, C cc vc);
-impl_query_tuple!(A ca va, B cb vb, C cc vc, D cd vd);
-impl_query_tuple!(A ca va, B cb vb, C cc vc, D cd vd, E ce ve);
-impl_query_tuple!(A ca va, B cb vb, C cc vc, D cd vd, E ce ve, F cf vf);
+impl_query_tuple!(A ca va ia, B cb vb ib);
+impl_query_tuple!(A ca va ia, B cb vb ib, C cc vc ic);
+impl_query_tuple!(A ca va ia, B cb vb ib, C cc vc ic, D cd vd id);
+impl_query_tuple!(A ca va ia, B cb vb ib, C cc vc ic, D cd vd id, E ce ve ie);
+impl_query_tuple!(A ca va ia, B cb vb ib, C cc vc ic, D cd vd id, E ce ve ie, F cf vf if_);
 
 #[cfg(test)]
 mod tests {
