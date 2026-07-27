@@ -84,8 +84,14 @@ pub trait QueryData {
     /// Akses (baca/tulis) yang disimpulkan dari tipe `Self`.
     fn access() -> Access;
 
-    /// Menerapkan `f` pada setiap entity yang cocok.
-    fn each(world: &mut World, f: impl FnMut(Self::Item<'_>));
+    /// Menerapkan `f` pada setiap entity yang cocok **dan** lolos filter `F`
+    /// (RFC-0014).
+    fn each_filtered<F: QueryFilter>(world: &mut World, f: impl FnMut(Self::Item<'_>));
+
+    /// Menerapkan `f` pada setiap entity yang cocok (tanpa filter).
+    fn each(world: &mut World, f: impl FnMut(Self::Item<'_>)) {
+        Self::each_filtered::<()>(world, f);
+    }
 }
 
 impl<T: Component> QueryData for &T {
@@ -95,9 +101,24 @@ impl<T: Component> QueryData for &T {
         Access::new().with_read::<T>()
     }
 
-    fn each(world: &mut World, mut f: impl FnMut(&T)) {
-        for item in world.query::<T>() {
-            f(item);
+    fn each_filtered<F: QueryFilter>(world: &mut World, mut f: impl FnMut(&T)) {
+        let Some(cid) = world.component_id::<T>() else {
+            return;
+        };
+        let (with, without) = match resolve_filter::<F>(world) {
+            Some(v) => v,
+            None => return,
+        };
+        for archetype in world.archetypes_mut() {
+            let Some(col) = archetype.column_index(cid) else {
+                continue;
+            };
+            if !filter_matches(archetype, &with, &without) {
+                continue;
+            }
+            for item in archetype.slice::<T>(col).iter() {
+                f(item);
+            }
         }
     }
 }
@@ -109,15 +130,31 @@ impl<T: Component> QueryData for &mut T {
         Access::new().with_write::<T>()
     }
 
-    fn each(world: &mut World, mut f: impl FnMut(&mut T)) {
-        for item in world.query_mut::<T>() {
-            f(item);
+    fn each_filtered<F: QueryFilter>(world: &mut World, mut f: impl FnMut(&mut T)) {
+        let Some(cid) = world.component_id::<T>() else {
+            return;
+        };
+        let (with, without) = match resolve_filter::<F>(world) {
+            Some(v) => v,
+            None => return,
+        };
+        for archetype in world.archetypes_mut() {
+            let Some(col) = archetype.column_index(cid) else {
+                continue;
+            };
+            if !filter_matches(archetype, &with, &without) {
+                continue;
+            }
+            for item in archetype.slice_mut::<T>(col).iter_mut() {
+                f(item);
+            }
         }
     }
 }
 
 // ---- Query tuple generik (RFC-0013) --------------------------------------
 
+use crate::archetype::Archetype;
 use crate::component::ComponentId;
 use crate::error::EcsError;
 use crate::storage::{Column, TypedColumn};
@@ -191,6 +228,94 @@ fn assert_no_alias(world: &World, cids: &[ComponentId]) {
     }
 }
 
+// ---- Filter query: With / Without (RFC-0014) ------------------------------
+
+use std::marker::PhantomData;
+
+/// Filter: hanya cocokkan entity yang **memiliki** komponen `T` (tanpa mengambil
+/// datanya).
+pub struct With<T>(PhantomData<T>);
+
+/// Filter: hanya cocokkan entity yang **tidak** memiliki komponen `T`.
+pub struct Without<T>(PhantomData<T>);
+
+/// Batasan pencocokan query yang tidak mengambil data (RFC-0014).
+pub trait QueryFilter {
+    /// Kumpulkan komponen yang harus **hadir** (`with`) dan **absen** (`without`).
+    /// `false` bila sebuah `With` komponennya tak terdaftar (→ tak ada yang cocok).
+    fn resolve(world: &World, with: &mut Vec<ComponentId>, without: &mut Vec<ComponentId>) -> bool;
+}
+
+impl<T: Component> QueryFilter for With<T> {
+    fn resolve(
+        world: &World,
+        with: &mut Vec<ComponentId>,
+        _without: &mut Vec<ComponentId>,
+    ) -> bool {
+        match world.component_id::<T>() {
+            Some(c) => {
+                with.push(c);
+                true
+            }
+            None => false, // T tak terdaftar → tak ada archetype yang punya → tak cocok
+        }
+    }
+}
+
+impl<T: Component> QueryFilter for Without<T> {
+    fn resolve(
+        world: &World,
+        _with: &mut Vec<ComponentId>,
+        without: &mut Vec<ComponentId>,
+    ) -> bool {
+        if let Some(c) = world.component_id::<T>() {
+            without.push(c);
+        }
+        true // tak terdaftar → pasti absen → terpenuhi
+    }
+}
+
+impl QueryFilter for () {
+    fn resolve(_: &World, _: &mut Vec<ComponentId>, _: &mut Vec<ComponentId>) -> bool {
+        true
+    }
+}
+
+macro_rules! impl_filter_tuple {
+    ($($F:ident),+) => {
+        impl<$($F: QueryFilter),+> QueryFilter for ($($F,)+) {
+            fn resolve(
+                world: &World,
+                with: &mut Vec<ComponentId>,
+                without: &mut Vec<ComponentId>,
+            ) -> bool {
+                $(<$F as QueryFilter>::resolve(world, with, without) &&)+ true
+            }
+        }
+    };
+}
+impl_filter_tuple!(A);
+impl_filter_tuple!(A, B);
+impl_filter_tuple!(A, B, C);
+impl_filter_tuple!(A, B, C, D);
+
+/// Me-resolve `F` ke (komponen hadir, komponen absen); `None` bila `F` mustahil
+/// cocok (mis. `With` tak terdaftar).
+fn resolve_filter<F: QueryFilter>(world: &World) -> Option<(Vec<ComponentId>, Vec<ComponentId>)> {
+    let mut with = Vec::new();
+    let mut without = Vec::new();
+    if F::resolve(world, &mut with, &mut without) {
+        Some((with, without))
+    } else {
+        None
+    }
+}
+
+/// Apakah `archetype` memuat semua `with` dan tak satupun `without`.
+fn filter_matches(archetype: &Archetype, with: &[ComponentId], without: &[ComponentId]) -> bool {
+    with.iter().all(|&c| archetype.contains(c)) && without.iter().all(|&c| !archetype.contains(c))
+}
+
 /// Menghasilkan `impl QueryData` untuk tuple dengan arity tertentu.
 macro_rules! impl_query_tuple {
     ($($T:ident $cid:ident $var:ident),+) => {
@@ -203,7 +328,7 @@ macro_rules! impl_query_tuple {
                 access
             }
 
-            fn each(world: &mut World, mut f: impl FnMut(Self::Item<'_>)) {
+            fn each_filtered<Fil: QueryFilter>(world: &mut World, mut f: impl FnMut(Self::Item<'_>)) {
                 let ($(::core::option::Option::Some($cid),)+) =
                     ($(<$T as QueryTerm>::component_id(world),)+)
                 else {
@@ -211,10 +336,17 @@ macro_rules! impl_query_tuple {
                 };
                 let cids = [$($cid),+];
                 assert_no_alias(world, &cids);
+                let (with, without) = match resolve_filter::<Fil>(world) {
+                    ::core::option::Option::Some(v) => v,
+                    ::core::option::Option::None => return,
+                };
 
                 for archetype in world.archetypes_mut() {
                     let idxs = [$(archetype.column_index($cid)),+];
                     if idxs.iter().any(::core::option::Option::is_none) {
+                        continue;
+                    }
+                    if !filter_matches(archetype, &with, &without) {
                         continue;
                     }
                     let cols = idxs.map(|o| o.unwrap());

@@ -29,14 +29,14 @@ Menambahkan filter `With<T>`/`Without<T>` untuk menyaring entity berdasarkan keh
 
 ## Kriteria selesai (Definition of Done)
 
-- [ ] `Without<T>` hanya memproses entity yang **tak** memiliki `T` — teruji.
-- [ ] `With<T>` hanya memproses entity yang memiliki `T` (tanpa mengambil datanya) — teruji.
-- [ ] Tuple filter `(With<A>, Without<B>)` bekerja (AND) — teruji.
-- [ ] Filter tak memengaruhi konflik scheduler (tak menyumbang `Access`) — teruji.
-- [ ] `each` (tanpa filter) tetap setara `each_filtered::<()>` — teruji.
-- [ ] Tetap **tanpa `unsafe`**; 0 dependensi eksternal.
-- [ ] RFC-0014 & ADR-0014 ditulis serta konsisten dengan kode.
-- [ ] Semua tes hijau.
+- [x] `Without<T>` hanya memproses entity yang **tak** memiliki `T` — teruji (`tests/filters.rs`).
+- [x] `With<T>` hanya memproses entity yang memiliki `T` (tanpa mengambil datanya) — teruji.
+- [x] Tuple filter `(With<A>, Without<B>)` bekerja (AND) — teruji.
+- [x] Filter tak memengaruhi konflik scheduler (tak menyumbang `Access`) — teruji.
+- [x] `each` (tanpa filter) tetap setara `each_filtered::<()>` — teruji (seluruh tes `each` lama tetap hijau).
+- [x] Tetap **tanpa `unsafe`**; 0 dependensi eksternal.
+- [x] RFC-0014 & ADR-0014 ditulis serta konsisten dengan kode.
+- [x] Semua tes hijau (65 tes).
 
 ## Ketergantungan
 

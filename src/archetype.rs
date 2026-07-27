@@ -42,6 +42,11 @@ impl Archetype {
         self.component_ids.iter().position(|&c| c == id)
     }
 
+    /// Apakah archetype ini memuat komponen `id` (untuk filter query, RFC-0014).
+    pub(crate) fn contains(&self, id: ComponentId) -> bool {
+        self.component_ids.contains(&id)
+    }
+
     /// Referensi kolom pada posisi `col`.
     pub(crate) fn column(&self, col: usize) -> &dyn Column {
         &*self.columns[col]

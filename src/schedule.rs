@@ -9,7 +9,7 @@ use std::any::TypeId;
 
 use crate::Component;
 use crate::World;
-use crate::query::{Access, QueryData};
+use crate::query::{Access, QueryData, QueryFilter};
 
 /// Unit logika yang berjalan atas sebuah [`World`].
 pub struct System {
@@ -46,6 +46,17 @@ impl System {
     pub fn each<Q: QueryData>(mut f: impl FnMut(Q::Item<'_>) + 'static) -> Self {
         Self {
             run: Box::new(move |world: &mut World| Q::each(world, &mut f)),
+            access: Q::access(),
+        }
+    }
+
+    /// Seperti [`System::each`], tetapi hanya untuk entity yang lolos filter `F`
+    /// (`With`/`Without`, RFC-0014). Filter tak menyumbang akses.
+    pub fn each_filtered<Q: QueryData, F: QueryFilter + 'static>(
+        mut f: impl FnMut(Q::Item<'_>) + 'static,
+    ) -> Self {
+        Self {
+            run: Box::new(move |world: &mut World| Q::each_filtered::<F>(world, &mut f)),
             access: Q::access(),
         }
     }

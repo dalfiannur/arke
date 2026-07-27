@@ -19,7 +19,7 @@
 //! | [`entity`] | `Entity` sebagai generational index |
 //! | [`component`] | Tipe komponen & identitasnya (registrasi otomatis) |
 //! | [`world`] | Otoritas atas entity/komponen/resource + query + `par_for_each` |
-//! | [`query`] | `QueryData` berbasis-tipe + `Access` tersimpul (M-4) |
+//! | [`query`] | `QueryData` tuple generik + filter `With`/`Without` + `Access` (M-4/12/13) |
 //! | [`schedule`] | `System` + `Schedule` deterministik (M-2); `each` bertipe (M-4); resource params (M-9) |
 //! | [`serialize`] | `Value` + trait `Serialize` + JSON tulis-tangan (M-6) |
 //! | [`snapshot`] | `Snapshot` World berversi, round-trip setia (M-6) |
@@ -48,7 +48,7 @@ mod storage;
 pub use component::{Component, ComponentId};
 pub use entity::Entity;
 pub use error::EcsError;
-pub use query::{Access, QueryData};
+pub use query::{Access, QueryData, QueryFilter, With, Without};
 pub use schedule::{Schedule, System};
 pub use serialize::{Serialize, Value};
 pub use snapshot::Snapshot;
