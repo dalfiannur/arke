@@ -30,14 +30,14 @@ Menghilangkan boilerplate `Serialize` lewat `#[derive(Serialize)]`, tanpa mengor
 
 ## Kriteria selesai (Definition of Done)
 
-- [ ] `Serialize` terimplementasi untuk primitif + `Vec`/`Option`; round-trip `to_value`/`from_value` teruji.
-- [ ] `#[derive(Serialize)]` bekerja untuk struct field-bernama, tuple, dan unit — round-trip teruji lewat integrasi.
-- [ ] Bentuk tak didukung (enum/generic) memancarkan `compile_error!` yang jelas.
-- [ ] `arke-derive` **0 dependensi crates.io** (`cargo tree` hanya menampilkan dirinya).
-- [ ] Core `arke` tetap tanpa dependensi pihak-ketiga; pemeriksaan CI standalone diperbarui & hijau.
-- [ ] Tetap **tanpa `unsafe`**.
-- [ ] RFC-0009 & ADR-0009 ditulis serta konsisten dengan kode.
-- [ ] Semua tes hijau.
+- [x] `Serialize` terimplementasi untuk primitif + `Vec`/`Option`; round-trip `to_value`/`from_value` teruji.
+- [x] `#[derive(Serialize)]` bekerja untuk struct field-bernama, tuple, dan unit — round-trip teruji lewat integrasi (`tests/derive.rs`).
+- [x] Bentuk tak didukung (enum/generic) memancarkan `compile_error!` yang jelas.
+- [x] `arke-derive` **0 dependensi crates.io** (`cargo tree` hanya menampilkan dirinya).
+- [x] Core `arke` tetap tanpa dependensi pihak-ketiga; pemeriksaan CI standalone diperbarui & hijau.
+- [x] Tetap **tanpa `unsafe`**.
+- [x] RFC-0009 & ADR-0009 ditulis serta konsisten dengan kode.
+- [x] Semua tes hijau (45 tes).
 
 ## Ketergantungan
 

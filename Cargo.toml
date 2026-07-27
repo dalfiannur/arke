@@ -1,3 +1,7 @@
+[workspace]
+members = ["arke-derive"]
+resolver = "2"
+
 [package]
 name = "arke"
 version = "0.1.0"
@@ -14,9 +18,12 @@ include = ["/src", "/Cargo.toml", "/README.md", "/LICENSE-MIT"]
 [lib]
 name = "arke"
 
-# Standalone core: TIDAK ADA dependensi eksternal (STD-0003).
-# Integrasi eksternal, bila ada nanti, hidup di crate/feature adapter terpisah.
+# Standalone core: TIDAK ADA dependensi PIHAK-KETIGA (STD-0003).
+# `arke-derive` adalah crate first-party di workspace ini, sendiri 0-dependensi
+# crates.io (proc-macro tulis-tangan). Integrasi eksternal lain, bila ada nanti,
+# hidup di crate/feature adapter terpisah.
 [dependencies]
+arke-derive = { version = "0.1.0", path = "arke-derive" }
 
 [dev-dependencies]
 

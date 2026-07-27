@@ -53,3 +53,7 @@ pub use schedule::{Schedule, System};
 pub use serialize::{Serialize, Value};
 pub use snapshot::Snapshot;
 pub use world::World;
+
+/// Derive macro `#[derive(Serialize)]` (RFC-0009). Berbagi nama dengan trait
+/// [`Serialize`]; `use arke::Serialize;` membawa keduanya.
+pub use arke_derive::Serialize;

@@ -47,6 +47,28 @@ assert_eq!(world.get::<Position>(e), Some(&Position(1, 2)));
 world.par_for_each::<Position>(|p| p.0 *= 10);
 ```
 
+### Snapshot berversi (dengan `derive`)
+
+```rust
+use arke::{Serialize, World};
+
+#[derive(Serialize, PartialEq, Debug)]
+struct Health(u32);
+
+let mut world = World::new();
+world.register_serializable::<Health>();
+let e = world.spawn();
+world.insert(e, Health(100));
+
+let json = world.snapshot().to_json(); // {"schema_version":1, ...}
+let mut restored = World::new();
+restored.register_serializable::<Health>();
+restored.load_snapshot(&arke::Snapshot::from_json(&json).unwrap());
+assert_eq!(restored.get::<Health>(e), Some(&Health(100)));
+```
+
+> `#[derive(Serialize)]` ditulis tangan dengan `proc_macro` bawaan — **tetap 0 dependensi crates.io.**
+
 ## Dokumentasi & tata-kelola
 
 Proyek ini *documentation-first*. Arah dan keputusannya hidup di [`docs/`](docs/):

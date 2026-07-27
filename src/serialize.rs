@@ -30,6 +30,103 @@ pub trait Serialize: Component + Sized {
     fn from_value(value: &Value) -> Option<Self>;
 }
 
+macro_rules! impl_serialize_int {
+    ($($t:ty),*) => {$(
+        impl Serialize for $t {
+            fn to_value(&self) -> Value {
+                Value::Int(*self as i64)
+            }
+            fn from_value(value: &Value) -> Option<Self> {
+                match value {
+                    Value::Int(i) => (*i).try_into().ok(),
+                    _ => None,
+                }
+            }
+        }
+    )*};
+}
+impl_serialize_int!(i8, i16, i32, i64, u8, u16, u32, u64, usize, isize);
+
+macro_rules! impl_serialize_float {
+    ($($t:ty),*) => {$(
+        impl Serialize for $t {
+            fn to_value(&self) -> Value {
+                Value::Float(f64::from(*self))
+            }
+            fn from_value(value: &Value) -> Option<Self> {
+                match value {
+                    Value::Float(f) => Some(*f as $t),
+                    _ => None,
+                }
+            }
+        }
+    )*};
+}
+impl_serialize_float!(f32, f64);
+
+impl Serialize for bool {
+    fn to_value(&self) -> Value {
+        Value::Bool(*self)
+    }
+    fn from_value(value: &Value) -> Option<Self> {
+        match value {
+            Value::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+}
+
+impl Serialize for String {
+    fn to_value(&self) -> Value {
+        Value::Text(self.clone())
+    }
+    fn from_value(value: &Value) -> Option<Self> {
+        match value {
+            Value::Text(s) => Some(s.clone()),
+            _ => None,
+        }
+    }
+}
+
+impl Serialize for char {
+    fn to_value(&self) -> Value {
+        Value::Text(self.to_string())
+    }
+    fn from_value(value: &Value) -> Option<Self> {
+        match value {
+            Value::Text(s) if s.chars().count() == 1 => s.chars().next(),
+            _ => None,
+        }
+    }
+}
+
+impl<T: Serialize> Serialize for Vec<T> {
+    fn to_value(&self) -> Value {
+        Value::List(self.iter().map(Serialize::to_value).collect())
+    }
+    fn from_value(value: &Value) -> Option<Self> {
+        match value {
+            Value::List(items) => items.iter().map(T::from_value).collect(),
+            _ => None,
+        }
+    }
+}
+
+impl<T: Serialize> Serialize for Option<T> {
+    fn to_value(&self) -> Value {
+        match self {
+            Some(t) => t.to_value(),
+            None => Value::Null,
+        }
+    }
+    fn from_value(value: &Value) -> Option<Self> {
+        match value {
+            Value::Null => Some(None),
+            other => T::from_value(other).map(Some),
+        }
+    }
+}
+
 impl Value {
     /// Meng-*encode* nilai ini menjadi teks JSON.
     pub fn to_json(&self) -> String {
@@ -78,8 +175,8 @@ impl Value {
         }
     }
 
-    /// Isi `Map` bila nilai ini sebuah map.
-    pub(crate) fn as_map(&self) -> Option<&[(String, Value)]> {
+    /// Isi `Map` bila nilai ini sebuah map (untuk impl `Serialize` manual/derive).
+    pub fn as_map(&self) -> Option<&[(String, Value)]> {
         match self {
             Value::Map(m) => Some(m),
             _ => None,
@@ -87,7 +184,7 @@ impl Value {
     }
 
     /// Isi `List` bila nilai ini sebuah list.
-    pub(crate) fn as_list(&self) -> Option<&[Value]> {
+    pub fn as_list(&self) -> Option<&[Value]> {
         match self {
             Value::List(l) => Some(l),
             _ => None,
@@ -95,7 +192,7 @@ impl Value {
     }
 
     /// Isi `Int` bila nilai ini bilangan bulat.
-    pub(crate) fn as_int(&self) -> Option<i64> {
+    pub fn as_int(&self) -> Option<i64> {
         match self {
             Value::Int(i) => Some(*i),
             _ => None,
@@ -103,7 +200,7 @@ impl Value {
     }
 
     /// Nilai untuk `key` bila ini sebuah map yang memuatnya.
-    pub(crate) fn get(&self, key: &str) -> Option<&Value> {
+    pub fn get(&self, key: &str) -> Option<&Value> {
         self.as_map()?
             .iter()
             .find(|(k, _)| k == key)
@@ -303,6 +400,26 @@ impl Parser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn primitif_dan_kontainer_round_trip() {
+        fn rt<T: Serialize + Clone + PartialEq + std::fmt::Debug>(v: T) {
+            assert_eq!(T::from_value(&v.clone().to_value()), Some(v));
+        }
+        rt(42_i64);
+        rt(-7_i32);
+        rt(255_u8);
+        rt(1_000_000_u32);
+        rt(3.5_f64);
+        rt(2.0_f32);
+        rt(true);
+        rt('x');
+        rt(String::from("halo\n"));
+        rt(vec![1_i64, 2, 3]);
+        rt(Some(5_i64));
+        rt(Option::<i64>::None);
+        rt(vec![Some(1_i64), None, Some(3)]);
+    }
 
     #[test]
     fn value_round_trip_lewat_json() {
