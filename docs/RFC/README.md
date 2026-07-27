@@ -35,3 +35,4 @@ Draft → Discussion → Accepted | Rejected | Superseded
 | --- | --- | --- |
 | [RFC-0001](RFC-0001-documentation-first-governance.md) | Tata-kelola documentation-first | Accepted |
 | [RFC-0002](RFC-0002-core-storage-architecture.md) | Arsitektur penyimpanan inti — archetype + generational entity | Accepted |
+| [RFC-0003](RFC-0003-deterministic-scheduler.md) | Scheduler deterministik dengan analisis konflik | Accepted |
