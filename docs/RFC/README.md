@@ -48,3 +48,4 @@ Draft → Discussion → Accepted | Rejected | Superseded
 | [RFC-0013](RFC-0013-generic-tuple-queries.md) | Query tuple generik (arity & mutabilitas campuran) | Accepted |
 | [RFC-0014](RFC-0014-query-filters.md) | Filter query `With` / `Without` | Accepted |
 | [RFC-0015](RFC-0015-unsafecell-column-storage.md) | Penyimpanan kolom berbasis `UnsafeCell` | Accepted |
+| [RFC-0016](RFC-0016-parallel-executor.md) | Eksekutor paralel tingkat-sistem | Accepted |
