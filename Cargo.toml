@@ -6,7 +6,7 @@ rust-version = "1.85"
 description = "ECS standalone, deterministik, berbasis archetype untuk Rust — jalur ergonomis adalah jalur cepat."
 license = "MIT"
 repository = "https://github.com/dalfiannur/arke"
-keywords = ["ecs", "entity-component-system", "deterministic", "gamedev", "simulation"]
+keywords = ["ecs", "archetype", "deterministic", "gamedev", "simulation"]
 categories = ["data-structures", "game-development"]
 # Paket ramping: hanya sumber + README + lisensi. Governance & docs hidup di repo.
 include = ["/src", "/Cargo.toml", "/README.md", "/LICENSE-MIT"]
