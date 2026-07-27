@@ -40,3 +40,5 @@ ADR bersifat **immutable** setelah Accepted: jangan menulis ulang isinya. Jika k
 | [ADR-0014](ADR-0014-query-filters.md) | Filter query `With` / `Without` | Accepted |
 | [ADR-0015](ADR-0015-unsafecell-column-storage.md) | Penyimpanan kolom berbasis `UnsafeCell` | Accepted |
 | [ADR-0016](ADR-0016-parallel-executor.md) | Eksekutor paralel tingkat-sistem | Accepted |
+| [ADR-0017](ADR-0017-query-cache.md) | Query Cache sebagai first-class citizen | Accepted |
+| [ADR-0018](ADR-0018-dependency-graph-executor.md) | Eksekutor graf-ketergantungan | Accepted |

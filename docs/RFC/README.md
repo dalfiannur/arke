@@ -49,3 +49,5 @@ Draft → Discussion → Accepted | Rejected | Superseded
 | [RFC-0014](RFC-0014-query-filters.md) | Filter query `With` / `Without` | Accepted |
 | [RFC-0015](RFC-0015-unsafecell-column-storage.md) | Penyimpanan kolom berbasis `UnsafeCell` | Accepted |
 | [RFC-0016](RFC-0016-parallel-executor.md) | Eksekutor paralel tingkat-sistem | Accepted |
+| [RFC-0017](RFC-0017-query-cache.md) | Query Cache sebagai first-class citizen | Accepted |
+| [RFC-0018](RFC-0018-dependency-graph-executor.md) | Eksekutor graf-ketergantungan | Accepted |
