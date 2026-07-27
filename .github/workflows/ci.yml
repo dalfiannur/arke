@@ -46,3 +46,17 @@ jobs:
             echo "$extra"
             exit 1
           fi
+
+  # Gerbang verifikasi undefined behavior (prasyarat paralelisme tingkat-sistem,
+  # ADR-0006/RN-0001). Menjalankan test suite `arke` di bawah miri.
+  miri:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - name: miri test (arke lib)
+        run: cargo miri test -p arke --lib
+        env:
+          MIRIFLAGS: "-Zmiri-disable-isolation"

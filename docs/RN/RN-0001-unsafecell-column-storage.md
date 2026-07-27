@@ -40,3 +40,4 @@ RN ini **graduate menjadi RFC** ketika:
 ## Catatan / temuan
 
 - 2026-07-27: RN dibuka dari analisis RFC-0006. Prasyarat infrastruktur (nightly + miri di CI) belum ada di lingkungan pengembangan saat ini.
+- 2026-07-28: **Prasyarat #2 (miri di CI) digarap** — job `miri` ditambahkan ke `.github/workflows/ci.yml` (`cargo miri test -p arke --lib` di toolchain nightly). Karena core saat ini 0-`unsafe`, run pertama memvalidasi bahwa test suite lolos miri sebagai *baseline*; setiap `unsafe` mendatang wajib mempertahankan status hijau job ini. Lingkungan lokal masih tanpa nightly/miri, jadi verifikasi berlangsung di CI.
