@@ -39,7 +39,7 @@ jobs:
       # STD-0003: core standalone — tidak boleh ada dependensi normal eksternal.
       - name: Standalone core (STD-0003)
         run: |
-          extra=$(cargo tree -e normal --prefix none | sort -u | grep -v '^rust-ecs ' | grep -v '^$' || true)
+          extra=$(cargo tree -e normal --prefix none | sort -u | grep -v '^arke ' | grep -v '^$' || true)
           if [ -n "$extra" ]; then
             echo "Dependensi eksternal terdeteksi di core (melanggar STD-0003):"
             echo "$extra"
