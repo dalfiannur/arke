@@ -43,3 +43,4 @@ Draft → Discussion → Accepted | Rejected | Superseded
 | [RFC-0008](RFC-0008-contextual-errors.md) | Error berkonteks | Accepted |
 | [RFC-0009](RFC-0009-derive-serialize.md) | `derive(Serialize)` tanpa dependensi eksternal | Accepted |
 | [RFC-0010](RFC-0010-resources.md) | Resources sebagai parameter sistem | Accepted |
+| [RFC-0011](RFC-0011-derive-enum-attributes.md) | `derive(Serialize)` untuk enum + atribut field | Accepted |
