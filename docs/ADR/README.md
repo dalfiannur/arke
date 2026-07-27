@@ -32,3 +32,4 @@ ADR bersifat **immutable** setelah Accepted: jangan menulis ulang isinya. Jika k
 | [ADR-0006](ADR-0006-defer-system-parallelism.md) | Menunda paralelisme tingkat-sistem hingga `UnsafeCell` + miri | Accepted |
 | [ADR-0007](ADR-0007-world-snapshot.md) | Snapshot & serialisasi World | Accepted |
 | [ADR-0008](ADR-0008-contextual-errors.md) | Error berkonteks | Accepted |
+| [ADR-0009](ADR-0009-derive-serialize.md) | `derive(Serialize)` tanpa dependensi eksternal | Accepted |

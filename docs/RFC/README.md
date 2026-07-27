@@ -41,3 +41,4 @@ Draft → Discussion → Accepted | Rejected | Superseded
 | [RFC-0006](RFC-0006-system-level-parallelism.md) | Paralelisme tingkat-sistem (analisis & penundaan) | Accepted (ditunda) |
 | [RFC-0007](RFC-0007-world-snapshot.md) | Snapshot & serialisasi World | Accepted |
 | [RFC-0008](RFC-0008-contextual-errors.md) | Error berkonteks | Accepted |
+| [RFC-0009](RFC-0009-derive-serialize.md) | `derive(Serialize)` tanpa dependensi eksternal | Accepted |
