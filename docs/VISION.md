@@ -1,10 +1,10 @@
 # Vision
 
-> Masa depan yang ingin diciptakan `Rust ECS`. Lebih konkret dari Manifesto, tetapi masih bebas dari detail implementasi.
+> Masa depan yang ingin diciptakan Arke. Lebih konkret dari Manifesto, tetapi masih bebas dari detail implementasi.
 
 ## Keadaan dunia yang kami tuju
 
-Membangun sistem berbasis entitas di Rust tidak lagi berarti memilih antara pustaka minimalis yang cepat tumbuh rumit, atau game engine besar yang memaksakan seluruh arsitekturnya. `Rust ECS` membuat ECS berperforma tinggi dan deterministik menjadi *default yang membosankan* — sebuah dependensi kecil yang bisa kamu percaya, seperti halnya sebuah struktur data standar.
+Membangun sistem berbasis entitas di Rust tidak lagi berarti memilih antara pustaka minimalis yang cepat tumbuh rumit, atau game engine besar yang memaksakan seluruh arsitekturnya. Arke membuat ECS berperforma tinggi dan deterministik menjadi *default yang membosankan* — sebuah dependensi kecil yang bisa kamu percaya, seperti halnya sebuah struktur data standar.
 
 ## Bagi pengguna
 

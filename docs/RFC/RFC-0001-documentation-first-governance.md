@@ -9,7 +9,7 @@
 
 ## Ringkasan
 
-Setiap perubahan konsekuensial pada `Rust ECS` didahului artefak tertulis yang dapat ditinjau: proposal ditangkap sebagai **RFC**, keputusan yang diterima direkam sebagai **ADR**, dan implementasi mengikuti — bukan mendefinisikan ulang — artefak tersebut.
+Setiap perubahan konsekuensial pada Arke didahului artefak tertulis yang dapat ditinjau: proposal ditangkap sebagai **RFC**, keputusan yang diterima direkam sebagai **ADR**, dan implementasi mengikuti — bukan mendefinisikan ulang — artefak tersebut.
 
 ## Motivasi
 

@@ -7,7 +7,7 @@
 
 ## Ringkasan
 
-Menetapkan model penyimpanan inti `Rust ECS`: entity sebagai **generational index** (`u32` indeks + `u32` generasi), komponen disimpan dalam **archetype** (tabel per-kombinasi-komponen) dengan kolom **kontigu bertipe** yang di-*type-erase* di balik trait object, dan **registrasi komponen otomatis** saat insert pertama. Query mengiterasi tiap archetype yang cocok dengan men-*downcast* kolom **sekali per archetype** menjadi `&[T]`/`&mut [T]`. Kombinasi ini menegakkan invarian *ergonomis = cepat*, *determinisme by construction*, dan *struktural aman* dari [ARCHITECTURE_BIBLE](../ARCHITECTURE_BIBLE.md) §2.
+Menetapkan model penyimpanan inti Arke: entity sebagai **generational index** (`u32` indeks + `u32` generasi), komponen disimpan dalam **archetype** (tabel per-kombinasi-komponen) dengan kolom **kontigu bertipe** yang di-*type-erase* di balik trait object, dan **registrasi komponen otomatis** saat insert pertama. Query mengiterasi tiap archetype yang cocok dengan men-*downcast* kolom **sekali per archetype** menjadi `&[T]`/`&mut [T]`. Kombinasi ini menegakkan invarian *ergonomis = cepat*, *determinisme by construction*, dan *struktural aman* dari [ARCHITECTURE_BIBLE](../ARCHITECTURE_BIBLE.md) §2.
 
 ## Motivasi
 

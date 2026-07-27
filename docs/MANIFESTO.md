@@ -1,10 +1,10 @@
 # Manifesto
 
-> Identitas dan keyakinan `Rust ECS`. Dokumen terpendek dan paling stabil di repo ini. Jika sesuatu di sini berubah, hampir semua hal lain ikut berubah.
+> Identitas dan keyakinan Arke. Dokumen terpendek dan paling stabil di repo ini. Jika sesuatu di sini berubah, hampir semua hal lain ikut berubah.
 
 ## Apa ini
 
-`Rust ECS` adalah pustaka Entity-Component-System standalone untuk Rust — cara berkinerja tinggi dan deterministik untuk menyimpan, mengueri, dan mengembangkan data berbasis entitas, tanpa terikat pada game engine mana pun.
+Arke adalah pustaka Entity-Component-System standalone untuk Rust — cara berkinerja tinggi dan deterministik untuk menyimpan, mengueri, dan mengembangkan data berbasis entitas, tanpa terikat pada game engine mana pun.
 
 ## Untuk siapa
 

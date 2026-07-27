@@ -1,4 +1,4 @@
-# Rust ECS
+# Arke
 
 ECS (Entity-Component-System) **standalone, deterministik, berbasis archetype** untuk Rust.
 

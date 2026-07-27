@@ -6,7 +6,7 @@
 
 ## Konteks
 
-`Rust ECS` membutuhkan fondasi penyimpanan (MILESTONE_1) yang secara bersamaan menegakkan invarian *ergonomis = cepat*, *determinisme by construction*, dan *struktural aman* ([ARCHITECTURE_BIBLE](../ARCHITECTURE_BIBLE.md) §2), sambil tetap standalone. Beberapa model bersaing: penyimpanan archetype vs sparse-set vs hybrid; kolom bertipe vs blob byte; registrasi komponen eksplisit vs otomatis; layout entity id. Pilihan ini mengikat lapisan-lapisan di atasnya (query, scheduler, snapshot), jadi perlu direkam permanen.
+Arke membutuhkan fondasi penyimpanan (MILESTONE_1) yang secara bersamaan menegakkan invarian *ergonomis = cepat*, *determinisme by construction*, dan *struktural aman* ([ARCHITECTURE_BIBLE](../ARCHITECTURE_BIBLE.md) §2), sambil tetap standalone. Beberapa model bersaing: penyimpanan archetype vs sparse-set vs hybrid; kolom bertipe vs blob byte; registrasi komponen eksplisit vs otomatis; layout entity id. Pilihan ini mengikat lapisan-lapisan di atasnya (query, scheduler, snapshot), jadi perlu direkam permanen.
 
 ## Keputusan
 

@@ -1,4 +1,4 @@
-# Design — Mengisi Placeholder Identitas & Arsitektur `Rust ECS`
+# Design — Mengisi Placeholder Identitas & Arsitektur Arke
 
 - **Tanggal:** 2026-07-27
 - **Status:** Disetujui (brainstorming)

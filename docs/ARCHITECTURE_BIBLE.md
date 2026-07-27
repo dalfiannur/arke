@@ -1,10 +1,10 @@
 # Architecture Bible
 
-> Sumber kebenaran konseptual untuk arsitektur `Rust ECS`. Ia menetapkan apa yang harus tetap benar ketika produk, teknologi, dan antarmuka berkembang. Dokumen ini berubah lambat dan dilindungi oleh proses RFC/ADR.
+> Sumber kebenaran konseptual untuk arsitektur Arke. Ia menetapkan apa yang harus tetap benar ketika produk, teknologi, dan antarmuka berkembang. Dokumen ini berubah lambat dan dilindungi oleh proses RFC/ADR.
 
 ## 1. Purpose
 
-`Rust ECS` adalah pustaka Entity-Component-System standalone: sebuah penyimpanan data berorientasi-data yang menyimpan entitas beserta komponennya dalam layout cache-friendly, dan mengeksekusi sistem terhadapnya secara deterministik.
+Arke adalah pustaka Entity-Component-System standalone: sebuah penyimpanan data berorientasi-data yang menyimpan entitas beserta komponennya dalam layout cache-friendly, dan mengeksekusi sistem terhadapnya secara deterministik.
 
 Arsitekturnya harus memungkinkan **developer Rust** untuk:
 
@@ -73,18 +73,18 @@ Proyeksi keadaan `World` ke format terbuka dan self-describing. Mendukung save, 
 
 Setiap objek inti memiliki, sejauh relevan:
 
-| Elemen | Wujud di `Rust ECS` |
+| Elemen | Wujud di Arke |
 | --- | --- |
 | Stable ID | `Entity` sebagai generational index (indeks + generasi) — referensi tetap valid, atau terdeteksi basi, meski slot indeksnya dipakai ulang. |
 | Ownership & scope | Setiap entity dan komponen dimiliki tepat satu `World`. |
 | Timestamps & version | Tick dunia / nomor generasi menandai kapan sebuah mutasi terjadi. |
 | Relations | Relasi antar-entity bersifat eksplisit (mis. komponen relasi), bukan pointer tersembunyi. |
 | Provenance | Perubahan struktural dapat ditelusuri ke sistem/command yang menghasilkannya — menopang determinisme dan kemudahan debug. |
-| Portability | Snapshot terbuka dan self-describing; dapat di-*parse* pustaka standar tanpa runtime `Rust ECS`. |
+| Portability | Snapshot terbuka dan self-describing; dapat di-*parse* pustaka standar tanpa runtime Arke. |
 
 ## 5. Product boundaries
 
-`Rust ECS` **bukan**:
+Arke **bukan**:
 
 - game engine, renderer, atau loop jendela;
 - runtime async atau penjadwal task tujuan-umum;
