@@ -28,14 +28,14 @@ Mengganti eksekutor paralel berbasis **stage** (barrier penuh) dengan eksekutor 
 
 ## Kriteria selesai (Definition of Done)
 
-- [ ] `dependencies()` mengembalikan pendahulu berkonflik yang benar (urutan registrasi) — teruji.
-- [ ] `run_parallel` (DAG) memberi hasil **identik** dengan `run` serial untuk skenario konflik campuran — teruji.
-- [ ] Sistem tak-berkonflik yang dipisah barrier stage kini berjalan tanpa menunggu satu sama lain (mulai lebih awal) — teruji via struktur graf.
-- [ ] Skedul dengan sistem `Exclusive` (resource) tetap benar & deterministik (segmentasi) — teruji.
-- [ ] Determinisme & urutan efektif identik (STD-0005/0006).
-- [ ] Tetap **tanpa `unsafe` baru**; jalur pengguna aman.
-- [ ] RFC-0018 & ADR-0018 ditulis serta konsisten dengan kode.
-- [ ] Semua tes + miri hijau.
+- [x] `dependencies()` mengembalikan pendahulu berkonflik yang benar (urutan registrasi) — teruji (`dependencies_hanya_pendahulu_yang_berkonflik`).
+- [x] `run_parallel` (DAG) memberi hasil **identik** dengan `run` serial untuk skenario konflik campuran — teruji (`run_parallel_rantai_konflik_setara_serial`, `run_parallel_setara_serial`).
+- [x] Sistem tak-berkonflik yang dipisah barrier stage kini berjalan tanpa menunggu satu sama lain — dijamin struktur graf (`dependencies()` tak menautkan yang tak-konflik) + model thread-per-sistem.
+- [x] Skedul dengan sistem `Exclusive` (resource) tetap benar & deterministik (segmentasi) — teruji (`run_parallel_segmentasi_exclusive_setara_serial`).
+- [x] Determinisme & urutan efektif identik (STD-0005/0006) — 72 tes + 50× stress hijau.
+- [x] Tetap **tanpa `unsafe` baru**; jalur pengguna aman (memakai kembali `SyncWorld` terkurung).
+- [x] RFC-0018 & ADR-0018 ditulis serta konsisten dengan kode.
+- [x] Semua tes + miri hijau (miri di CI).
 
 ## Ketergantungan
 

@@ -1,16 +1,19 @@
 //! Sistem dan penjadwalan deterministik (RFC-0003).
 //!
 //! Sebuah [`System`] membungkus logika `FnMut(&mut World)` beserta deklarasi
-//! akses eksplisit. [`Schedule`] menghitung urutan eksekusi deterministik dan
-//! mengelompokkan sistem tak-konflik ke dalam *stage* yang aman diparalelkan.
-//! Eksekusi serial via [`Schedule::run`]; eksekusi **paralel** tingkat-sistem
-//! via [`Schedule::run_parallel`] (RFC-0016). `unsafe` di modul ini terkurung
-//! pada `unsafe impl Sync for SyncWorld` (sound karena sistem satu stage
-//! mengakses komponen disjoint). Diverifikasi miri.
+//! akses eksplisit. [`Schedule`] menghitung urutan eksekusi deterministik.
+//! Eksekusi serial via [`Schedule::run`] (stage demi stage); eksekusi
+//! **paralel** tingkat-sistem via [`Schedule::run_parallel`] lewat
+//! **graf-ketergantungan** (RFC-0018) — tiap sistem mulai segera setelah
+//! pendahulu berkonfliknya selesai, bukan menunggu barrier stage. `unsafe` di
+//! modul ini terkurung pada `unsafe impl Sync for SyncWorld` (sound karena
+//! sistem yang berjalan bersamaan dijamin tak-konflik oleh graf). Diverifikasi
+//! miri.
 
 #![allow(unsafe_code)]
 
 use std::any::TypeId;
+use std::sync::{Condvar, Mutex};
 
 use crate::Component;
 use crate::World;
@@ -134,11 +137,69 @@ impl System {
 /// Pembungkus agar `&World` dapat dibagi lintas-thread pada jalur paralel.
 struct SyncWorld<'a>(&'a World);
 
-// SAFETY: `SyncWorld` hanya dibagikan ke sistem-sistem satu stage yang, menurut
-// analisis konflik (M-2/M-4), mengakses komponen **disjoint**. Akses bersamaan
-// lewat `&World` ke kolom yang berbeda tak beralias (interior-mutability via
+// SAFETY: `SyncWorld` hanya dibagikan ke sistem-sistem yang **berjalan
+// bersamaan**, yang menurut graf-ketergantungan (RFC-0018) dijamin **tak-konflik**
+// (sisi menghubungkan tiap pasangan berkonflik → tak pernah bersamaan). Sistem
+// tak-konflik mengakses komponen **disjoint** (analisis M-2/M-4); akses bersamaan
+// lewat `&World` ke kolom berbeda tak beralias (interior-mutability via
 // `UnsafeCell`, RFC-0015/0016). Diverifikasi miri di CI.
 unsafe impl Sync for SyncWorld<'_> {}
+
+/// Menjalankan sekumpulan sistem `Shared` lewat **graf-ketergantungan**: tiap
+/// sistem mulai segera setelah pendahulu berkonflik selesai (RFC-0018 §2).
+///
+/// Model **thread-per-sistem** (`std::thread::scope`): tiap thread memegang
+/// `&mut System` disjoint (miliknya sendiri) dan menunggu di `Condvar` sampai
+/// seluruh pendahulunya (`pending[i] == 0`) selesai, lalu berjalan, lalu
+/// mengurangi `pending` tiap suksesor. Graf **asiklik** (sisi hanya `j → i`
+/// dengan `j < i`) → bebas deadlock. Pasangan berkonflik tak pernah bersamaan
+/// → hasil **identik** eksekusi serial (STD-0006). **Tanpa `unsafe` baru**.
+fn run_graph_shared(systems: &mut [System], world: &World) {
+    let n = systems.len();
+    // Bangun graf: sisi j→i untuk tiap j<i yang berkonflik (RFC-0018 §1).
+    let mut pending = vec![0usize; n];
+    let mut successors: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for i in 0..n {
+        for j in 0..i {
+            if systems[i].access.conflicts(&systems[j].access) {
+                successors[j].push(i);
+                pending[i] += 1;
+            }
+        }
+    }
+
+    let sync_world = SyncWorld(world);
+    let pending = Mutex::new(pending);
+    let signal = Condvar::new();
+
+    std::thread::scope(|scope| {
+        for (i, system) in systems.iter_mut().enumerate() {
+            let pending = &pending;
+            let signal = &signal;
+            let successors = &successors;
+            let sync_world = &sync_world;
+            scope.spawn(move || {
+                // Tunggu semua pendahulu berkonflik selesai.
+                {
+                    let mut guard = pending.lock().unwrap();
+                    while guard[i] > 0 {
+                        guard = signal.wait(guard).unwrap();
+                    }
+                }
+                // Jalankan sistem (thread ini pemilik tunggal `&mut System`).
+                system.run_shared(sync_world.0);
+                // Tandai selesai; rilis penghitung suksesor.
+                {
+                    let mut guard = pending.lock().unwrap();
+                    for &s in &successors[i] {
+                        guard[s] -= 1;
+                    }
+                }
+                signal.notify_all();
+            });
+        }
+    });
+}
 
 /// Kumpulan sistem yang dijalankan dalam urutan deterministik.
 #[derive(Default)]
@@ -172,32 +233,35 @@ impl Schedule {
         }
     }
 
-    /// Menjalankan schedule dengan sistem tiap stage **paralel** (RFC-0016).
+    /// Menjalankan schedule secara **paralel** lewat graf-ketergantungan
+    /// (RFC-0018): tiap sistem mulai segera setelah pendahulu yang berkonflik
+    /// dengannya selesai — bukan menunggu barrier stage penuh.
     ///
-    /// Untuk tiap stage yang seluruh sistemnya bertipe (`Shared`), sistem
-    /// dijalankan bersamaan di `std::thread::scope`; karena stage dijamin
-    /// tak-konflik, aksesnya disjoint dan hasilnya **identik** dengan eksekusi
-    /// serial (STD-0006). Stage yang memuat sistem opaque/resource (`Exclusive`)
-    /// dijalankan serial.
+    /// Schedule disegmen pada batas sistem `Exclusive` (opaque/resource): tiap
+    /// *run* maksimal sistem `Shared` dijalankan lewat graf (`std::thread::scope`
+    /// berbagi `&World`), tiap `Exclusive` dijalankan **serial** sebagai barrier
+    /// `&mut World`. Karena pasangan berkonflik tetap terurut registrasi, hasil
+    /// **identik** dengan eksekusi serial (STD-0006), hanya lebih paralel.
     pub fn run_parallel(&mut self, world: &mut World) {
-        for stage in self.stages() {
-            let parallel = stage.len() > 1 && stage.iter().all(|&i| self.systems[i].is_shared());
-            if !parallel {
-                for idx in stage {
-                    self.systems[idx].run(world);
+        let n = self.systems.len();
+        let mut i = 0;
+        while i < n {
+            if self.systems[i].is_shared() {
+                let start = i;
+                while i < n && self.systems[i].is_shared() {
+                    i += 1;
                 }
-                continue;
+                // Segmen [start, i): semua `Shared` → jalankan lewat graf.
+                if i - start == 1 {
+                    self.systems[start].run(world);
+                } else {
+                    run_graph_shared(&mut self.systems[start..i], &*world);
+                }
+            } else {
+                // `Exclusive`: barrier serial (`&mut World`).
+                self.systems[i].run(world);
+                i += 1;
             }
-            let in_stage: std::collections::HashSet<usize> = stage.into_iter().collect();
-            let sync_world = SyncWorld(&*world);
-            std::thread::scope(|scope| {
-                for (i, system) in self.systems.iter_mut().enumerate() {
-                    if in_stage.contains(&i) {
-                        let sync_world = &sync_world;
-                        scope.spawn(move || system.run_shared(sync_world.0));
-                    }
-                }
-            });
         }
     }
 
@@ -225,6 +289,25 @@ impl Schedule {
             stages[stage].push(i);
         }
         stages
+    }
+
+    /// Graf-ketergantungan: untuk tiap sistem, indeks **pendahulu** (registrasi
+    /// lebih awal) yang **berkonflik** dengannya (RFC-0018 §1).
+    ///
+    /// Sisi selalu mengarah dari registrasi lebih-awal ke lebih-akhir → pasangan
+    /// berkonflik terurut deterministik. Sistem tanpa pendahulu berkonflik dapat
+    /// mulai segera (tak terikat barrier stage).
+    pub fn dependencies(&self) -> Vec<Vec<usize>> {
+        let mut deps: Vec<Vec<usize>> = vec![Vec::new(); self.systems.len()];
+        for (i, dep) in deps.iter_mut().enumerate() {
+            let access_i = &self.systems[i].access;
+            for (j, sys_j) in self.systems[..i].iter().enumerate() {
+                if access_i.conflicts(&sys_j.access) {
+                    dep.push(j);
+                }
+            }
+        }
+        deps
     }
 }
 
@@ -273,6 +356,71 @@ mod tests {
         let st: Vec<i32> = serial.query::<Tally>().map(|t| t.0).collect();
         let pt: Vec<i32> = parallel.query::<Tally>().map(|t| t.0).collect();
         assert_eq!(st, pt);
+    }
+
+    // DAG: rantai konflik (0→1→2, semua tulis Counter) HARUS berurutan walau
+    // paralel, sementara cabang independen (Tally) boleh bersamaan. Hasil == serial.
+    #[test]
+    fn run_parallel_rantai_konflik_setara_serial() {
+        fn setup() -> World {
+            let mut w = World::new();
+            for i in 0..8 {
+                let e = w.spawn();
+                w.insert(e, Counter(i));
+                w.insert(e, Tally(i));
+            }
+            w
+        }
+        fn sched() -> Schedule {
+            let mut s = Schedule::new();
+            s.add(System::each::<&mut Counter>(|c| c.0 += 1)); // 0
+            s.add(System::each::<&mut Counter>(|c| c.0 *= 2)); // 1 (konflik 0)
+            s.add(System::each::<&mut Counter>(|c| c.0 += 5)); // 2 (konflik 0,1)
+            s.add(System::each::<&mut Tally>(|t| t.0 *= 3)); // 3 (independen)
+            s
+        }
+        let mut serial = setup();
+        sched().run(&mut serial);
+        let mut parallel = setup();
+        sched().run_parallel(&mut parallel);
+
+        let sc: Vec<i32> = serial.query::<Counter>().map(|c| c.0).collect();
+        let pc: Vec<i32> = parallel.query::<Counter>().map(|c| c.0).collect();
+        assert_eq!(sc, pc); // ((i+1)*2)+5, terurut walau paralel
+        let st: Vec<i32> = serial.query::<Tally>().map(|t| t.0).collect();
+        let pt: Vec<i32> = parallel.query::<Tally>().map(|t| t.0).collect();
+        assert_eq!(st, pt);
+    }
+
+    // DAG: sistem Exclusive (resource) di antara sistem Shared → segmentasi;
+    // efek ketiganya benar & deterministik (== serial).
+    #[test]
+    fn run_parallel_segmentasi_exclusive_setara_serial() {
+        fn setup() -> World {
+            let mut w = World::new();
+            w.insert_resource(Tally(0));
+            for i in 0..6 {
+                let e = w.spawn();
+                w.insert(e, Counter(i));
+            }
+            w
+        }
+        fn sched() -> Schedule {
+            let mut s = Schedule::new();
+            s.add(System::each::<&mut Counter>(|c| c.0 += 1)); // Shared
+            s.add(System::resource::<Tally>(|t| t.0 += 100)); // Exclusive (barrier)
+            s.add(System::each::<&mut Counter>(|c| c.0 *= 2)); // Shared
+            s
+        }
+        let mut serial = setup();
+        sched().run(&mut serial);
+        let mut parallel = setup();
+        sched().run_parallel(&mut parallel);
+
+        let sc: Vec<i32> = serial.query::<Counter>().map(|c| c.0).collect();
+        let pc: Vec<i32> = parallel.query::<Counter>().map(|c| c.0).collect();
+        assert_eq!(sc, pc);
+        assert_eq!(parallel.resource::<Tally>(), Some(&Tally(100)));
     }
 
     #[test]
@@ -389,6 +537,19 @@ mod tests {
         s.add(System::each::<&mut Counter>(|_| {})); // tulis Counter → stage 0
         s.add(System::each::<&Counter>(|_| {})); // baca Counter → konflik → stage 1
         assert_eq!(s.stages(), vec![vec![0], vec![1]]);
+    }
+
+    #[test]
+    fn dependencies_hanya_pendahulu_yang_berkonflik() {
+        let mut s = Schedule::new();
+        s.add(System::each::<&mut Position>(|_| {})); // 0: tulis Position
+        s.add(System::each::<&mut Velocity>(|_| {})); // 1: tulis Velocity (tak konflik 0)
+        s.add(System::each::<&Position>(|_| {})); // 2: baca Position → konflik 0 saja
+
+        let deps = s.dependencies();
+        assert_eq!(deps[0], Vec::<usize>::new());
+        assert_eq!(deps[1], Vec::<usize>::new());
+        assert_eq!(deps[2], vec![0]); // bergantung 0, TIDAK 1
     }
 
     #[test]
