@@ -10,6 +10,8 @@
 use crate::archetype::Archetype;
 use crate::component::{Component, ComponentId, ComponentRegistry};
 use crate::entity::Entity;
+use crate::serialize::Serialize;
+use crate::snapshot::{EntitySnapshot, SCHEMA_VERSION, SerdeRegistry, Snapshot};
 use crate::storage::TypedColumn;
 
 /// Lokasi sebuah entity di dalam penyimpanan archetype.
@@ -38,6 +40,7 @@ pub struct World {
     free: Vec<u32>,
     registry: ComponentRegistry,
     archetypes: Vec<Archetype>,
+    serde: SerdeRegistry,
 }
 
 impl World {
@@ -316,6 +319,77 @@ impl World {
             .downcast_ref::<TypedColumn<T>>()?
             .0
             .get(location.row)
+    }
+
+    /// Mendaftarkan komponen `T` agar ikut dalam snapshot (opt-in, RFC-0007).
+    pub fn register_serializable<T: Serialize>(&mut self) {
+        let cid = self.registry.register::<T>();
+        self.serde.register::<T>(cid);
+    }
+
+    /// Menghasilkan [`Snapshot`] keadaan `World` saat ini.
+    ///
+    /// Hanya entity hidup dan komponen yang telah didaftarkan lewat
+    /// [`World::register_serializable`] yang disertakan.
+    pub fn snapshot(&self) -> Snapshot {
+        let mut entities = Vec::new();
+        for (index, meta) in self.entities.iter().enumerate() {
+            if !meta.alive {
+                continue;
+            }
+            let mut components = Vec::new();
+            if let Some(loc) = meta.location {
+                let archetype = &self.archetypes[loc.archetype];
+                for (col, &cid) in archetype.component_ids().iter().enumerate() {
+                    if let Some((type_name, to_value)) = self.serde.info_for(cid) {
+                        let value = to_value(archetype.column(col), loc.row);
+                        components.push((type_name.to_string(), value));
+                    }
+                }
+            }
+            entities.push(EntitySnapshot {
+                index: index as u32,
+                generation: meta.generation,
+                components,
+            });
+        }
+        Snapshot {
+            schema_version: SCHEMA_VERSION,
+            entities,
+        }
+    }
+
+    /// Memuat `snapshot` ke `World` ini, merekonstruksi entity (dengan handle
+    /// yang sama) dan komponennya. Tipe komponen harus sudah didaftarkan lewat
+    /// [`World::register_serializable`].
+    pub fn load_snapshot(&mut self, snapshot: &Snapshot) {
+        for entity_snap in &snapshot.entities {
+            let entity = self.allocate_at(entity_snap.index, entity_snap.generation);
+            for (type_name, value) in &entity_snap.components {
+                if let Some(inserter) = self.serde.inserter(type_name) {
+                    inserter(self, entity, value);
+                }
+            }
+        }
+    }
+
+    /// Membuat entity pada slot `index` dengan `generation` tertentu (untuk
+    /// restore). Slot antara diisi placeholder mati.
+    fn allocate_at(&mut self, index: u32, generation: u32) -> Entity {
+        let idx = index as usize;
+        while self.entities.len() <= idx {
+            self.entities.push(EntityMeta {
+                generation: 0,
+                alive: false,
+                location: None,
+            });
+        }
+        self.entities[idx] = EntityMeta {
+            generation,
+            alive: true,
+            location: None,
+        };
+        Entity::new(index, generation)
     }
 
     /// Menemukan archetype dengan himpunan komponen `ids` (terurut), atau

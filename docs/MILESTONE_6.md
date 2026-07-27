@@ -34,15 +34,15 @@ Membuat keadaan `World` dapat di-snapshot ke format terbuka (JSON) yang berversi
 
 ## Kriteria selesai (Definition of Done)
 
-- [ ] `Value` ↔ JSON: emit dan parse round-trip untuk semua varian.
-- [ ] `snapshot()` menghasilkan `Snapshot` dengan `schema_version` (STD-0001).
-- [ ] `to_json()` menyertakan `schema_version`; ditolak oleh schema bila hilang.
-- [ ] Round-trip setia: `load_snapshot(&world.snapshot())` menghasilkan `World` setara observasional (STD-0002) — disertai tes.
-- [ ] Round-trip lewat teks: `from_json(&world.snapshot().to_json())` juga setia.
-- [ ] JSON schema `world-snapshot` + contoh valid/tak-valid; validator repo menerima valid & menolak tak-valid.
-- [ ] Tetap **tanpa `unsafe`** & bebas dependensi eksternal (STD-0003).
-- [ ] RFC-0007 & ADR-0007 ditulis serta konsisten dengan kode.
-- [ ] Semua tes hijau.
+- [x] `Value` ↔ JSON: emit dan parse round-trip untuk semua varian.
+- [x] `snapshot()` menghasilkan `Snapshot` dengan `schema_version` (STD-0001).
+- [x] `to_json()` menyertakan `schema_version`; ditolak oleh schema bila hilang (dibuktikan validator repo).
+- [x] Round-trip setia: `load_snapshot(&world.snapshot())` menghasilkan `World` setara observasional (STD-0002) — `tests/snapshot.rs`.
+- [x] Round-trip lewat teks: `from_json(&world.snapshot().to_json())` juga setia.
+- [x] JSON schema `world-snapshot` + contoh valid/tak-valid; validator repo menerima valid & menolak tak-valid.
+- [x] Tetap **tanpa `unsafe`** & bebas dependensi eksternal (STD-0003).
+- [x] RFC-0007 & ADR-0007 ditulis serta konsisten dengan kode.
+- [x] Semua tes hijau (36 tes) secara lokal.
 
 ## Ketergantungan
 

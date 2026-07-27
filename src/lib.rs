@@ -21,6 +21,8 @@
 //! | [`world`] | Otoritas atas entity/komponen + `spawn`/`insert`/`get`/`remove`/query + `par_for_each` |
 //! | [`query`] | `QueryData` berbasis-tipe + `Access` tersimpul (M-4) |
 //! | [`schedule`] | `System` + `Schedule` deterministik (M-2); `System::each` bertipe (M-4) |
+//! | [`serialize`] | `Value` + trait `Serialize` + JSON tulis-tangan (M-6) |
+//! | [`snapshot`] | `Snapshot` World berversi, round-trip setia (M-6) |
 //! | `storage` (privat) | Kolom kontigu bertipe (`TypedColumn`) |
 //! | `archetype` (privat) | Tabel per-kombinasi-komponen |
 //!
@@ -34,6 +36,8 @@ pub mod component;
 pub mod entity;
 pub mod query;
 pub mod schedule;
+pub mod serialize;
+pub mod snapshot;
 pub mod world;
 
 mod archetype;
@@ -43,4 +47,6 @@ pub use component::{Component, ComponentId};
 pub use entity::Entity;
 pub use query::{Access, QueryData};
 pub use schedule::{Schedule, System};
+pub use serialize::{Serialize, Value};
+pub use snapshot::Snapshot;
 pub use world::World;

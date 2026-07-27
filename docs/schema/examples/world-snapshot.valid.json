@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "entities": [
+    {
+      "index": 0,
+      "generation": 0,
+      "components": {
+        "Position": { "x": 3, "y": 5 },
+        "Velocity": { "x": 0, "y": 0 }
+      }
+    },
+    {
+      "index": 1,
+      "generation": 2,
+      "components": {
+        "Position": { "x": -1, "y": 42 }
+      }
+    }
+  ]
+}

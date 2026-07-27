@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "World Snapshot v1",
+  "description": "Format snapshot keadaan World (RFC-0007). schema_version wajib (STD-0001).",
+  "type": "object",
+  "required": ["schema_version", "entities"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "entities": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/entity" }
+    }
+  },
+  "definitions": {
+    "entity": {
+      "type": "object",
+      "required": ["index", "generation", "components"],
+      "additionalProperties": false,
+      "properties": {
+        "index": { "type": "integer", "minimum": 0 },
+        "generation": { "type": "integer", "minimum": 0 },
+        "components": { "type": "object" }
+      }
+    }
+  }
+}
