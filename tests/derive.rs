@@ -67,6 +67,74 @@ struct Config {
     active: bool,
 }
 
+#[derive(Serialize, PartialEq, Debug)]
+#[serialize(rename_all = "camelCase")]
+struct User {
+    user_name: String,
+    is_active: bool,
+    #[serialize(rename = "id")]
+    user_id: u32,
+}
+
+#[test]
+fn rename_all_camelcase_dengan_override_per_field() {
+    let u = User {
+        user_name: "x".to_string(),
+        is_active: true,
+        user_id: 7,
+    };
+    let v = u.to_value();
+    assert!(v.get("userName").is_some());
+    assert!(v.get("isActive").is_some());
+    assert!(v.get("id").is_some()); // rename per-field menang atas rename_all
+    assert!(v.get("userId").is_none());
+    assert!(v.get("user_name").is_none());
+    assert_eq!(User::from_value(&v), Some(u));
+}
+
+#[derive(Serialize, PartialEq, Debug)]
+#[serialize(rename_all = "snake_case")]
+enum Event {
+    PlayerJoined,
+    ScoreChanged(u32),
+}
+
+#[test]
+fn rename_all_enum_snake_case() {
+    assert_eq!(
+        Event::PlayerJoined.to_value(),
+        arke::Value::Text("player_joined".to_string())
+    );
+    for e in [Event::PlayerJoined, Event::ScoreChanged(9)] {
+        assert_eq!(Event::from_value(&e.to_value()), Some(e));
+    }
+}
+
+#[derive(Serialize, PartialEq, Debug)]
+#[serialize(rename_all = "SCREAMING_SNAKE_CASE")]
+struct Cfg {
+    max_size: u32,
+}
+
+#[derive(Serialize, PartialEq, Debug)]
+#[serialize(rename_all = "kebab-case")]
+struct Kb {
+    first_name: String,
+}
+
+#[test]
+fn rename_all_variasi_konvensi() {
+    let c = Cfg { max_size: 5 };
+    assert!(c.to_value().get("MAX_SIZE").is_some());
+    assert_eq!(Cfg::from_value(&c.to_value()), Some(c));
+
+    let k = Kb {
+        first_name: "a".to_string(),
+    };
+    assert!(k.to_value().get("first-name").is_some());
+    assert_eq!(Kb::from_value(&k.to_value()), Some(k));
+}
+
 #[test]
 fn derive_field_attributes_rename_dan_skip() {
     let c = Config {

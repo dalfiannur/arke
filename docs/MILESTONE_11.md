@@ -28,12 +28,12 @@ Menambahkan atribut level-tipe `#[serialize(rename_all = "...")]` untuk menyesua
 
 ## Kriteria selesai (Definition of Done)
 
-- [ ] `rename_all` menerapkan tiap konvensi dengan benar pada kunci field & nama varian — teruji round-trip.
-- [ ] `rename` per-field/varian menang atas `rename_all` — teruji.
-- [ ] Nilai `rename_all` tak dikenal → `compile_error!`.
-- [ ] `arke-derive` tetap **0 dependensi crates.io**; core tetap tanpa `unsafe`.
-- [ ] RFC-0012 & ADR-0012 ditulis serta konsisten dengan kode.
-- [ ] Semua tes hijau.
+- [x] `rename_all` menerapkan konvensi (camelCase, snake_case, SCREAMING_SNAKE_CASE, kebab-case) pada kunci field & nama varian — teruji round-trip.
+- [x] `rename` per-field/varian menang atas `rename_all` — teruji.
+- [x] Nilai `rename_all` tak dikenal → `compile_error!` (via `parse_case` → Err).
+- [x] `arke-derive` tetap **0 dependensi crates.io**; core tetap tanpa `unsafe`.
+- [x] RFC-0012 & ADR-0012 ditulis serta konsisten dengan kode.
+- [x] Semua tes hijau (57 tes).
 
 ## Ketergantungan
 
