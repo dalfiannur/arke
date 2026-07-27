@@ -7,24 +7,37 @@
 //! Isi struktur ini — tabel slot entity, registry komponen, dan penyimpanan
 //! archetype — ditambahkan secara test-first selama Milestone M-1.
 
+use crate::archetype::Archetype;
+use crate::component::{Component, ComponentRegistry};
 use crate::entity::Entity;
+use crate::storage::TypedColumn;
+
+/// Lokasi sebuah entity di dalam penyimpanan archetype.
+#[derive(Clone, Copy)]
+struct Location {
+    archetype: usize,
+    row: usize,
+}
 
 /// Metadata per-slot entity.
 struct EntityMeta {
     generation: u32,
     alive: bool,
+    /// Lokasi komponen entity ini, atau `None` bila entity tak punya komponen.
+    location: Option<Location>,
 }
 
 /// Wadah pemilik semua entity, komponen, dan resource.
 ///
-/// Kemampuan insert/remove komponen dan query dikembangkan pada Milestone M-1
-/// (lihat `docs/MILESTONE_1.md`).
+/// Kemampuan query dikembangkan pada Milestone M-1 (lihat `docs/MILESTONE_1.md`).
 #[derive(Default)]
 pub struct World {
     entities: Vec<EntityMeta>,
     /// Indeks slot bebas, dikelola sebagai tumpukan LIFO agar alokasi
     /// deterministik (STD-0005).
     free: Vec<u32>,
+    registry: ComponentRegistry,
+    archetypes: Vec<Archetype>,
 }
 
 impl World {
@@ -41,12 +54,14 @@ impl World {
         if let Some(index) = self.free.pop() {
             let meta = &mut self.entities[index as usize];
             meta.alive = true;
+            meta.location = None;
             Entity::new(index, meta.generation)
         } else {
             let index = self.entities.len() as u32;
             self.entities.push(EntityMeta {
                 generation: 0,
                 alive: true,
+                location: None,
             });
             Entity::new(index, 0)
         }
@@ -70,6 +85,150 @@ impl World {
         self.entities
             .get(entity.index() as usize)
             .is_some_and(|meta| meta.alive && meta.generation == entity.generation())
+    }
+
+    /// Menempelkan komponen `component` ke `entity`.
+    ///
+    /// Bila `entity` tidak hidup, operasi diabaikan. Tipe komponen didaftarkan
+    /// otomatis pada pemakaian pertama.
+    pub fn insert<T: Component>(&mut self, entity: Entity, component: T) {
+        if !self.contains(entity) {
+            return;
+        }
+        let cid = self.registry.register::<T>();
+        let index = entity.index() as usize;
+
+        let Some(loc) = self.entities[index].location else {
+            // Entity belum punya komponen → archetype tujuan = {cid}.
+            let arch_idx = self.find_or_create_archetype(&[cid]);
+            let archetype = &mut self.archetypes[arch_idx];
+            let row = archetype.push_entity(entity);
+            let col = archetype
+                .column_index(cid)
+                .expect("archetype baru dibuat memuat kolom cid");
+            archetype.push_component(col, component);
+            self.entities[index].location = Some(Location {
+                archetype: arch_idx,
+                row,
+            });
+            return;
+        };
+
+        // Entity sudah punya komponen: pindahkan ke archetype {komponen lama ∪ cid}.
+        let mut ids = self.archetypes[loc.archetype].component_ids().to_vec();
+        ids.push(cid);
+        ids.sort_unstable();
+        let dst_idx = self.find_or_create_archetype(&ids);
+
+        let (moved, dst_row) = {
+            let (src, dst) = split_two(&mut self.archetypes, loc.archetype, dst_idx);
+            let dst_row = dst.push_entity(entity);
+            let moved = src.move_row_to(loc.row, dst);
+            let col = dst
+                .column_index(cid)
+                .expect("archetype tujuan memuat kolom cid");
+            dst.push_component(col, component);
+            (moved, dst_row)
+        };
+
+        self.entities[index].location = Some(Location {
+            archetype: dst_idx,
+            row: dst_row,
+        });
+        self.fix_swapped(moved, loc.archetype, loc.row);
+    }
+
+    /// Menghapus komponen `T` dari `entity`, mengembalikan nilainya bila ada.
+    ///
+    /// Mengembalikan `None` bila `entity` tidak hidup atau tidak memiliki `T`.
+    pub fn remove<T: Component>(&mut self, entity: Entity) -> Option<T> {
+        if !self.contains(entity) {
+            return None;
+        }
+        let index = entity.index() as usize;
+        let loc = self.entities[index].location?;
+        let cid = self.registry.get::<T>()?;
+        let src_ids = self.archetypes[loc.archetype].component_ids().to_vec();
+        if !src_ids.contains(&cid) {
+            return None;
+        }
+        let dst_ids: Vec<_> = src_ids.into_iter().filter(|&c| c != cid).collect();
+
+        // Kasus: komponen terakhir → entity menjadi tanpa komponen.
+        if dst_ids.is_empty() {
+            let src = &mut self.archetypes[loc.archetype];
+            let (value, moved) = src.take_single_row::<T>(loc.row);
+            self.entities[index].location = None;
+            self.fix_swapped(moved, loc.archetype, loc.row);
+            return Some(value);
+        }
+
+        // Kasus umum: pindah ke archetype subset, ekstrak komponen yang dihapus.
+        let dst_idx = self.find_or_create_archetype(&dst_ids);
+        let (value, moved, dst_row) = {
+            let (src, dst) = split_two(&mut self.archetypes, loc.archetype, dst_idx);
+            let dst_row = dst.push_entity(entity);
+            let (value, moved) = src.move_row_to_removing::<T>(loc.row, dst, cid);
+            (value, moved, dst_row)
+        };
+        self.entities[index].location = Some(Location {
+            archetype: dst_idx,
+            row: dst_row,
+        });
+        self.fix_swapped(moved, loc.archetype, loc.row);
+        Some(value)
+    }
+
+    /// Mengembalikan referensi ke komponen `T` milik `entity`, bila ada.
+    pub fn get<T: Component>(&self, entity: Entity) -> Option<&T> {
+        if !self.contains(entity) {
+            return None;
+        }
+        let location = self.entities[entity.index() as usize].location?;
+        let cid = self.registry.get::<T>()?;
+        let archetype = &self.archetypes[location.archetype];
+        let col = archetype.column_index(cid)?;
+        archetype
+            .column(col)
+            .as_any()
+            .downcast_ref::<TypedColumn<T>>()?
+            .0
+            .get(location.row)
+    }
+
+    /// Menemukan archetype dengan himpunan komponen `ids` (terurut), atau
+    /// membuatnya bila belum ada. Mengembalikan indeksnya.
+    fn find_or_create_archetype(&mut self, ids: &[crate::component::ComponentId]) -> usize {
+        if let Some(i) = self
+            .archetypes
+            .iter()
+            .position(|a| a.component_ids() == ids)
+        {
+            return i;
+        }
+        let columns = ids.iter().map(|&id| self.registry.new_column(id)).collect();
+        self.archetypes.push(Archetype::new(ids.to_vec(), columns));
+        self.archetypes.len() - 1
+    }
+
+    /// Memperbarui lokasi entity yang tergeser ke `row` di `archetype` akibat
+    /// `swap_remove`, bila ada.
+    fn fix_swapped(&mut self, moved: Option<Entity>, archetype: usize, row: usize) {
+        if let Some(swapped) = moved {
+            self.entities[swapped.index() as usize].location = Some(Location { archetype, row });
+        }
+    }
+}
+
+/// Meminjam dua archetype berbeda secara mutabel sekaligus dari satu slice.
+fn split_two(archetypes: &mut [Archetype], a: usize, b: usize) -> (&mut Archetype, &mut Archetype) {
+    assert_ne!(a, b, "split_two membutuhkan indeks berbeda");
+    if a < b {
+        let (left, right) = archetypes.split_at_mut(b);
+        (&mut left[a], &mut right[0])
+    } else {
+        let (left, right) = archetypes.split_at_mut(a);
+        (&mut right[0], &mut left[b])
     }
 }
 
@@ -134,5 +293,53 @@ mod tests {
             vec![a, b, c]
         }
         assert_eq!(urutan(), urutan());
+    }
+
+    #[derive(PartialEq, Debug)]
+    struct Position(i32, i32);
+    #[derive(PartialEq, Debug)]
+    struct Velocity(i32, i32);
+
+    #[test]
+    fn insert_lalu_get_mengembalikan_komponen() {
+        let mut world = World::new();
+        let e = world.spawn();
+        world.insert(e, Position(3, 5));
+        assert_eq!(world.get::<Position>(e), Some(&Position(3, 5)));
+    }
+
+    #[test]
+    fn insert_komponen_kedua_memindah_archetype_dan_keduanya_terbaca() {
+        let mut world = World::new();
+        let e = world.spawn();
+        world.insert(e, Position(1, 2));
+        world.insert(e, Velocity(3, 4));
+        assert_eq!(world.get::<Position>(e), Some(&Position(1, 2)));
+        assert_eq!(world.get::<Velocity>(e), Some(&Velocity(3, 4)));
+    }
+
+    #[test]
+    fn remove_mengembalikan_komponen_dan_menyisakan_yang_lain() {
+        let mut world = World::new();
+        let e = world.spawn();
+        world.insert(e, Position(1, 2));
+        world.insert(e, Velocity(3, 4));
+
+        let taken = world.remove::<Velocity>(e);
+
+        assert_eq!(taken, Some(Velocity(3, 4)));
+        assert_eq!(world.get::<Velocity>(e), None);
+        assert_eq!(world.get::<Position>(e), Some(&Position(1, 2)));
+    }
+
+    #[test]
+    fn remove_komponen_terakhir_menjadikan_entity_tanpa_komponen() {
+        let mut world = World::new();
+        let e = world.spawn();
+        world.insert(e, Position(7, 8));
+
+        assert_eq!(world.remove::<Position>(e), Some(Position(7, 8)));
+        assert_eq!(world.get::<Position>(e), None);
+        assert!(world.contains(e));
     }
 }

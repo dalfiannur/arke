@@ -30,6 +30,9 @@ pub mod component;
 pub mod entity;
 pub mod world;
 
+mod archetype;
+mod storage;
+
 pub use component::{Component, ComponentId};
 pub use entity::Entity;
 pub use world::World;
