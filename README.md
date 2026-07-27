@@ -12,12 +12,14 @@ Dua pendirian yang membedakannya:
 - **Jalur ergonomis adalah jalur cepat.** API aman ter-*compile* ke jalur panas optimal — kamu tidak perlu `unsafe` untuk mendapat performa.
 - **Determinisme by construction.** Hasil yang sama setiap kali, apa pun jumlah thread atau penjadwalan.
 
-> Status: **0.2.0** — fondasi inti (M-1…M-8): entity/komponen archetype, query,
+> Status: **0.3.0** — fondasi inti (M-1…M-13): entity/komponen archetype, query
+> tuple generik (arity & mutabilitas campuran) + filter `With`/`Without`,
 > scheduler deterministik, iterasi data-parallel, sistem berbasis-tipe,
-> snapshot/serialisasi berversi + `#[derive(Serialize)]`, dan error berkonteks.
-> **0 `unsafe`, 0 dependensi eksternal** (bahkan derive-nya). Paralelisme
-> tingkat-sistem ([M-5](docs/MILESTONE_5.md)) sengaja ditunda. API masih dapat
-> berubah sebelum 1.0.
+> **resources**, snapshot/serialisasi berversi + `#[derive(Serialize)]` (enum,
+> `skip`/`rename`/`rename_all`), dan error berkonteks. **0 `unsafe`, 0 dependensi
+> eksternal** (bahkan derive-nya). Paralelisme tingkat-sistem
+> ([M-5](docs/MILESTONE_5.md)) sengaja ditunda. Butuh **Rust 1.86+**. API masih
+> dapat berubah sebelum 1.0.
 
 ## Contoh
 
