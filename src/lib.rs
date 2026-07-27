@@ -20,7 +20,7 @@
 //! | [`component`] | Tipe komponen & identitasnya (registrasi otomatis) |
 //! | [`world`] | Otoritas atas entity/komponen/resource + query + `par_for_each` |
 //! | [`query`] | `QueryData` tuple generik + filter `With`/`Without` + `Access` (M-4/12/13) |
-//! | [`schedule`] | `System` + `Schedule` deterministik (M-2); `each` bertipe (M-4); resource params (M-9) |
+//! | [`schedule`] | `System` + `Schedule` (M-2); `each` bertipe (M-4); resources (M-9); `run_parallel` (M-15) |
 //! | [`serialize`] | `Value` + trait `Serialize` + JSON tulis-tangan (M-6) |
 //! | [`snapshot`] | `Snapshot` World berversi, round-trip setia (M-6) |
 //! | [`error`] | `EcsError` berkonteks yang menyebut komponen (M-7) |

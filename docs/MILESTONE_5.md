@@ -1,6 +1,6 @@
-# Milestone 5 — System-Level Parallelism (DEFERRED)
+# Milestone 5 — System-Level Parallelism (SELESAI via M-14 + M-15)
 
-> **Status: DITUNDA.** Lihat [RFC-0006](RFC/RFC-0006-system-level-parallelism.md) / [ADR-0006](ADR/ADR-0006-defer-system-parallelism.md).
+> **Status: SELESAI.** Ditunda pada [RFC-0006](RFC/RFC-0006-system-level-parallelism.md) / [ADR-0006](ADR/ADR-0006-defer-system-parallelism.md), lalu *unblocked* & diwujudkan lewat gerbang miri CI → **[M-14](MILESTONE_14.md)** (storage `UnsafeCell`, [RFC-0015](RFC/RFC-0015-unsafecell-column-storage.md)) → **[M-15](MILESTONE_15.md)** (`Schedule::run_parallel`, [RFC-0016](RFC/RFC-0016-parallel-executor.md)). Prasyarat (UnsafeCell + miri) terpenuhi; `unsafe` terkurung & miri-verified.
 
 ## Tujuan
 

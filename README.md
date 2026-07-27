@@ -19,8 +19,10 @@ Dua pendirian yang membedakannya:
 > `skip`/`rename`/`rename_all`), dan error berkonteks. **0 `unsafe`, 0 dependensi
 > eksternal** (bahkan derive-nya). **Jalur pengguna bebas `unsafe`** (STD-0004);
 > `unsafe` internal **terkurung di satu modul & diverifikasi miri** di CI
-> (menyiapkan paralelisme tingkat-sistem, [M-14](docs/MILESTONE_14.md)).
-> Paralelisme tingkat-sistem ([M-5](docs/MILESTONE_5.md)) sedang digarap. Butuh
+> (menopang paralelisme tingkat-sistem). **Paralelisme tingkat-sistem**
+> (`Schedule::run_parallel`, [M-15](docs/MILESTONE_15.md)) kini tersedia:
+> sistem tak-konflik satu stage berjalan di beberapa thread, hasil identik
+> dengan serial — soundness `unsafe`-nya **diverifikasi miri** di CI. Butuh
 > **Rust 1.86+**. API masih dapat berubah sebelum 1.0.
 
 ## Contoh

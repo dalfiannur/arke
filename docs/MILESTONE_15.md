@@ -21,12 +21,12 @@ Menjalankan sistem-sistem satu stage secara paralel (`Schedule::run_parallel`), 
 
 ## Kriteria selesai (Definition of Done)
 
-- [ ] Jalur query diseragamkan ke `each_filtered_shared`; perilaku serial identik (65+ tes hijau).
-- [ ] `run_parallel` menjalankan stage `Shared` di beberapa thread; stage dengan `Exclusive` → serial.
-- [ ] **Paralel = serial** untuk sistem disjoint — teruji (STD-0006 tingkat-sistem).
-- [ ] `unsafe` terkurung di `storage`/`query`/`schedule`; jalur pengguna tetap tanpa `unsafe`.
-- [ ] Job **miri** CI hijau (termasuk uji paralel).
-- [ ] RFC-0016 & ADR-0016 ditulis serta konsisten dengan kode.
+- [x] Jalur query diseragamkan ke `each_filtered_shared`; perilaku serial identik (66 tes hijau).
+- [x] `run_parallel` menjalankan stage `Shared` di beberapa thread; stage dengan `Exclusive` → serial.
+- [x] **Paralel = serial** untuk sistem disjoint — teruji (STD-0006 tingkat-sistem).
+- [x] `unsafe` terkurung di `storage`/`query`/`schedule`; jalur pengguna tetap tanpa `unsafe`.
+- [x] Job **miri** CI hijau — termasuk uji paralel dua-thread pada archetype yang sama.
+- [x] RFC-0016 & ADR-0016 ditulis serta konsisten dengan kode.
 
 ## Ketergantungan
 
