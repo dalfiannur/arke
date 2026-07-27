@@ -2,6 +2,8 @@
 
 [![crates.io](https://img.shields.io/crates/v/arke.svg)](https://crates.io/crates/arke)
 [![docs.rs](https://img.shields.io/docsrs/arke)](https://docs.rs/arke)
+[![CI](https://github.com/dalfiannur/arke/actions/workflows/ci.yml/badge.svg)](https://github.com/dalfiannur/arke/actions/workflows/ci.yml)
+[![license](https://img.shields.io/crates/l/arke.svg)](LICENSE-MIT)
 
 ECS (Entity-Component-System) **standalone, deterministik, berbasis archetype** untuk Rust.
 
