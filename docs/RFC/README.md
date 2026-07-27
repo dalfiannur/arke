@@ -47,3 +47,4 @@ Draft → Discussion → Accepted | Rejected | Superseded
 | [RFC-0012](RFC-0012-derive-rename-all.md) | `derive(Serialize)` — rename_all & atribut level-tipe | Accepted |
 | [RFC-0013](RFC-0013-generic-tuple-queries.md) | Query tuple generik (arity & mutabilitas campuran) | Accepted |
 | [RFC-0014](RFC-0014-query-filters.md) | Filter query `With` / `Without` | Accepted |
+| [RFC-0015](RFC-0015-unsafecell-column-storage.md) | Penyimpanan kolom berbasis `UnsafeCell` | Accepted |

@@ -38,3 +38,4 @@ ADR bersifat **immutable** setelah Accepted: jangan menulis ulang isinya. Jika k
 | [ADR-0012](ADR-0012-derive-rename-all.md) | `derive(Serialize)` — rename_all & atribut level-tipe | Accepted |
 | [ADR-0013](ADR-0013-generic-tuple-queries.md) | Query tuple generik (arity & mutabilitas campuran) | Accepted |
 | [ADR-0014](ADR-0014-query-filters.md) | Filter query `With` / `Without` | Accepted |
+| [ADR-0015](ADR-0015-unsafecell-column-storage.md) | Penyimpanan kolom berbasis `UnsafeCell` | Accepted |

@@ -1,6 +1,6 @@
 # RN-0001: Penyimpanan kolom berbasis `UnsafeCell` untuk akses interior yang sound
 
-- **Status:** Open <!-- Open | Investigating | Graduated to RFC-XXXX | Closed -->
+- **Status:** Graduated to [RFC-0015](../RFC/RFC-0015-unsafecell-column-storage.md) <!-- Open | Investigating | Graduated to RFC-XXXX | Closed -->
 - **Tanggal:** 2026-07-27
 - **Dipicu oleh:** [RFC-0006](../RFC/RFC-0006-system-level-parallelism.md) (paralelisme tingkat-sistem)
 

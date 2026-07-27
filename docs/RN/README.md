@@ -26,4 +26,4 @@ Ketika sebuah RN cukup matang, ia **graduate** menjadi RFC. RN tetap disimpan de
 
 | RN | Judul | Status |
 | --- | --- | --- |
-| [RN-0001](RN-0001-unsafecell-column-storage.md) | Penyimpanan kolom berbasis `UnsafeCell` untuk akses interior yang sound | Open |
+| [RN-0001](RN-0001-unsafecell-column-storage.md) | Penyimpanan kolom berbasis `UnsafeCell` untuk akses interior yang sound | Graduated → RFC-0015 |
