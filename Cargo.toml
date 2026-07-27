@@ -13,10 +13,17 @@ repository = "https://github.com/dalfiannur/arke"
 keywords = ["ecs", "archetype", "deterministic", "gamedev", "simulation"]
 categories = ["data-structures", "game-development"]
 # Paket ramping: hanya sumber + README + lisensi. Governance & docs hidup di repo.
-include = ["/src", "/Cargo.toml", "/README.md", "/LICENSE-MIT"]
+include = ["/src", "/benches", "/Cargo.toml", "/README.md", "/LICENSE-MIT"]
 
 [lib]
 name = "arke"
+
+# Harness benchmark 0-dependensi (RN-0002): `harness = false` → main() sendiri
+# memakai `std::time::Instant` + `std::hint::black_box`, tanpa `criterion`.
+# Set `ARKE_BENCH_QUICK=1` untuk mode cepat (smoke CI).
+[[bench]]
+name = "storage_workloads"
+harness = false
 
 # Standalone core: TIDAK ADA dependensi PIHAK-KETIGA (STD-0003).
 # `arke-derive` adalah crate first-party di workspace ini, sendiri 0-dependensi
