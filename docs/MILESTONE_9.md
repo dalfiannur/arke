@@ -30,14 +30,14 @@ Menambahkan resource (state global singleton-per-tipe) dan cara mengaksesnya seb
 
 ## Kriteria selesai (Definition of Done)
 
-- [ ] `insert_resource`/`resource`/`resource_mut`/`remove_resource`/`contains_resource` bekerja; round-trip nilai teruji.
-- [ ] Resource dan komponen ber-`TypeId` sama tidak salah-konflik (namespace terpisah) — teruji.
-- [ ] `System::resource::<R>` memutasi resource saat dijalankan; akses tersimpul tulis R.
-- [ ] `System::each_res::<R, Q>` membaca resource sambil mengiterasi query; resource dikembalikan usai iterasi.
-- [ ] `Schedule` menempatkan sistem yang konflik pada resource ke stage berbeda (bukti STD-0005) — teruji.
-- [ ] Tetap **tanpa `unsafe`** & tanpa dependensi eksternal (STD-0003).
-- [ ] RFC-0010 & ADR-0010 ditulis serta konsisten dengan kode.
-- [ ] Semua tes hijau.
+- [x] `insert_resource`/`resource`/`resource_mut`/`remove_resource`/`contains_resource` bekerja; round-trip nilai teruji.
+- [x] Resource dan komponen ber-`TypeId` sama tidak salah-konflik (namespace terpisah) — teruji.
+- [x] `System::resource::<R>` memutasi resource saat dijalankan; akses tersimpul tulis R.
+- [x] `System::each_res::<R, Q>` membaca resource sambil mengiterasi query; resource dikembalikan usai iterasi.
+- [x] `Schedule` menempatkan sistem yang konflik pada resource ke stage berbeda (bukti STD-0005) — teruji.
+- [x] Tetap **tanpa `unsafe`** & tanpa dependensi eksternal (STD-0003).
+- [x] RFC-0010 & ADR-0010 ditulis serta konsisten dengan kode.
+- [x] Semua tes hijau (51 tes).
 
 ## Ketergantungan
 

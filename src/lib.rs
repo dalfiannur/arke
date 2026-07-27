@@ -18,9 +18,9 @@
 //! | --- | --- |
 //! | [`entity`] | `Entity` sebagai generational index |
 //! | [`component`] | Tipe komponen & identitasnya (registrasi otomatis) |
-//! | [`world`] | Otoritas atas entity/komponen + `spawn`/`insert`/`get`/`remove`/query + `par_for_each` |
+//! | [`world`] | Otoritas atas entity/komponen/resource + query + `par_for_each` |
 //! | [`query`] | `QueryData` berbasis-tipe + `Access` tersimpul (M-4) |
-//! | [`schedule`] | `System` + `Schedule` deterministik (M-2); `System::each` bertipe (M-4) |
+//! | [`schedule`] | `System` + `Schedule` deterministik (M-2); `each` bertipe (M-4); resource params (M-9) |
 //! | [`serialize`] | `Value` + trait `Serialize` + JSON tulis-tangan (M-6) |
 //! | [`snapshot`] | `Snapshot` World berversi, round-trip setia (M-6) |
 //! | [`error`] | `EcsError` berkonteks yang menyebut komponen (M-7) |

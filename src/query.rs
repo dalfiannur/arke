@@ -17,6 +17,10 @@ use crate::Component;
 pub struct Access {
     pub(crate) reads: Vec<TypeId>,
     pub(crate) writes: Vec<TypeId>,
+    // Namespace terpisah agar komponen `T` dan resource `T` (TypeId sama) tak
+    // salah-konflik (RFC-0010).
+    pub(crate) resource_reads: Vec<TypeId>,
+    pub(crate) resource_writes: Vec<TypeId>,
 }
 
 impl Access {
@@ -37,11 +41,27 @@ impl Access {
         self
     }
 
-    /// Apakah dua akses berkonflik: berbagi komponen yang ditulis salah satu.
+    /// Menandai baca resource `R`.
+    pub fn with_resource_read<R: 'static + Send>(mut self) -> Self {
+        self.resource_reads.push(TypeId::of::<R>());
+        self
+    }
+
+    /// Menandai tulis resource `R`.
+    pub fn with_resource_write<R: 'static + Send>(mut self) -> Self {
+        self.resource_writes.push(TypeId::of::<R>());
+        self
+    }
+
+    /// Apakah dua akses berkonflik: berbagi komponen **atau** resource yang
+    /// ditulis salah satu (dinilai per-namespace).
     pub(crate) fn conflicts(&self, other: &Access) -> bool {
         shares(&self.writes, &other.writes)
             || shares(&self.writes, &other.reads)
             || shares(&self.reads, &other.writes)
+            || shares(&self.resource_writes, &other.resource_writes)
+            || shares(&self.resource_writes, &other.resource_reads)
+            || shares(&self.resource_reads, &other.resource_writes)
     }
 }
 

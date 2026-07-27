@@ -7,6 +7,9 @@
 //! Isi struktur ini — tabel slot entity, registry komponen, dan penyimpanan
 //! archetype — ditambahkan secara test-first selama Milestone M-1.
 
+use std::any::{Any, TypeId};
+use std::collections::HashMap;
+
 use crate::archetype::Archetype;
 use crate::component::{Component, ComponentId, ComponentRegistry};
 use crate::entity::Entity;
@@ -42,6 +45,8 @@ pub struct World {
     registry: ComponentRegistry,
     archetypes: Vec<Archetype>,
     serde: SerdeRegistry,
+    /// State global singleton-per-tipe (RFC-0010).
+    resources: HashMap<TypeId, Box<dyn Any + Send>>,
 }
 
 impl World {
@@ -324,6 +329,38 @@ impl World {
             .downcast_ref::<TypedColumn<T>>()?
             .0
             .get(location.row)
+    }
+
+    /// Menyisipkan (atau menimpa) resource global bertipe `T` (RFC-0010).
+    pub fn insert_resource<T: 'static + Send>(&mut self, resource: T) {
+        self.resources.insert(TypeId::of::<T>(), Box::new(resource));
+    }
+
+    /// Referensi ke resource `T`, bila ada.
+    pub fn resource<T: 'static + Send>(&self) -> Option<&T> {
+        self.resources
+            .get(&TypeId::of::<T>())
+            .and_then(|b| b.downcast_ref::<T>())
+    }
+
+    /// Referensi mutabel ke resource `T`, bila ada.
+    pub fn resource_mut<T: 'static + Send>(&mut self) -> Option<&mut T> {
+        self.resources
+            .get_mut(&TypeId::of::<T>())
+            .and_then(|b| b.downcast_mut::<T>())
+    }
+
+    /// Menghapus dan mengembalikan resource `T`, bila ada.
+    pub fn remove_resource<T: 'static + Send>(&mut self) -> Option<T> {
+        self.resources
+            .remove(&TypeId::of::<T>())
+            .and_then(|b| b.downcast::<T>().ok())
+            .map(|b| *b)
+    }
+
+    /// Apakah resource `T` ada.
+    pub fn contains_resource<T: 'static + Send>(&self) -> bool {
+        self.resources.contains_key(&TypeId::of::<T>())
     }
 
     /// Mendaftarkan komponen `T` agar ikut dalam snapshot (opt-in, RFC-0007).
@@ -643,6 +680,25 @@ mod tests {
 
     #[derive(PartialEq, Debug)]
     struct Value(i32);
+    #[derive(PartialEq, Debug)]
+    struct Score(u32);
+
+    #[test]
+    fn resource_insert_get_mutate_remove() {
+        let mut world = World::new();
+        assert!(!world.contains_resource::<Score>());
+
+        world.insert_resource(Score(10));
+        assert!(world.contains_resource::<Score>());
+        assert_eq!(world.resource::<Score>(), Some(&Score(10)));
+
+        world.resource_mut::<Score>().unwrap().0 += 5;
+        assert_eq!(world.resource::<Score>(), Some(&Score(15)));
+
+        assert_eq!(world.remove_resource::<Score>(), Some(Score(15)));
+        assert!(!world.contains_resource::<Score>());
+        assert_eq!(world.resource::<Score>(), None);
+    }
 
     #[test]
     fn par_for_each_menerapkan_ke_semua_pemilik() {

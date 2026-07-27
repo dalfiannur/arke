@@ -49,6 +49,38 @@ impl System {
             access: Q::access(),
         }
     }
+
+    /// Membangun sistem yang memutasi resource `R` sekali per run, dengan akses
+    /// tersimpul (tulis `R`). No-op bila resource tak ada (RFC-0010).
+    pub fn resource<R: 'static + Send>(mut f: impl FnMut(&mut R) + 'static) -> Self {
+        Self {
+            run: Box::new(move |world: &mut World| {
+                if let Some(r) = world.resource_mut::<R>() {
+                    f(r);
+                }
+            }),
+            access: Access::new().with_resource_write::<R>(),
+        }
+    }
+
+    /// Membangun sistem yang **membaca** resource `R` sambil mengiterasi query
+    /// `Q` per entity. Akses tersimpul: baca `R` + akses `Q`.
+    ///
+    /// Aman tanpa `unsafe`: resource diambil keluar sementara selama iterasi
+    /// lalu dikembalikan. No-op bila resource tak ada.
+    pub fn each_res<R: 'static + Send, Q: QueryData>(
+        mut f: impl FnMut(&R, Q::Item<'_>) + 'static,
+    ) -> Self {
+        Self {
+            run: Box::new(move |world: &mut World| {
+                if let Some(r) = world.remove_resource::<R>() {
+                    Q::each(world, |item| f(&r, item));
+                    world.insert_resource(r);
+                }
+            }),
+            access: Q::access().with_resource_read::<R>(),
+        }
+    }
 }
 
 /// Kumpulan sistem yang dijalankan dalam urutan deterministik.
@@ -119,6 +151,53 @@ mod tests {
     struct Counter(i32);
     struct Position;
     struct Velocity;
+    #[derive(PartialEq, Debug)]
+    struct Tally(i32);
+
+    #[test]
+    fn system_resource_memutasi_resource_tiap_run() {
+        let mut world = World::new();
+        world.insert_resource(Tally(0));
+        let mut s = Schedule::new();
+        s.add(System::resource::<Tally>(|t| t.0 += 3));
+        s.run(&mut world);
+        s.run(&mut world);
+        assert_eq!(world.resource::<Tally>(), Some(&Tally(6)));
+    }
+
+    #[test]
+    fn system_each_res_baca_resource_saat_iterasi_lalu_kembalikan() {
+        let mut world = World::new();
+        world.insert_resource(Tally(10));
+        let e = world.spawn();
+        world.insert(e, Counter(1));
+
+        let mut s = Schedule::new();
+        s.add(System::each_res::<Tally, &mut Counter>(|t, c| c.0 += t.0));
+        s.run(&mut world);
+
+        assert_eq!(world.get::<Counter>(e), Some(&Counter(11)));
+        // Resource dikembalikan setelah iterasi.
+        assert_eq!(world.resource::<Tally>(), Some(&Tally(10)));
+    }
+
+    #[test]
+    fn dua_sistem_menulis_resource_sama_stage_berbeda() {
+        let mut s = Schedule::new();
+        s.add(System::resource::<Tally>(|_| {}));
+        s.add(System::resource::<Tally>(|_| {}));
+        assert_eq!(s.stages(), vec![vec![0], vec![1]]);
+    }
+
+    #[test]
+    fn komponen_dan_resource_tipe_sama_tak_konflik() {
+        // Sistem 0 menulis KOMPONEN Counter; sistem 1 menulis RESOURCE Counter.
+        // TypeId sama, namespace berbeda → tak konflik → satu stage.
+        let mut s = Schedule::new();
+        s.add(System::each::<&mut Counter>(|_| {}));
+        s.add(System::resource::<Counter>(|_| {}));
+        assert_eq!(s.stages(), vec![vec![0, 1]]);
+    }
 
     #[test]
     fn stage_mengelompokkan_tak_konflik_dan_memisahkan_yang_konflik() {
