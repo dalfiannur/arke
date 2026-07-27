@@ -37,3 +37,4 @@ Draft → Discussion → Accepted | Rejected | Superseded
 | [RFC-0002](RFC-0002-core-storage-architecture.md) | Arsitektur penyimpanan inti — archetype + generational entity | Accepted |
 | [RFC-0003](RFC-0003-deterministic-scheduler.md) | Scheduler deterministik dengan analisis konflik | Accepted |
 | [RFC-0004](RFC-0004-data-parallel-iteration.md) | Iterasi data-parallel yang aman | Accepted |
+| [RFC-0005](RFC-0005-type-based-systems.md) | Sistem berbasis-tipe dengan akses tersimpul | Accepted |
