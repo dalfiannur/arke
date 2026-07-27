@@ -1,0 +1,48 @@
+{
+  "suite_version": "1.0",
+  "contract": "../../spec/VALIDATOR_CONTRACT.md",
+  "description": "Conformance suite untuk Validator Contract v1. Path relatif terhadap berkas ini. Runner apa pun boleh memakainya; lihat run.md.",
+  "schema": "../../schema/v1/conformance-rule-catalog.schema.json",
+  "cases": [
+    {
+      "name": "katalog valid lolos tanpa error",
+      "instance": "../../schema/examples/conformance-rule-catalog.valid.json",
+      "expect": { "valid": true, "errors": [] }
+    },
+    {
+      "name": "cacat properti tiap-rule terdeteksi",
+      "instance": "../../schema/examples/conformance-rule-catalog.invalid.json",
+      "expect": {
+        "valid": false,
+        "errors": [
+          { "path": "/rules/0/id", "keyword": "pattern" },
+          { "path": "/rules/0/level", "keyword": "enum" },
+          { "path": "/rules/0/statement", "keyword": "minLength" },
+          { "path": "/rules/1/verify", "keyword": "required" },
+          { "path": "/rules/1/note", "keyword": "additionalProperties" }
+        ]
+      }
+    },
+    {
+      "name": "type dan minItems ditegakkan (type short-circuit)",
+      "instance": "../../schema/examples/conformance-rule-catalog.type-errors.json",
+      "expect": {
+        "valid": false,
+        "errors": [
+          { "path": "/schema_version", "keyword": "type" },
+          { "path": "/rules", "keyword": "minItems" }
+        ]
+      }
+    },
+    {
+      "name": "pattern versi katalog ditegakkan di root",
+      "instance": "../../schema/examples/conformance-rule-catalog.bad-version.json",
+      "expect": {
+        "valid": false,
+        "errors": [
+          { "path": "/schema_version", "keyword": "pattern" }
+        ]
+      }
+    }
+  ]
+}

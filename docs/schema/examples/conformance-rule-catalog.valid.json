@@ -1,0 +1,25 @@
+{
+  "schema_version": "1.0",
+  "rules": [
+    {
+      "id": "STD-0001",
+      "level": "MUST",
+      "statement": "Setiap kontrak data yang dipublikasikan menyertakan field versi.",
+      "rationale": "Mendukung migrasi eksplisit (ARCHITECTURE_BIBLE §6.1).",
+      "verify": "Schema menandai field versi sebagai required; validator menolak dokumen tanpanya."
+    },
+    {
+      "id": "STD-0003",
+      "level": "MUST",
+      "statement": "Model data inti tidak mengimpor tipe khusus vendor.",
+      "rationale": "Invarian independensi vendor.",
+      "verify": "Aturan dependensi (lint impor) di CI."
+    },
+    {
+      "id": "STD-0007",
+      "level": "SHOULD",
+      "statement": "Objek inti menyertakan timestamp pembuatan dan pembaruan.",
+      "verify": "Schema objek inti menandai kedua field sebagai required."
+    }
+  ]
+}

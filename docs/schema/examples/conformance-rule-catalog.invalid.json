@@ -1,0 +1,17 @@
+{
+  "schema_version": "1.0",
+  "rules": [
+    {
+      "id": "STD-1",
+      "level": "REQUIRED",
+      "statement": "",
+      "verify": "review"
+    },
+    {
+      "id": "STD-0009",
+      "level": "MUST",
+      "statement": "Aturan tanpa cara verifikasi.",
+      "note": "field ini tidak diizinkan"
+    }
+  ]
+}

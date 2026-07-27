@@ -1,0 +1,13 @@
+# Artefak build
+/target
+
+# Library: lockfile tidak di-commit (biarkan konsumen menyelesaikan versi)
+Cargo.lock
+
+# Berkas OS / editor
+*.swp
+.DS_Store
+
+# Claude Code local/machine-specific settings
+.claude/settings.local.json
+.claude/*.tmp.*

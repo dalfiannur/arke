@@ -1,0 +1,54 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://example.com/schema/v1/conformance-rule-catalog.schema.json",
+  "title": "Conformance Rule Catalog v1",
+  "description": "Bentuk-data dari STANDARDS.md: setiap aturan STD-xxxx sebagai objek yang dapat divalidasi mesin. Ganti $id dengan domain proyekmu.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "rules"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^1\\.[0-9]+$",
+      "description": "Versi mayor.minor dari kontrak katalog ini. Wajib (lihat STD-0001)."
+    },
+    "rules": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/definitions/rule" }
+    }
+  },
+  "definitions": {
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "level", "statement", "verify"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^STD-[0-9]{4}$",
+          "description": "Identitas stabil, mis. STD-0001."
+        },
+        "level": {
+          "type": "string",
+          "enum": ["MUST", "SHOULD", "MAY"],
+          "description": "Kekuatan normatif (RFC 2119)."
+        },
+        "statement": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Pernyataan aturan."
+        },
+        "rationale": {
+          "type": "string",
+          "description": "Alasan; idealnya menaut ke invarian ARCHITECTURE_BIBLE."
+        },
+        "verify": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Bagaimana aturan diperiksa: schema/tes/lint/review."
+        }
+      }
+    }
+  }
+}

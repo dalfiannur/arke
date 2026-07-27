@@ -1,0 +1,37 @@
+# RFC — Request for Comments
+
+Proposal berumur panjang untuk perubahan konsekuensial: arsitektur, kontrak, format data, atau kemampuan inti. RFC adalah tempat **alternatif dipertimbangkan secara terbuka** sebelum sebuah arah dipilih.
+
+## Kapan menulis RFC
+
+Tulis RFC bila perubahan:
+
+- menyentuh invarian atau model sistem di [ARCHITECTURE_BIBLE](../ARCHITECTURE_BIBLE.md);
+- menamb/mengubah kontrak data atau API publik;
+- memperkenalkan kemampuan inti baru; atau
+- sulit dibatalkan setelah dirilis.
+
+Perubahan kecil dan lokal tidak butuh RFC.
+
+## Lifecycle
+
+```text
+Draft → Discussion → Accepted | Rejected | Superseded
+```
+
+- **Accepted** RFC melahirkan satu atau lebih **ADR** yang merekam keputusan + konsekuensinya.
+- **Superseded** RFC tetap disimpan; tambahkan tautan ke penggantinya.
+- Pertanyaan yang belum matang untuk RFC ditampung sebagai [RN](../RN/README.md) sampai *graduate*.
+
+## Konvensi
+
+- Nomor berurutan, empat digit: `RFC-0001`, `RFC-0002`, …
+- Nama file: `RFC-<NNNN>-<slug-kebab-case>.md`.
+- Salin [`_TEMPLATE.md`](_TEMPLATE.md) untuk memulai.
+
+## Indeks
+
+| RFC | Judul | Status |
+| --- | --- | --- |
+| [RFC-0001](RFC-0001-documentation-first-governance.md) | Tata-kelola documentation-first | Accepted |
+| [RFC-0002](RFC-0002-core-storage-architecture.md) | Arsitektur penyimpanan inti — archetype + generational entity | Accepted |

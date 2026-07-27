@@ -1,0 +1,28 @@
+# ADR — Architecture Decision Records
+
+Catatan **keputusan** konsekuensial yang telah **diterima**, beserta konteks dan konsekuensinya. Berbeda dari RFC (yang mengeksplorasi opsi), ADR merekam pilihan yang sudah diambil agar tidak diperdebatkan ulang tanpa alasan baru.
+
+## Kapan menulis ADR
+
+Tulis ADR ketika sebuah RFC diterima, atau ketika keputusan arsitektural konsekuensial diambil dan perlu direkam permanen. Satu ADR = satu keputusan.
+
+## Lifecycle
+
+```text
+Proposed → Accepted → (Deprecated | Superseded by ADR-XXXX)
+```
+
+ADR bersifat **immutable** setelah Accepted: jangan menulis ulang isinya. Jika keputusan berubah, tulis ADR baru yang men-*supersede* yang lama dan tautkan keduanya.
+
+## Konvensi
+
+- Nomor berurutan, empat digit: `ADR-0001`, `ADR-0002`, …
+- Nama file: `ADR-<NNNN>-<slug-kebab-case>.md`.
+- Salin [`_TEMPLATE.md`](_TEMPLATE.md) untuk memulai.
+
+## Indeks
+
+| ADR | Judul | Status |
+| --- | --- | --- |
+| [ADR-0001](ADR-0001-documentation-first.md) | Tata-kelola documentation-first | Accepted |
+| [ADR-0002](ADR-0002-core-storage-architecture.md) | Arsitektur penyimpanan inti — archetype + generational entity | Accepted |
