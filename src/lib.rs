@@ -19,6 +19,7 @@
 //! | [`entity`] | `Entity` sebagai generational index |
 //! | [`component`] | Tipe komponen & identitasnya (registrasi otomatis) |
 //! | [`world`] | Otoritas atas entity/komponen + `spawn`/`insert`/`get`/`remove`/query |
+//! | [`schedule`] | `System` + `Schedule` deterministik (M-2) |
 //! | `storage` (privat) | Kolom kontigu bertipe (`TypedColumn`) |
 //! | `archetype` (privat) | Tabel per-kombinasi-komponen |
 //!
@@ -30,6 +31,7 @@
 
 pub mod component;
 pub mod entity;
+pub mod schedule;
 pub mod world;
 
 mod archetype;
@@ -37,4 +39,5 @@ mod storage;
 
 pub use component::{Component, ComponentId};
 pub use entity::Entity;
+pub use schedule::{Schedule, System};
 pub use world::World;

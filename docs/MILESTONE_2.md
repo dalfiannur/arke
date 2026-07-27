@@ -31,13 +31,13 @@ Menambahkan lapisan **System** dan **Schedule** di atas `World`: cara mengorgani
 
 ## Kriteria selesai (Definition of Done)
 
-- [ ] `System` dapat dibuat dari closure dan mendeklarasikan `reads`/`writes`.
-- [ ] Aturan konflik benar: write-write & read-write berkonflik; read-read tidak.
-- [ ] `Schedule::stages()` menempatkan sistem tak-konflik dalam stage yang sama dan yang berkonflik dalam stage berbeda, secara deterministik (bukti STD-0005).
-- [ ] `Schedule::run` mengeksekusi sistem stage-demi-stage; hasilnya setara eksekusi serial urutan registrasi.
-- [ ] Menjalankan schedule yang sama dua kali menghasilkan keadaan identik (tes lintas-run).
-- [ ] RFC-0003 & ADR-0003 ditulis serta konsisten dengan kode.
-- [ ] Semua tes hijau; core tetap `--no-default-features` & bebas dependensi (STD-0003).
+- [x] `System` dapat dibuat dari closure dan mendeklarasikan `reads`/`writes`.
+- [x] Aturan konflik benar: write-write & read-write berkonflik; read-read tidak.
+- [x] `Schedule::stages()` menempatkan sistem tak-konflik dalam stage yang sama dan yang berkonflik dalam stage berbeda, secara deterministik (bukti STD-0005).
+- [x] `Schedule::run` mengeksekusi sistem stage-demi-stage; hasilnya setara eksekusi serial urutan registrasi.
+- [x] Menjalankan schedule yang sama dua kali menghasilkan keadaan identik (tes lintas-run).
+- [x] RFC-0003 & ADR-0003 ditulis serta konsisten dengan kode.
+- [x] Semua tes hijau (21 tes) secara lokal; core tetap `--no-default-features` & bebas dependensi (STD-0003).
 
 ## Ketergantungan
 
