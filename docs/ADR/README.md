@@ -33,3 +33,4 @@ ADR bersifat **immutable** setelah Accepted: jangan menulis ulang isinya. Jika k
 | [ADR-0007](ADR-0007-world-snapshot.md) | Snapshot & serialisasi World | Accepted |
 | [ADR-0008](ADR-0008-contextual-errors.md) | Error berkonteks | Accepted |
 | [ADR-0009](ADR-0009-derive-serialize.md) | `derive(Serialize)` tanpa dependensi eksternal | Accepted |
+| [ADR-0010](ADR-0010-resources.md) | Resources sebagai parameter sistem | Accepted |

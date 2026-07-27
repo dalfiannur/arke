@@ -42,3 +42,4 @@ Draft → Discussion → Accepted | Rejected | Superseded
 | [RFC-0007](RFC-0007-world-snapshot.md) | Snapshot & serialisasi World | Accepted |
 | [RFC-0008](RFC-0008-contextual-errors.md) | Error berkonteks | Accepted |
 | [RFC-0009](RFC-0009-derive-serialize.md) | `derive(Serialize)` tanpa dependensi eksternal | Accepted |
+| [RFC-0010](RFC-0010-resources.md) | Resources sebagai parameter sistem | Accepted |
