@@ -29,13 +29,13 @@ Memperluas `#[derive(Serialize)]` untuk enum dan atribut field (`skip`/`rename`)
 
 ## Kriteria selesai (Definition of Done)
 
-- [ ] Derive enum: varian unit, tuple, dan struct — round-trip teruji (termasuk enum campuran).
-- [ ] Nama varian tak dikenal saat `from_value` → `None` (teruji).
-- [ ] `#[serialize(rename = "k")]` mengubah kunci `Map`; round-trip teruji.
-- [ ] `#[serialize(skip)]` menghilangkan field dari output & memakai `Default` saat masuk; round-trip teruji.
-- [ ] `arke-derive` tetap **0 dependensi crates.io**; core tetap tanpa `unsafe`.
-- [ ] RFC-0011 & ADR-0011 ditulis serta konsisten dengan kode.
-- [ ] Semua tes hijau.
+- [x] Derive enum: varian unit, tuple, dan struct — round-trip teruji (enum campuran `Shape`).
+- [x] Nama varian tak dikenal saat `from_value` → `None` (teruji).
+- [x] `#[serialize(rename = "k")]` mengubah kunci `Map`; round-trip teruji.
+- [x] `#[serialize(skip)]` menghilangkan field dari output & memakai `Default` saat masuk; round-trip teruji.
+- [x] `arke-derive` tetap **0 dependensi crates.io**; core tetap tanpa `unsafe`.
+- [x] RFC-0011 & ADR-0011 ditulis serta konsisten dengan kode.
+- [x] Semua tes hijau (54 tes).
 
 ## Ketergantungan
 
