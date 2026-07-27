@@ -45,3 +45,4 @@ Draft → Discussion → Accepted | Rejected | Superseded
 | [RFC-0010](RFC-0010-resources.md) | Resources sebagai parameter sistem | Accepted |
 | [RFC-0011](RFC-0011-derive-enum-attributes.md) | `derive(Serialize)` untuk enum + atribut field | Accepted |
 | [RFC-0012](RFC-0012-derive-rename-all.md) | `derive(Serialize)` — rename_all & atribut level-tipe | Accepted |
+| [RFC-0013](RFC-0013-generic-tuple-queries.md) | Query tuple generik (arity & mutabilitas campuran) | Accepted |
