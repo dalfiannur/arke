@@ -22,6 +22,7 @@
 //! | [`query`] | `QueryData` tuple generik + filter `With`/`Without` + `Access` (M-4/12/13); `QueryState` cache inkremental (M-16); term `Entity` (M-19) |
 //! | [`schedule`] | `System` + `Schedule` (M-2); `each` bertipe (M-4); resources (M-9); `run_parallel` (M-15); `each_cmd` (M-18) |
 //! | [`command`] | `CommandBuffer` — mutasi struktural tertunda (M-18) |
+//! | [`bundle`] | `Bundle` — sisip tuple komponen dalam satu pindah archetype (M-21) |
 //! | [`serialize`] | `Value` + trait `Serialize` + JSON tulis-tangan (M-6) |
 //! | [`snapshot`] | `Snapshot` World berversi, round-trip setia (M-6) |
 //! | [`error`] | `EcsError` berkonteks yang menyebut komponen (M-7) |
@@ -34,6 +35,7 @@
 //! `QueryData` generik atas tuple sembarang-arity direncanakan untuk milestone
 //! berikutnya.
 
+pub mod bundle;
 pub mod command;
 pub mod component;
 pub mod entity;
@@ -47,6 +49,7 @@ pub mod world;
 mod archetype;
 mod storage;
 
+pub use bundle::Bundle;
 pub use command::{CommandBuffer, EntityCommands};
 pub use component::{Component, ComponentId};
 pub use entity::Entity;

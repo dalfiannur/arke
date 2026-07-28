@@ -27,14 +27,14 @@ Menyisipkan beberapa komponen sekaligus lewat tuple (`spawn_bundle`/`insert_bund
 
 ## Kriteria selesai (Definition of Done)
 
-- [ ] `spawn_bundle((A, B))` membuat entity ber-A,B (nilai benar) — teruji.
-- [ ] `insert_bundle` pada entity ber-komponen menambah bundle (satu archetype tujuan) — teruji.
-- [ ] Hasil **identik** dengan `insert(A); insert(B)` (archetype & query sama) — teruji.
-- [ ] Komponen duplikat/sudah-ada → panic menyebut komponen — teruji (should_panic).
-- [ ] Arity beragam (1–8) berfungsi — teruji.
-- [ ] Determinisme (id terurut) & tanpa `unsafe` baru.
-- [ ] RFC-0022 & ADR-0022 konsisten dengan kode.
-- [ ] Semua tes + miri hijau.
+- [x] `spawn_bundle((A, B))` membuat entity ber-A,B (nilai benar) — teruji (`spawn_bundle_dan_insert_bundle_setara_insert_berurutan`).
+- [x] `insert_bundle` pada entity ber-komponen menambah bundle — teruji (idem, `(C,)` ke entity ber-A,B).
+- [x] Hasil **identik** dengan `insert(A); insert(B)` (nilai & komponen sama) — teruji (idem, world sekuensial pembanding).
+- [x] Komponen duplikat/sudah-ada → panic menyebut komponen — teruji (`insert_bundle_komponen_sudah_ada_panik`, `spawn_bundle_tipe_duplikat_panik`).
+- [x] Arity beragam (1–8) berfungsi — teruji arity 1/3/5 (`bundle_arity_lima_berfungsi`); impl 1–8.
+- [x] Determinisme (id terurut) & tanpa `unsafe` baru — `ids.sort_unstable()`; hanya operasi archetype aman. Contoh `no_unsafe` memakai `spawn_bundle` di bawah `forbid(unsafe_code)`.
+- [x] RFC-0022 & ADR-0022 konsisten dengan kode.
+- [x] Semua tes + miri hijau (miri di CI).
 
 ## Ketergantungan
 

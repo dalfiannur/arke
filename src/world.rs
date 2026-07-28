@@ -11,6 +11,7 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 
 use crate::archetype::Archetype;
+use crate::bundle::Bundle;
 use crate::component::{Component, ComponentId, ComponentRegistry};
 use crate::entity::Entity;
 use crate::error::EcsError;
@@ -151,6 +152,74 @@ impl World {
             row: dst_row,
         });
         self.fix_swapped(moved, loc.archetype, loc.row);
+    }
+
+    /// Menyisipkan **beberapa** komponen (tuple) sekaligus ke `entity` dalam
+    /// **satu** perpindahan archetype (RFC-0022).
+    ///
+    /// Setara `insert` berurutan tetapi menghindari archetype-antara. Komponen
+    /// bundle harus **distinct** dan **belum dimiliki** `entity`; pelanggaran →
+    /// panic menyebut komponennya. No-op bila `entity` tak hidup.
+    pub fn insert_bundle<B: Bundle>(&mut self, entity: Entity, bundle: B) {
+        if !self.contains(entity) {
+            return;
+        }
+        let bundle_ids = B::ids(&mut self.registry);
+        let index = entity.index() as usize;
+
+        let old_ids: Vec<ComponentId> = match self.entities[index].location {
+            Some(loc) => self.archetypes[loc.archetype].component_ids().to_vec(),
+            None => Vec::new(),
+        };
+
+        // Archetype tujuan = lama ∪ bundle; komponen wajib distinct + baru.
+        let mut ids = old_ids;
+        for &bid in &bundle_ids {
+            if ids.contains(&bid) {
+                panic!(
+                    "insert_bundle: komponen `{}` sudah ada pada entity atau duplikat dalam bundle",
+                    self.registry.name(bid)
+                );
+            }
+            ids.push(bid);
+        }
+        ids.sort_unstable();
+        let dst_idx = self.find_or_create_archetype(&ids);
+
+        match self.entities[index].location {
+            Some(loc) => {
+                let (moved, dst_row) = {
+                    let (src, dst) = split_two(&mut self.archetypes, loc.archetype, dst_idx);
+                    let dst_row = dst.push_entity(entity);
+                    let moved = src.move_row_to(loc.row, dst);
+                    bundle.push(dst, &self.registry);
+                    (moved, dst_row)
+                };
+                self.entities[index].location = Some(Location {
+                    archetype: dst_idx,
+                    row: dst_row,
+                });
+                self.fix_swapped(moved, loc.archetype, loc.row);
+            }
+            None => {
+                let dst = &mut self.archetypes[dst_idx];
+                let dst_row = dst.push_entity(entity);
+                bundle.push(dst, &self.registry);
+                self.entities[index].location = Some(Location {
+                    archetype: dst_idx,
+                    row: dst_row,
+                });
+            }
+        }
+    }
+
+    /// Membuat entity baru langsung dengan bundle komponen (RFC-0022).
+    ///
+    /// `spawn` + [`insert_bundle`](Self::insert_bundle) — satu penempatan archetype.
+    pub fn spawn_bundle<B: Bundle>(&mut self, bundle: B) -> Entity {
+        let entity = self.spawn();
+        self.insert_bundle(entity, bundle);
+        entity
     }
 
     /// Menghapus komponen `T` dari `entity`, mengembalikan nilainya bila ada.
@@ -549,6 +618,76 @@ mod tests {
         let e = world.spawn();
         world.despawn(e);
         assert!(!world.contains(e));
+    }
+
+    #[test]
+    fn spawn_bundle_dan_insert_bundle_setara_insert_berurutan() {
+        #[derive(PartialEq, Debug)]
+        struct A(i32);
+        #[derive(PartialEq, Debug)]
+        struct B(i32);
+        #[derive(PartialEq, Debug)]
+        struct C(i32);
+
+        // spawn_bundle membuat entity ber-A,B.
+        let mut world = World::new();
+        let e = world.spawn_bundle((A(1), B(2)));
+        assert_eq!(world.get::<A>(e), Some(&A(1)));
+        assert_eq!(world.get::<B>(e), Some(&B(2)));
+
+        // insert_bundle menambah C ke entity yang sudah ber-A,B.
+        world.insert_bundle(e, (C(3),));
+        assert_eq!(world.get::<C>(e), Some(&C(3)));
+
+        // Identik dengan insert berurutan (archetype & nilai sama).
+        let mut seq = World::new();
+        let f = seq.spawn();
+        seq.insert(f, A(1));
+        seq.insert(f, B(2));
+        seq.insert(f, C(3));
+        assert_eq!(seq.get::<A>(f), Some(&A(1)));
+        assert_eq!(seq.get::<B>(f), Some(&B(2)));
+        assert_eq!(seq.get::<C>(f), Some(&C(3)));
+    }
+
+    #[test]
+    fn bundle_arity_lima_berfungsi() {
+        #[derive(PartialEq, Debug)]
+        struct A(i32);
+        #[derive(PartialEq, Debug)]
+        struct B(i32);
+        #[derive(PartialEq, Debug)]
+        struct C(i32);
+        #[derive(PartialEq, Debug)]
+        struct D(i32);
+        #[derive(PartialEq, Debug)]
+        struct E(i32);
+
+        let mut world = World::new();
+        let e = world.spawn_bundle((A(1), B(2), C(3), D(4), E(5)));
+        assert_eq!(world.get::<A>(e), Some(&A(1)));
+        assert_eq!(world.get::<C>(e), Some(&C(3)));
+        assert_eq!(world.get::<E>(e), Some(&E(5)));
+    }
+
+    #[test]
+    #[should_panic(expected = "insert_bundle")]
+    fn insert_bundle_komponen_sudah_ada_panik() {
+        #[allow(dead_code)]
+        struct A(i32);
+        let mut world = World::new();
+        let e = world.spawn();
+        world.insert(e, A(1));
+        world.insert_bundle(e, (A(2),)); // A sudah ada → panic
+    }
+
+    #[test]
+    #[should_panic(expected = "insert_bundle")]
+    fn spawn_bundle_tipe_duplikat_panik() {
+        #[allow(dead_code)]
+        struct A(i32);
+        let mut world = World::new();
+        world.spawn_bundle((A(1), A(2))); // dua A → panic
     }
 
     #[test]

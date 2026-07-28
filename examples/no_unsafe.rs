@@ -14,9 +14,8 @@ struct Velocity(i32, i32);
 fn main() {
     let mut world = World::new();
 
-    let a = world.spawn();
-    world.insert(a, Position(0, 0));
-    world.insert(a, Velocity(1, 2));
+    // Bundle: Position + Velocity dalam satu pindah archetype (RFC-0022).
+    let a = world.spawn_bundle((Position(0, 0), Velocity(1, 2)));
 
     let b = world.spawn();
     world.insert(b, Position(10, 10)); // tanpa Velocity
