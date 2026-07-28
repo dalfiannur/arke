@@ -7,7 +7,7 @@
 //! INTEGER/BIGINT/NUMERIC (u64/usize)/REAL/DOUBLE PRECISION/BOOLEAN/TEXT +
 //! `Option<T>` nullable + `JSONB` (field non-skalar via `arke::Serialize`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use arke::{Component, Entity, QueryData, World};
 use sqlx::{PgPool, Postgres, Row, postgres::PgArguments, postgres::PgPoolOptions, query::Query};
@@ -90,8 +90,14 @@ impl PgStore {
         self
     }
 
-    /// Membuat tabel `arke_entities` + satu tabel per komponen terdaftar
-    /// (idempoten via `IF NOT EXISTS`).
+    /// Membuat/**merekonsiliasi** tabel `arke_entities` + satu tabel per komponen
+    /// terdaftar, idempoten. Menangani **evolusi skema** komponen (RFC-0021 §7):
+    ///
+    /// - Field **ditambah** → `ALTER TABLE ADD COLUMN` (baris lama di-*backfill*
+    ///   dengan default untuk kolom `NOT NULL`).
+    /// - Field **dihapus** → kolom usang dijadikan **nullable** (`DROP NOT NULL`)
+    ///   — **non-destruktif**: data lama tetap, `INSERT` baru yang tak mengisinya
+    ///   jadi valid. (Drop kolom sepenuhnya diserahkan ke migrasi manual.)
     pub async fn migrate(&self) -> Result<(), sqlx::Error> {
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS arke_entities \
@@ -107,9 +113,56 @@ impl PgStore {
         .execute(&self.pool)
         .await?;
         for r in &self.registered {
-            sqlx::query(&create_table_sql_from(r.table, r.columns))
+            self.reconcile_table(r).await?;
+        }
+        Ok(())
+    }
+
+    /// Membuat tabel komponen bila belum ada, lalu menyelaraskan kolomnya dengan
+    /// [`PgComponent::COLUMNS`] terkini (tambah yang hilang; usang → nullable).
+    async fn reconcile_table(&self, r: &Registered) -> Result<(), sqlx::Error> {
+        sqlx::query(&create_table_sql_from(r.table, r.columns))
+            .execute(&self.pool)
+            .await?;
+
+        // Tambah kolom yang hilang (field baru); backfill NOT NULL dgn default.
+        for c in r.columns {
+            let constraint = if c.nullable {
+                String::new()
+            } else {
+                format!(" NOT NULL DEFAULT {}", default_sql(c.ty))
+            };
+            sqlx::query(&format!(
+                "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} {}{}",
+                r.table,
+                c.name,
+                c.ty.sql(),
+                constraint
+            ))
+            .execute(&self.pool)
+            .await?;
+        }
+
+        // Kolom usang (field dihapus) → jadikan nullable (non-destruktif).
+        let desired: HashSet<&str> = r.columns.iter().map(|c| c.name).collect();
+        let existing = sqlx::query(
+            "SELECT column_name FROM information_schema.columns \
+             WHERE table_schema = current_schema() AND table_name = $1 \
+             AND column_name <> 'entity_id'",
+        )
+        .bind(r.table)
+        .fetch_all(&self.pool)
+        .await?;
+        for row in existing {
+            let name: String = row.try_get("column_name")?;
+            if !desired.contains(name.as_str()) {
+                sqlx::query(&format!(
+                    "ALTER TABLE {} ALTER COLUMN {} DROP NOT NULL",
+                    r.table, name
+                ))
                 .execute(&self.pool)
                 .await?;
+            }
         }
         Ok(())
     }
@@ -380,6 +433,20 @@ impl std::fmt::Display for UpdateError {
 }
 
 impl std::error::Error for UpdateError {}
+
+/// Default backfill untuk kolom `NOT NULL` yang ditambahkan ke tabel ber-baris.
+fn default_sql(ty: PgType) -> &'static str {
+    match ty {
+        PgType::Integer
+        | PgType::BigInt
+        | PgType::Numeric
+        | PgType::Real
+        | PgType::DoublePrecision => "0",
+        PgType::Boolean => "false",
+        PgType::Text => "''",
+        PgType::Jsonb => "'null'::jsonb",
+    }
+}
 
 /// Cast eksplisit placeholder INSERT untuk tipe yang di-bind sebagai teks
 /// (Postgres tak meng-cast text→jsonb/numeric implisit).
