@@ -7,7 +7,7 @@
 
 ## Ringkasan
 
-Crate **adapter terpisah `arke-postgres`** yang menjadikan **PostgreSQL sumber kebenaran (source of truth) yang durable** bagi keadaan ECS, dengan **pemetaan relasional** (satu tabel per tipe komponen) yang dapat di-query SQL biasa (join lintas-komponen, analitik, akses dari service lain), lewat API **async** (sqlx/tokio). `arke` core **tetap 0-dependensi** (STD-0003); seluruh dependensi DB terkurung di crate adapter.
+Crate **adapter terpisah `arke-postgres`** yang menjadikan **PostgreSQL sumber kebenaran (source of truth) yang durable** bagi keadaan ECS, dengan **pemetaan relasional berkolom-tipe** (satu tabel per tipe komponen, tiap field → **kolom SQL nyata** ber-tipe) yang dapat di-query SQL biasa (join lintas-komponen, index, analitik, akses dari service lain), lewat API **async** (sqlx/tokio). Skema kolom diturunkan dari sebuah **derive `#[derive(PgComponent)]`**. `arke` core **tetap 0-dependensi** (STD-0003); seluruh dependensi DB terkurung di crate adapter.
 
 Model relasi: **`World` = *working set* in-memory** yang di-*materialize* dari Postgres, dijalankan sistem-sistemnya secara deterministik, lalu **ditulis-balik**. Postgres memegang data otoritatif; sinkronisasi terjadi di **titik-titik tertentu** (muat saat mulai, tulis-balik saat checkpoint / lewat pelacakan-perubahan) — **bukan** per-tick.
 
@@ -36,7 +36,7 @@ arke-postgres   (adapter)  → depends: arke + sqlx (async, Postgres, JSONB, poo
 
 `arke-postgres` **tidak** tunduk STD-0003 (ia justru gerbang dependensi). Ia hanya memakai API publik `arke` (`Serialize`/`Value`, `register_serializable`, `snapshot`/`load_snapshot`, `Entity`, query/command buffer).
 
-### 2. Skema relasional
+### 2. Skema relasional berkolom-tipe
 
 **Registry entity** (cermin generational index, STD-0007):
 
@@ -47,24 +47,61 @@ CREATE TABLE arke_entities (
 );
 ```
 
-**Satu tabel per tipe komponen terdaftar**, dikunci **nama tipe** (portabel, seperti Snapshot):
+**Satu tabel per tipe komponen terdaftar**, tiap field komponen menjadi **kolom SQL ber-tipe** (bukan blob), dikunci **nama tipe** (portabel):
 
+```rust
+#[derive(PgComponent)]
+struct Position { x: f32, y: f32, z: f32 }
+```
+→
 ```sql
-CREATE TABLE cmp_position (           -- nama diturunkan dari type_name komponen
+CREATE TABLE cmp_position (           -- nama diturunkan dari type_name (disanitasi)
     entity_id BIGINT PRIMARY KEY REFERENCES arke_entities(entity_id) ON DELETE CASCADE,
-    data      JSONB NOT NULL          -- komponen via Serialize → Value → JSON
+    x REAL NOT NULL,
+    y REAL NOT NULL,
+    z REAL NOT NULL
 );
 ```
 
-- **Komponen sebagai `JSONB`** (v1): tipe Rust arbitrer memetakan tanpa derive-skema; tetap **query-able** (`data->>'x'`) dan **join-able** (JOIN pada `entity_id`). Memakai ulang `Serialize`/`Value` yang sudah ada.
-- Query lintas-komponen = JOIN biasa:
+- Field → **kolom nyata** → dapat di-index, dijoin, difilter, diagregasi langsung:
   ```sql
-  SELECT p.entity_id, p.data->>'x', h.data->>'hp'
-  FROM cmp_position p JOIN cmp_health h USING (entity_id);
+  SELECT p.entity_id, p.x, h.hp
+  FROM cmp_position p JOIN cmp_health h USING (entity_id)
+  WHERE p.x > 100 AND h.hp < 20;         -- index-able, tanpa ekstraksi JSONB
   ```
-- **Kolom bertipe** (memproyeksikan field → kolom SQL nyata untuk index/join lebih kaya) = **opt-in lanjutan** (butuh trait/derive skema per komponen).
+- **Field non-skalar** (nested struct, enum, `Vec<T>`, dsb.) → kolom **`JSONB`** *fallback* (via `Serialize`), sehingga komponen tetap boleh punya field kompleks tanpa memblokir field skalar dari jadi kolom nyata.
 
-### 3. API async (sqlx)
+### 3. Derive `PgComponent` (skema dari tipe)
+
+Kolom-tipe menuntut tahu **tipe Rust konkret** tiap field — informasi yang `Value` (dynamically-typed) buang. Maka skema diturunkan oleh derive tulis-tangan (pola `arke-derive`), di crate adapter (`arke-postgres-derive`), meng-emit:
+
+```rust
+trait PgComponent {
+    const TABLE: &'static str;                    // dari type_name, disanitasi
+    const COLUMNS: &'static [Column];             // (nama, PgType, nullable)
+    fn to_params(&self) -> Vec<PgValue>;          // bind per kolom
+    fn from_row(row: &PgRow) -> Self;             // baca per kolom
+}
+```
+
+**Pemetaan tipe Rust → SQL:**
+
+| Rust | SQL |
+| --- | --- |
+| `i8`/`i16`/`i32` | `INTEGER` |
+| `i64`/`isize` | `BIGINT` |
+| `u8`/`u16`/`u32` | `BIGINT` (Postgres tanpa unsigned; lebar aman) |
+| `u64`/`usize` | `NUMERIC(20)` (melampaui `BIGINT`) |
+| `f32` | `REAL` |
+| `f64` | `DOUBLE PRECISION` |
+| `bool` | `BOOLEAN` |
+| `String` | `TEXT` |
+| `Option<T>` | kolom `T` **nullable** |
+| lainnya (nested/enum/`Vec`) | `JSONB` (fallback via `Serialize`) |
+
+Hanya komponen yang men-`derive(PgComponent)` yang dipersist (opt-in — sejajar `register_serializable`). Ini **lebih ketat** dari JSONB-untuk-semua, tapi itulah harga kolom-tipe.
+
+### 4. API async (sqlx)
 
 ```rust
 let store = PgStore::connect(&url).await?;        // connection pool
@@ -79,40 +116,41 @@ store.load(&mut world).await?;
 store.save(&world).await?;
 ```
 
-- `migrate` membuat `arke_entities` + `cmp_<name>` untuk tiap komponen yang di-`register_serializable`.
-- `load` men-SELECT semua entity + komponen, merekonstruksi `World` (memakai `inserter`/`load_snapshot`-path). Urutan `ORDER BY entity_id` menjaga determinisme iterasi (STD-0005) pasca-materialize.
-- `save` menulis seluruh working-set dalam **satu transaksi** (upsert entity + komponen, DELETE yang hilang).
+- `migrate` membuat `arke_entities` + `cmp_<name>` (kolom dari `PgComponent::COLUMNS`) untuk tiap komponen terdaftar.
+- `load` men-SELECT semua entity + komponen, membaca tiap kolom via `PgComponent::from_row`, merekonstruksi `World` (jalur `insert`). Urutan `ORDER BY entity_id` menjaga determinisme iterasi (STD-0005) pasca-materialize.
+- `save` menulis seluruh working-set dalam **satu transaksi** (upsert entity + komponen via `to_params`, DELETE yang hilang).
 
-### 4. Konsistensi & konkurensi
+### 5. Konsistensi & konkurensi
 
 - **Transaksi**: tiap `save` atomik.
 - **Generation = optimistic lock**: tulis-balik `UPDATE … WHERE entity_id=$1 AND generation=$2`; mismatch → error konflik (writer lain mengubah entity itu). Ini **memakai ulang invarian generational** (STD-0007) sebagai kolom versi DB — handle basi = baris usang.
 - **Despawn → DELETE** (cascade ke tabel komponen).
 - **Multi-writer**: Postgres otoritatif; konflik terdeteksi lewat generation. Kebijakan resolusi (retry / last-writer-wins / merge) = **open question**.
 
-### 5. Fidelity & versi
+### 6. Fidelity & versi
 
-- Round-trip komponen bersandar pada `Serialize`/`Value` (STD-0002).
-- `schema_version` (STD-0001) disimpan (mis. tabel `arke_meta`) untuk migrasi format lintas-versi.
+- Round-trip field skalar via `PgComponent` (kolom-tipe); field non-skalar via `Serialize`/`Value` (STD-0002) di kolom `JSONB`.
+- `schema_version` (STD-0001) disimpan (tabel `arke_meta`) untuk migrasi format lintas-versi.
 
-### 6. Determinisme
+### 7. Determinisme
 
 Eksekusi ECS tetap **deterministik** atas working-set yang dimuat; Postgres adalah **batas I/O**, bukan bagian jalur panas. `load` **wajib** deterministik (`ORDER BY entity_id`) agar urutan iterasi identik antar-materialize (STD-0005).
 
-### 7. Rencana bertahap
+### 8. Rencana bertahap
 
 | Fase | Isi |
 | --- | --- |
-| **v1** (M-20) | Skema (entity + JSONB per komponen), `migrate`, `load`/`save` penuh, transaksi, generation optimistic-lock. |
-| v2 | Tulis-balik **inkremental** via change-log (kandidat: memanfaatkan `CommandBuffer`/pelacakan-perubahan sebagai sumber diff). |
-| v3 | **Kolom bertipe** (proyeksi field → kolom SQL) via trait/derive skema; materialisasi **query-scoped** (muat subset dunia); partial worlds. |
+| **v1** (M-20) | `#[derive(PgComponent)]` + pemetaan tipe; skema kolom-tipe (entity + tabel per komponen); `migrate`, `load`/`save` penuh, transaksi, generation optimistic-lock. Field non-skalar → `JSONB` fallback. |
+| v2 | Tulis-balik **inkremental** via change-log (kandidat: memanfaatkan `CommandBuffer`/pelacakan-perubahan sebagai sumber diff); migrasi `ALTER TABLE` saat skema komponen berevolusi. |
+| v3 | Materialisasi **query-scoped** (muat subset dunia via predikat SQL); partial worlds; index/constraint yang bisa dikustom per komponen. |
 
 ## Alternatif yang dipertimbangkan
 
-| Alternatif | Kelebihan | Kekurangan | Mengapa tidak dipilih (v1) |
+| Alternatif | Kelebihan | Kekurangan | Mengapa tidak dipilih |
 | --- | --- | --- | --- |
+| **Kolom-tipe (dipilih)** | Query/index/join/agregasi SQL terkaya; skema self-documenting | Butuh derive per komponen; field non-skalar perlu fallback; migrasi `ALTER` | — (dipilih untuk v1 sesuai tujuan "sumber kebenaran SQL") |
+| JSONB per komponen | Tanpa derive; tipe arbitrer | Query lewat `data->>'x'` (kurang ergonomis, index terbatas) | Kalah ergonomis SQL; dipakai hanya sebagai **fallback** field non-skalar |
 | Snapshot blob JSONB tunggal | Sepele; memakai ulang M-6 utuh | **Tak** query-able/join-able → gagal syarat "sumber kebenaran SQL" | Tak memenuhi tujuan; tetap tersedia untuk pure save/restore |
-| Kolom bertipe penuh sejak v1 | Query/index SQL terkaya | Butuh derive-skema per komponen; migrasi rumit | Ditunda ke v3; JSONB cukup untuk join/query v1 |
 | Driver sync (`postgres`/diesel) | Tanpa runtime | Default pengguna **async**; blocking di service async buruk | Async dipilih; sync bisa jadi feature lanjutan |
 | `tokio-postgres` langsung | Ringan | Tanpa pool/migrasi bawaan | sqlx: pool + migrasi + query cek-kompilasi |
 | Sinkronisasi per-tick (write-through) | Selalu konsisten | Impedance mismatch; membunuh performa ECS | Model working-set + sync di titik terkendali |
@@ -125,13 +163,16 @@ Eksekusi ECS tetap **deterministik** atas working-set yang dimuat; Postgres adal
 
 ## Pertanyaan terbuka
 
-- **Pelacakan-perubahan** untuk tulis-balik inkremental — perlukah hook di core (mis. change-log), atau cukup diff snapshot? Bisakah `CommandBuffer` jadi sumber diff?
+- **Derive `PgComponent`**: crate `arke-postgres-derive` sendiri (0-dep, pola `arke-derive`) vs perluasan `arke-derive` (menyeret perhatian SQL ke core). Condong ke crate adapter-side terpisah.
+- **Field non-skalar**: `JSONB` fallback (dipilih) vs tabel anak (relasi 1-N) untuk `Vec<T>` — yang terakhir lebih relasional tapi jauh lebih kompleks.
+- **Evolusi skema komponen** (field ditambah/dihapus) → migrasi `ALTER TABLE`; bagaimana mendeteksi & menerapkan aman.
+- **Tipe tak-terpetakan** (mis. `u128`, custom): kompilasi gagal (ketat) vs `JSONB` fallback diam-diam?
+- **Pemetaan nama tabel/kolom** dari `type_name`/field (namespace, tabrakan, sanitasi & pembatasan identifier SQL, panjang 63-char Postgres).
+- **Pelacakan-perubahan** untuk tulis-balik inkremental (v2) — hook core (change-log) vs diff snapshot; bisakah `CommandBuffer` jadi sumber diff?
 - **Kebijakan konflik** multi-writer (retry / LWW / merge) saat generation mismatch.
-- **Evolusi skema komponen** (field ditambah/dihapus) & migrasi JSONB.
-- **Materialisasi parsial** (query-scoped world) — muat hanya subset entity/komponen.
-- **Pemetaan nama tabel** dari `type_name` (namespace, tabrakan, sanitasi identifier SQL).
+- **Materialisasi parsial** (query-scoped world) — muat hanya subset entity/komponen (v3).
 - **Feature `sync`** (driver blocking) untuk pengguna non-async — perlukah?
 
 ## Keputusan
 
-*Belum diputuskan.* RFC ini **Draft** untuk ditinjau. Bila diterima: tulis ADR-0021, buka M-20 (fase v1), lalu TDD (skema + `migrate`/`load`/`save` + optimistic-lock) dengan Postgres uji (via `sqlx::test` atau kontainer) di CI.
+*Belum diputuskan.* RFC ini **Draft** untuk ditinjau. Bila diterima: tulis ADR-0021, buka M-20 (fase v1), lalu TDD — mulai dari derive `PgComponent` + pemetaan tipe (dapat diuji **tanpa** DB), lalu `migrate`/`load`/`save` + optimistic-lock dengan Postgres uji (via `sqlx::test` atau kontainer) di CI.
