@@ -63,8 +63,16 @@ impl Lcg {
 }
 
 /// Harness: warmup lalu ukur, laporkan ns/op & juta-op/detik.
+///
+/// Mode **check** (`ARKE_BENCH_CHECK`, RFC/regresi-guard): tiap workload
+/// dibandingkan dengan **ceiling** ns/op; melampaui → gagal (exit ≠ 0). Ceiling
+/// **longgar** (≥~5× baseline lokal) — hanya menangkap regresi **besar/
+/// algoritmik** (mis. loop lockstep balik, iterasi O(archetype×baris)), bukan
+/// fluktuasi kecil di runner CI yang bervariasi & bising.
 struct Bench {
     quick: bool,
+    check: bool,
+    failed: std::cell::Cell<u32>,
 }
 impl Bench {
     fn size(&self, full: usize, quick: usize) -> usize {
@@ -72,24 +80,38 @@ impl Bench {
     }
 
     /// Ukur `f` (mengembalikan akumulator agar tak ter-optimasi habis). `ops`
-    /// = jumlah operasi logis per pemanggilan `f`.
-    fn run(&self, name: &str, ops: u64, mut f: impl FnMut() -> u64) {
+    /// = jumlah operasi logis per pemanggilan `f`. `ceiling` = batas ns/op (mode
+    /// check); dilewati → gagal. Di mode check diambil **min beberapa pass** agar
+    /// robust terhadap spike penjadwalan.
+    fn run(&self, name: &str, ops: u64, ceiling: f64, mut f: impl FnMut() -> u64) {
         let (warmup, iters) = if self.quick { (1, 3) } else { (3, 25) };
         for _ in 0..warmup {
             black_box(f());
         }
-        let start = Instant::now();
-        let mut acc = 0u64;
-        for _ in 0..iters {
-            acc = acc.wrapping_add(f());
+        let passes = if self.check { 5 } else { 1 };
+        let mut best = f64::INFINITY;
+        for _ in 0..passes {
+            let start = Instant::now();
+            let mut acc = 0u64;
+            for _ in 0..iters {
+                acc = acc.wrapping_add(f());
+            }
+            let elapsed = start.elapsed();
+            black_box(acc);
+            let ns_per_op = elapsed.as_nanos() as f64 / (ops * iters as u64) as f64;
+            best = best.min(ns_per_op);
         }
-        let elapsed = start.elapsed();
-        black_box(acc);
 
-        let total_ops = ops * iters as u64;
-        let ns_per_op = elapsed.as_nanos() as f64 / total_ops as f64;
-        let mops = 1000.0 / ns_per_op; // 1e9 op/s = 1000 op/us; Mop/s = 1e3/ns_per_op
-        println!("{name:<44} {ns_per_op:>9.2} ns/op  {mops:>8.1} Mop/s");
+        if self.check {
+            let status = if best > ceiling { "FAIL" } else { "ok" };
+            if best > ceiling {
+                self.failed.set(self.failed.get() + 1);
+            }
+            println!("{name:<44} {best:>9.2} ns/op  (ceiling {ceiling:.0}) [{status}]");
+        } else {
+            let mops = 1000.0 / best;
+            println!("{name:<44} {best:>9.2} ns/op  {mops:>8.1} Mop/s");
+        }
     }
 }
 
@@ -108,7 +130,7 @@ fn w1_iter_single(b: &Bench) {
             },
         );
     }
-    b.run("W1 iter single (&mut Position)", n as u64, || {
+    b.run("W1 iter single (&mut Position)", n as u64, 8.0, || {
         let mut sum = 0u64;
         for p in world.query_mut::<Position>() {
             p.x += 1.0;
@@ -141,7 +163,7 @@ fn w2_query_two(b: &Bench) {
             },
         );
     }
-    b.run("W2 query two (&Pos, &mut Vel)", n as u64, || {
+    b.run("W2 query two (&Pos, &mut Vel)", n as u64, 8.0, || {
         let mut sum = 0u64;
         <(&Position, &mut Velocity)>::each(&mut world, |(p, v)| {
             v.x += p.x;
@@ -171,7 +193,7 @@ fn w3_random_get(b: &Bench) {
     let mut lcg = Lcg::new(0x9E3779B97F4A7C15);
     let order: Vec<usize> = (0..n).map(|_| lcg.below(n)).collect();
 
-    b.run("W3 random get::<Position>", n as u64, || {
+    b.run("W3 random get::<Position>", n as u64, 80.0, || {
         let mut sum = 0u64;
         for &idx in &order {
             if let Some(p) = world.get::<Position>(entities[idx]) {
@@ -200,7 +222,7 @@ fn w4_churn(b: &Bench) {
         entities.push(e);
     }
     // Tiap iter: 2n pindah archetype (Position → {Position,Tag} → Position).
-    b.run("W4 churn insert+remove Tag", (n * 2) as u64, || {
+    b.run("W4 churn insert+remove Tag", (n * 2) as u64, 150.0, || {
         let mut sum = 0u64;
         for &e in &entities {
             world.insert(e, Tag);
@@ -239,7 +261,7 @@ fn w5_fragmented(b: &Bench) {
             world.insert(e, M3);
         }
     }
-    b.run("W5 fragmented iter Position (16 arch)", n as u64, || {
+    b.run("W5 fragmented iter Position (16 arch)", n as u64, 8.0, || {
         let mut sum = 0u64;
         for p in world.query::<Position>() {
             sum = sum.wrapping_add(p.x as u64);
@@ -250,15 +272,32 @@ fn w5_fragmented(b: &Bench) {
 
 fn main() {
     let quick = std::env::var_os("ARKE_BENCH_QUICK").is_some();
-    let b = Bench { quick };
-    println!(
-        "arke storage workloads (RN-0002){}",
-        if quick { "  [QUICK/smoke]" } else { "" }
-    );
+    let check = std::env::var_os("ARKE_BENCH_CHECK").is_some();
+    let b = Bench {
+        quick,
+        check,
+        failed: std::cell::Cell::new(0),
+    };
+    let mode = if check {
+        "  [CHECK/regresi-guard]"
+    } else if quick {
+        "  [QUICK/smoke]"
+    } else {
+        ""
+    };
+    println!("arke storage workloads (RN-0002){mode}");
     println!("{:-<64}", "");
     w1_iter_single(&b);
     w2_query_two(&b);
     w3_random_get(&b);
     w4_churn(&b);
     w5_fragmented(&b);
+
+    if check && b.failed.get() > 0 {
+        eprintln!(
+            "\nREGRESI PERFORMA: {} workload melampaui ceiling.",
+            b.failed.get()
+        );
+        std::process::exit(1);
+    }
 }

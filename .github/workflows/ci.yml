@@ -36,10 +36,12 @@ jobs:
       - name: No-unsafe example (STD-0004)
         run: cargo run --example no_unsafe
 
-      # RN-0002: harness benchmark 0-dependensi harus tetap kompilasi & jalan
-      # (mode cepat agar CI ringan) — mencegah pembusukan API benchmark.
-      - name: Benchmark smoke (RN-0002)
-        run: ARKE_BENCH_QUICK=1 cargo bench --bench storage_workloads
+      # Regresi-guard performa (RN-0003): benchmark 0-dependensi dijalankan dengan
+      # ceiling ns/op **longgar** (min beberapa pass). Gagal (exit≠0) hanya pada
+      # regresi BESAR/algoritmik (mis. loop lockstep balik) — bukan fluktuasi
+      # kecil di runner CI yang bervariasi. Menjaga jalur panas tak diam-diam lambat.
+      - name: Benchmark regresi-guard (RN-0003)
+        run: ARKE_BENCH_CHECK=1 cargo bench --bench storage_workloads
 
       # STD-0003: CORE `arke` standalone — tidak boleh ada dependensi PIHAK-KETIGA
       # (crates.io). Di-scope ke `-p arke`: hanya `arke` + `arke-derive` (first-party)
