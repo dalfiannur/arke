@@ -16,7 +16,7 @@ mod store;
 pub use store::{PgStore, SyncStats, UpdateError};
 
 pub mod query;
-pub use query::{Dir, Field, Filter, IntoPgValue, Query};
+pub use query::{Dir, EntityRef, Field, Filter, IntoPgValue, Query};
 
 /// Tipe kolom SQL yang dipetakan dari tipe field Rust (RFC-0021 §2/§3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +64,21 @@ pub struct ColumnDef {
     pub ty: PgType,
     /// Apakah `NULL` diizinkan (dari `Option<T>`).
     pub nullable: bool,
+    /// Referensi FK (`REFERENCES <target>`), atau `None`. Diisi untuk kolom `_id`
+    /// relasi entity → `Some("arke_entities(entity_id)")` (RFC-0031).
+    pub references: Option<&'static str>,
+}
+
+impl ColumnDef {
+    /// Kolom skalar biasa (tanpa FK) — pembantu ringkas untuk mengurangi churn.
+    pub const fn scalar(name: &'static str, ty: PgType, nullable: bool) -> Self {
+        Self {
+            name,
+            ty,
+            nullable,
+            references: None,
+        }
+    }
 }
 
 /// Definisi indeks kustom pada sebuah kolom (dari `#[pg(index)]`/`#[pg(unique)]`).
@@ -138,6 +153,12 @@ pub fn create_table_sql_from(table: &str, columns: &[ColumnDef]) -> String {
         cols.push_str(col.ty.sql());
         if !col.nullable {
             cols.push_str(" NOT NULL");
+        }
+        if let Some(target) = col.references {
+            // Kolom relasi `_id` → FK ke arke_entities (RFC-0031). Tanpa CASCADE:
+            // dangling ditangani saat baca (generation), bukan penghapusan berantai.
+            cols.push_str(" REFERENCES ");
+            cols.push_str(target);
         }
     }
     format!("CREATE TABLE IF NOT EXISTS {table} ({cols})")

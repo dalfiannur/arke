@@ -22,6 +22,18 @@ impl Entity {
         Self { index, generation }
     }
 
+    /// Merekonstruksi handle dari nilai mentah `(index, generation)` — mis. saat
+    /// **deserialisasi** relasi persisten (RFC-0031) di luar `World`.
+    ///
+    /// Handle hasil rekonstruksi bisa saja **basi** (slot mati/daur-ulang); itu
+    /// **aman** — [`World::get`](crate::World::get) & kawan memvalidasi generation
+    /// dan menolak handle basi (mengembalikan `None`, STD-0007). Sama seperti
+    /// [`World::spawn_at`](crate::World::spawn_at), ini primitif rekonstruksi;
+    /// pengguna umumnya memakai handle dari `spawn`.
+    pub fn from_raw(index: u32, generation: u32) -> Self {
+        Self { index, generation }
+    }
+
     /// Indeks slot entity ini di `World`-nya (mis. untuk persistensi eksternal,
     /// RFC-0021). Bersama [`Self::generation`] membentuk identitas stabil.
     pub fn index(self) -> u32 {

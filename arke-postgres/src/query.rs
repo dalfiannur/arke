@@ -243,10 +243,28 @@ pub enum Dir {
     Desc,
 }
 
-/// Builder query baca ber-filter (RFC-0030). Dibuat oleh [`PgStore::query`].
+/// Marker tipe untuk token relasi (kolom FK `Entity`, RFC-0031). Tak punya
+/// operator skalar — hanya dipakai sebagai argumen `relation` pada
+/// [`Query::join`]/[`Query::join_load`].
+pub struct EntityRef;
+
+/// Satu klausa join antar-entity (RFC-0031): `<rel>_id IN (SELECT entity_id FROM
+/// <tabel R> WHERE <filter>)`. Pendekatan sub-query menghindari ambiguitas alias.
+struct JoinClause {
+    rel_column: &'static str,
+    related_table: &'static str,
+    filter_sql: String,
+    filter_params: Vec<(PgType, PgValue)>,
+    /// `join_load` → muat juga entity target `R`.
+    load: bool,
+}
+
+/// Builder query baca ber-filter (RFC-0030) + join antar-entity (RFC-0031).
+/// Dibuat oleh [`PgStore::query`].
 pub struct Query<'a, T: PgComponent> {
     store: &'a mut PgStore,
     filter: Option<Filter<T>>,
+    joins: Vec<JoinClause>,
     order: Vec<(&'static str, Dir)>,
     limit: Option<i64>,
     offset: Option<i64>,
@@ -257,6 +275,7 @@ impl<'a, T: PgComponent> Query<'a, T> {
         Self {
             store,
             filter: None,
+            joins: Vec::new(),
             order: Vec::new(),
             limit: None,
             offset: None,
@@ -268,6 +287,39 @@ impl<'a, T: PgComponent> Query<'a, T> {
         self.filter = Some(match self.filter.take() {
             Some(existing) => existing.and(f),
             None => f,
+        });
+        self
+    }
+
+    /// Join antar-entity (RFC-0031): saring `T` bila entity yang ditunjuk
+    /// `relation` (kolom FK di `T`, mis. `Owner::of()`) memenuhi `filter` atas
+    /// komponen `R`. Entity `R` **tidak** dimuat — pakai [`Self::join_load`] untuk itu.
+    pub fn join<R: PgComponent>(self, relation: Field<T, EntityRef>, filter: Filter<R>) -> Self {
+        self.push_join(relation, filter, false)
+    }
+
+    /// Seperti [`Self::join`], **plus** memuat entity `R` yang menjadi target
+    /// relasi dari `T` yang cocok (agar traversal handle langsung jalan).
+    pub fn join_load<R: PgComponent>(
+        self,
+        relation: Field<T, EntityRef>,
+        filter: Filter<R>,
+    ) -> Self {
+        self.push_join(relation, filter, true)
+    }
+
+    fn push_join<R: PgComponent>(
+        mut self,
+        relation: Field<T, EntityRef>,
+        filter: Filter<R>,
+        load: bool,
+    ) -> Self {
+        self.joins.push(JoinClause {
+            rel_column: relation.column,
+            related_table: R::TABLE,
+            filter_sql: filter.sql,
+            filter_params: filter.params,
+            load,
         });
         self
     }
@@ -290,18 +342,36 @@ impl<'a, T: PgComponent> Query<'a, T> {
         self
     }
 
-    /// Susun SQL ter-parameterisasi + urutan nilai bind. Terpisah dari [`load`]
+    /// Klausa `WHERE` (filter dasar + sub-query join) dengan placeholder `?` +
+    /// nilai bind-nya. `None` bila tak ada kondisi.
+    fn where_clause(&self) -> (Option<String>, Vec<(PgType, PgValue)>) {
+        let mut conds: Vec<String> = Vec::new();
+        let mut params: Vec<(PgType, PgValue)> = Vec::new();
+        if let Some(f) = &self.filter {
+            conds.push(f.sql.clone());
+            params.extend(f.params.iter().cloned());
+        }
+        for j in &self.joins {
+            conds.push(join_cond(j.rel_column, j.related_table, &j.filter_sql));
+            params.extend(j.filter_params.iter().cloned());
+        }
+        if conds.is_empty() {
+            (None, params)
+        } else {
+            (Some(conds.join(" AND ")), params)
+        }
+    }
+
+    /// Susun SQL utama ter-parameterisasi + nilai bind. Terpisah dari [`load`]
     /// agar dapat diuji tanpa DB.
     ///
     /// [`load`]: Self::load
     fn build(&self) -> (String, Vec<(PgType, PgValue)>) {
-        let mut params: Vec<(PgType, PgValue)> = Vec::new();
+        let (where_opt, mut params) = self.where_clause();
         let mut sql = format!("SELECT entity_id FROM {}", T::TABLE);
-
-        if let Some(f) = &self.filter {
+        if let Some(w) = &where_opt {
             sql.push_str(" WHERE ");
-            sql.push_str(&f.sql);
-            params.extend(f.params.iter().cloned());
+            sql.push_str(w);
         }
 
         if self.order.is_empty() {
@@ -335,12 +405,45 @@ impl<'a, T: PgComponent> Query<'a, T> {
         (renumber(&sql), params)
     }
 
-    /// Jalankan query, materialisasi entity yang cocok (+ seluruh komponennya) ke
-    /// `world`. Mengembalikan jumlah entity dimuat.
-    pub async fn load(self, world: &mut World) -> Result<usize, sqlx::Error> {
-        let (sql, params) = self.build();
-        self.store.load_by_query(sql, params, world).await
+    /// SQL pemuat target `R` untuk `join_load`: id entity yang **ditunjuk** oleh
+    /// `T` yang cocok (`SELECT DISTINCT <rel>_id ... WHERE <where>`).
+    fn target_load_sql(&self, rel_column: &str) -> (String, Vec<(PgType, PgValue)>) {
+        let (where_opt, params) = self.where_clause();
+        let where_sql = where_opt.unwrap_or_else(|| "TRUE".to_string());
+        let sql = format!(
+            "SELECT DISTINCT {rel} AS entity_id FROM {tbl} WHERE ({where_sql}) AND {rel} IS NOT NULL",
+            rel = rel_column,
+            tbl = T::TABLE,
+        );
+        (renumber(&sql), params)
     }
+
+    /// Jalankan query, materialisasi entity `T` yang cocok (+ seluruh komponennya)
+    /// ke `world`; untuk tiap `join_load`, muat pula entity target `R`.
+    /// Mengembalikan jumlah entity `T` dimuat.
+    pub async fn load(self, world: &mut World) -> Result<usize, sqlx::Error> {
+        // Susun semua SQL (pinjam-baca `self`) sebelum menyentuh `self.store`.
+        let (main_sql, main_params) = self.build();
+        let targets: Vec<(String, Vec<(PgType, PgValue)>)> = self
+            .joins
+            .iter()
+            .filter(|j| j.load)
+            .map(|j| self.target_load_sql(j.rel_column))
+            .collect();
+
+        let store = self.store;
+        let n = store.load_by_query(main_sql, main_params, world).await?;
+        for (sql, params) in targets {
+            store.load_by_query(sql, params, world).await?;
+        }
+        Ok(n)
+    }
+}
+
+/// Kondisi join antar-entity (RFC-0031) sebagai sub-query (menghindari alias):
+/// `<rel> IN (SELECT entity_id FROM <tbl> WHERE <filter>)`.
+fn join_cond(rel_column: &str, related_table: &str, filter_sql: &str) -> String {
+    format!("{rel_column} IN (SELECT entity_id FROM {related_table} WHERE {filter_sql})")
 }
 
 /// Ubah placeholder `?` berurutan menjadi `$1..$n` (dialek Postgres).
@@ -370,11 +473,7 @@ mod tests {
     }
     impl PgComponent for Health {
         const TABLE: &'static str = "cmp_health";
-        const COLUMNS: &'static [ColumnDef] = &[ColumnDef {
-            name: "hp",
-            ty: PgType::Integer,
-            nullable: false,
-        }];
+        const COLUMNS: &'static [ColumnDef] = &[ColumnDef::scalar("hp", PgType::Integer, false)];
         fn to_params(&self) -> Vec<PgValue> {
             vec![PgValue::Int(i64::from(self._hp))]
         }
@@ -518,5 +617,22 @@ mod tests {
         );
         assert_eq!(params.len(), 4);
         assert_eq!(params[3], (PgType::Text, PgValue::Text("a%".to_string())));
+    }
+
+    #[test]
+    fn join_subquery_terparameterisasi() {
+        // Filter dasar pada T + join antar-entity → sub-query; placeholder `?`
+        // dinomori **global** ($1, $2, …) melintasi filter dasar & sub-query.
+        let base = Health::hp().gte(5); // "hp >= ?"
+        let jc = join_cond("of_id", "cmp_health", &Health::hp().lt(20).sql);
+        let where_sql = format!("{} AND {}", base.sql, jc);
+        let sql = renumber(&format!(
+            "SELECT entity_id FROM cmp_owner WHERE {where_sql} ORDER BY entity_id"
+        ));
+        assert_eq!(
+            sql,
+            "SELECT entity_id FROM cmp_owner WHERE hp >= $1 AND of_id IN \
+             (SELECT entity_id FROM cmp_health WHERE hp < $2) ORDER BY entity_id"
+        );
     }
 }

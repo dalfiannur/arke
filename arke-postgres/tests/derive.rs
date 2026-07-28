@@ -45,21 +45,9 @@ fn table_dan_kolom_untuk_struct_skalar() {
     assert_eq!(
         Position::COLUMNS.to_vec(),
         vec![
-            ColumnDef {
-                name: "x",
-                ty: PgType::Real,
-                nullable: false
-            },
-            ColumnDef {
-                name: "y",
-                ty: PgType::Real,
-                nullable: false
-            },
-            ColumnDef {
-                name: "z",
-                ty: PgType::Real,
-                nullable: false
-            },
+            ColumnDef::scalar("x", PgType::Real, false),
+            ColumnDef::scalar("y", PgType::Real, false),
+            ColumnDef::scalar("z", PgType::Real, false),
         ]
     );
 
@@ -67,36 +55,12 @@ fn table_dan_kolom_untuk_struct_skalar() {
     assert_eq!(
         Stats::COLUMNS.to_vec(),
         vec![
-            ColumnDef {
-                name: "level",
-                ty: PgType::Integer,
-                nullable: false
-            },
-            ColumnDef {
-                name: "hp",
-                ty: PgType::BigInt,
-                nullable: false
-            },
-            ColumnDef {
-                name: "xp",
-                ty: PgType::Numeric,
-                nullable: false
-            },
-            ColumnDef {
-                name: "speed",
-                ty: PgType::BigInt,
-                nullable: false
-            },
-            ColumnDef {
-                name: "alive",
-                ty: PgType::Boolean,
-                nullable: false
-            },
-            ColumnDef {
-                name: "name",
-                ty: PgType::Text,
-                nullable: false
-            },
+            ColumnDef::scalar("level", PgType::Integer, false),
+            ColumnDef::scalar("hp", PgType::BigInt, false),
+            ColumnDef::scalar("xp", PgType::Numeric, false),
+            ColumnDef::scalar("speed", PgType::BigInt, false),
+            ColumnDef::scalar("alive", PgType::Boolean, false),
+            ColumnDef::scalar("name", PgType::Text, false),
         ]
     );
 }
@@ -155,21 +119,9 @@ fn option_jadi_kolom_nullable() {
     assert_eq!(
         Optional::COLUMNS.to_vec(),
         vec![
-            ColumnDef {
-                name: "hp",
-                ty: PgType::Integer,
-                nullable: true
-            },
-            ColumnDef {
-                name: "tag",
-                ty: PgType::Text,
-                nullable: true
-            },
-            ColumnDef {
-                name: "ratio",
-                ty: PgType::Real,
-                nullable: true
-            },
+            ColumnDef::scalar("hp", PgType::Integer, true),
+            ColumnDef::scalar("tag", PgType::Text, true),
+            ColumnDef::scalar("ratio", PgType::Real, true),
         ]
     );
 }
@@ -222,21 +174,9 @@ fn jsonb_fallback_untuk_field_non_skalar() {
     assert_eq!(
         Blob::COLUMNS.to_vec(),
         vec![
-            ColumnDef {
-                name: "flat",
-                ty: PgType::Integer,
-                nullable: false
-            },
-            ColumnDef {
-                name: "meta",
-                ty: PgType::Jsonb,
-                nullable: false
-            },
-            ColumnDef {
-                name: "maybe",
-                ty: PgType::Jsonb,
-                nullable: true
-            },
+            ColumnDef::scalar("flat", PgType::Integer, false),
+            ColumnDef::scalar("meta", PgType::Jsonb, false),
+            ColumnDef::scalar("maybe", PgType::Jsonb, true),
         ]
     );
 

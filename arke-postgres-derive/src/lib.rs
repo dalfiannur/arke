@@ -269,12 +269,21 @@ struct FieldSql {
     column: String,
     to_param: String,
     from_field: String,
+    /// Jumlah slot nilai (kolom) yang dikonsumsi field ini: 1 untuk skalar/JSONB,
+    /// 2 untuk relasi `Entity` (`_id` + `_gen`).
+    slots: usize,
 }
 
-/// `ColumnDef` sebagai teks kode.
+/// Apakah tipe (setelah kupas `Option`) adalah `Entity` (relasi, RFC-0031)?
+fn is_entity_ty(ty: &str) -> bool {
+    let inner = strip_option(ty);
+    inner == "Entity" || inner.ends_with("::Entity")
+}
+
+/// `ColumnDef` skalar (tanpa FK) sebagai teks kode.
 fn column_def(name: &str, pg_type: &str, nullable: bool) -> String {
     format!(
-        "::arke_postgres::ColumnDef {{ name: {name:?}, ty: ::arke_postgres::PgType::{pg_type}, nullable: {nullable} }}, "
+        "::arke_postgres::ColumnDef::scalar({name:?}, ::arke_postgres::PgType::{pg_type}, {nullable}), "
     )
 }
 
@@ -282,6 +291,54 @@ fn column_def(name: &str, pg_type: &str, nullable: bool) -> String {
 /// tipe non-skalar — kolom `JSONB` via `arke::Serialize` (fallback, RFC-0021 §2).
 fn field_sql(f: &Field, idx: usize) -> Result<FieldSql, String> {
     let name = &f.name;
+
+    // Relasi `Entity`/`Option<Entity>` (RFC-0031) → dua kolom `<name>_id` (FK ke
+    // arke_entities) + `<name>_gen`. Simpan (index, generation); handle basi
+    // ditolak saat dipakai (`World::get`, STD-0007).
+    if is_entity_ty(&f.ty) {
+        let nullable = f.ty.starts_with("Option<");
+        // Kolom relasi = BIGINT polos (TANPA FK). Blocking-FK tak kompatibel dgn
+        // reconcile-clear (`DELETE FROM arke_entities`); cascade/set-null salah
+        // semantik ECS. Integritas by-construction (save tulis arke_entities dulu)
+        // + keamanan-basi lewat generation saat baca (RFC-0031).
+        let column = format!(
+            "{}{}",
+            column_def(&format!("{name}_id"), "BigInt", nullable),
+            column_def(&format!("{name}_gen"), "BigInt", nullable),
+        );
+        let idg = idx + 1;
+        let (to_param, from_field) = if nullable {
+            (
+                format!(
+                    "match &self.{name} {{ ::core::option::Option::Some(e) => ::arke_postgres::PgValue::Int(e.index() as i64), ::core::option::Option::None => ::arke_postgres::PgValue::Null }}, \
+                     match &self.{name} {{ ::core::option::Option::Some(e) => ::arke_postgres::PgValue::Int(e.generation() as i64), ::core::option::Option::None => ::arke_postgres::PgValue::Null }}, "
+                ),
+                format!(
+                    "{name}: match (values.get({idx}), values.get({idg})) {{ \
+                        (::core::option::Option::Some(::arke_postgres::PgValue::Null), _) => ::core::option::Option::None, \
+                        (::core::option::Option::Some(::arke_postgres::PgValue::Int(i)), ::core::option::Option::Some(::arke_postgres::PgValue::Int(g))) => ::core::option::Option::Some(::arke::Entity::from_raw(*i as u32, *g as u32)), \
+                        _ => return ::core::option::Option::None }}, "
+                ),
+            )
+        } else {
+            (
+                format!(
+                    "::arke_postgres::PgValue::Int(self.{name}.index() as i64), ::arke_postgres::PgValue::Int(self.{name}.generation() as i64), "
+                ),
+                format!(
+                    "{name}: match (values.get({idx}), values.get({idg})) {{ \
+                        (::core::option::Option::Some(::arke_postgres::PgValue::Int(i)), ::core::option::Option::Some(::arke_postgres::PgValue::Int(g))) => ::arke::Entity::from_raw(*i as u32, *g as u32), \
+                        _ => return ::core::option::Option::None }}, "
+                ),
+            )
+        };
+        return Ok(FieldSql {
+            column,
+            to_param,
+            from_field,
+            slots: 2,
+        });
+    }
 
     // `Option<INNER>` → kolom nullable; None ↔ NULL.
     if let Some(inner) =
@@ -307,6 +364,7 @@ fn field_sql(f: &Field, idx: usize) -> Result<FieldSql, String> {
                     val = s.value,
                     from = s.from_expr,
                 ),
+                slots: 1,
             },
             // Non-skalar → JSONB nullable via Serialize.
             None => FieldSql {
@@ -318,6 +376,7 @@ fn field_sql(f: &Field, idx: usize) -> Result<FieldSql, String> {
                      }}, "
                 ),
                 from_field: from_jsonb(name, idx, inner, true),
+                slots: 1,
             },
         });
     }
@@ -338,6 +397,7 @@ fn field_sql(f: &Field, idx: usize) -> Result<FieldSql, String> {
                 val = s.value,
                 from = s.from_expr,
             ),
+            slots: 1,
         });
     }
 
@@ -348,6 +408,7 @@ fn field_sql(f: &Field, idx: usize) -> Result<FieldSql, String> {
             "::arke_postgres::PgValue::Json(::arke::Serialize::to_value(&self.{name}).to_json()), "
         ),
         from_field: from_jsonb(name, idx, &f.ty, false),
+        slots: 1,
     })
 }
 
@@ -389,15 +450,24 @@ fn gen_impl(name: &str, fields: &[Field], checks: &[String]) -> Result<String, S
     let mut from_fields = String::new();
     let mut indexes = String::new();
 
-    for (idx, f) in fields.iter().enumerate() {
-        let frag = field_sql(f, idx)?;
+    // Indeks nilai/kolom **berjalan** (relasi Entity mengonsumsi 2 slot, RFC-0031).
+    let mut val_idx = 0usize;
+    for f in fields {
+        let frag = field_sql(f, val_idx)?;
+        val_idx += frag.slots;
         columns.push_str(&frag.column);
         to_params.push_str(&frag.to_param);
         from_fields.push_str(&frag.from_field);
         if f.index || f.unique {
+            // Kolom indeks: relasi → `<name>_id`, skalar → `<name>`.
+            let col = if is_entity_ty(&f.ty) {
+                format!("{}_id", f.name)
+            } else {
+                f.name.clone()
+            };
             indexes.push_str(&format!(
-                "::arke_postgres::IndexDef {{ column: {:?}, unique: {} }}, ",
-                f.name, f.unique
+                "::arke_postgres::IndexDef {{ column: {col:?}, unique: {} }}, ",
+                f.unique
             ));
         }
     }
@@ -413,7 +483,15 @@ fn gen_impl(name: &str, fields: &[Field], checks: &[String]) -> Result<String, S
     let mut tokens = String::new();
     for f in fields {
         let inner = strip_option(&f.ty);
-        if let Some(sc) = inner_scalar(inner) {
+        if is_entity_ty(&f.ty) {
+            // Token relasi (RFC-0031) → Field<Self, EntityRef> pada kolom `<name>_id`.
+            tokens.push_str(&format!(
+                "    pub fn {field}() -> ::arke_postgres::Field<Self, ::arke_postgres::EntityRef> {{ \
+                     ::arke_postgres::Field::new({col:?}, ::arke_postgres::PgType::BigInt) }}\n",
+                field = f.name,
+                col = format!("{}_id", f.name),
+            ));
+        } else if let Some(sc) = inner_scalar(inner) {
             tokens.push_str(&format!(
                 "    pub fn {field}() -> ::arke_postgres::Field<Self, {inner}> {{ \
                      ::arke_postgres::Field::new({col:?}, ::arke_postgres::PgType::{pg}) }}\n",
