@@ -4,7 +4,7 @@
 
 #![forbid(unsafe_code)]
 
-use arke::World;
+use arke::{CommandBuffer, World};
 
 #[derive(Debug, PartialEq)]
 struct Position(i32, i32);
@@ -38,6 +38,14 @@ fn main() {
     world.despawn(b);
     assert!(world.contains(a));
     assert!(!world.contains(b));
+
+    // Mutasi struktural tertunda via command buffer (RFC-0019).
+    let mut cmd = CommandBuffer::new();
+    cmd.spawn().insert(Position(5, 5)).insert(Velocity(1, 1));
+    cmd.despawn(a);
+    cmd.apply(&mut world);
+    assert!(!world.contains(a)); // a ter-despawn (tertunda)
+    assert_eq!(world.query::<Position>().count(), 1); // hanya entity baru
 
     println!("no_unsafe: OK (total={total})");
 }

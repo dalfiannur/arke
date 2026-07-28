@@ -15,9 +15,13 @@
 use std::any::TypeId;
 use std::sync::{Condvar, Mutex};
 
+use crate::CommandBuffer;
 use crate::Component;
 use crate::World;
 use crate::query::{Access, QueryData, QueryFilter, QueryState};
+
+/// Closure sistem `SharedCmd`: baca `&World`, rekam ke buffer (RFC-0019).
+type CmdRunner = Box<dyn FnMut(&World, &mut CommandBuffer) + Send>;
 
 /// Cara sebuah sistem mengakses `World`.
 enum Runner {
@@ -25,21 +29,33 @@ enum Runner {
     Exclusive(Box<dyn FnMut(&mut World) + Send>),
     /// Akses berbagi `&World` (sistem bertipe) — **paralel-mampu** (RFC-0016).
     Shared(Box<dyn FnMut(&World) + Send>),
+    /// Akses berbagi `&World` + merekam ke [`CommandBuffer`] milik sistem —
+    /// **paralel-mampu**; buffer di-apply di akhir run (RFC-0019).
+    SharedCmd(CmdRunner),
 }
 
 /// Unit logika yang berjalan atas sebuah [`World`].
 pub struct System {
     runner: Runner,
     access: Access,
+    /// Buffer command tertunda milik sistem (dipakai `SharedCmd`); kosong untuk
+    /// sistem lain. Di-apply di akhir run, urutan registrasi (RFC-0019).
+    commands: CommandBuffer,
 }
 
 impl System {
+    /// Membangun `System` dari runner + access, dengan buffer command kosong.
+    fn with(runner: Runner, access: Access) -> Self {
+        Self {
+            runner,
+            access,
+            commands: CommandBuffer::new(),
+        }
+    }
+
     /// Membuat sistem opaque dari closure `FnMut(&mut World)` (serial-saja).
     pub fn new(run: impl FnMut(&mut World) + Send + 'static) -> Self {
-        Self {
-            runner: Runner::Exclusive(Box::new(run)),
-            access: Access::default(),
-        }
+        Self::with(Runner::Exclusive(Box::new(run)), Access::default())
     }
 
     /// Menandai bahwa sistem membaca komponen `T`.
@@ -61,12 +77,12 @@ impl System {
     pub fn each<Q: QueryData>(mut f: impl FnMut(Q::Item<'_>) + Send + 'static) -> Self {
         // Cache archetype yang cocok, persist lintas-run per-sistem (RFC-0017).
         let mut state = QueryState::default();
-        Self {
-            runner: Runner::Shared(Box::new(move |world: &World| {
+        Self::with(
+            Runner::Shared(Box::new(move |world: &World| {
                 Q::each_cached::<()>(world, &mut state, &mut f);
             })),
-            access: Q::access(),
-        }
+            Q::access(),
+        )
     }
 
     /// Seperti [`System::each`], tetapi hanya untuk entity yang lolos filter `F`
@@ -76,25 +92,42 @@ impl System {
     ) -> Self {
         // Cache archetype yang cocok, persist lintas-run per-sistem (RFC-0017).
         let mut state = QueryState::default();
-        Self {
-            runner: Runner::Shared(Box::new(move |world: &World| {
+        Self::with(
+            Runner::Shared(Box::new(move |world: &World| {
                 Q::each_cached::<F>(world, &mut state, &mut f);
             })),
-            access: Q::access(),
-        }
+            Q::access(),
+        )
+    }
+
+    /// Membangun sistem **paralel-mampu** yang mengiterasi query `Q` dan dapat
+    /// merekam **mutasi struktural tertunda** ke sebuah [`CommandBuffer`]
+    /// (RFC-0019). Buffer di-apply di **akhir run**, urutan registrasi.
+    ///
+    /// Contoh: `System::each_cmd::<&Health>(|h, cmd| if h.0 <= 0 { cmd.spawn(); })`.
+    pub fn each_cmd<Q: QueryData>(
+        mut f: impl FnMut(Q::Item<'_>, &mut CommandBuffer) + Send + 'static,
+    ) -> Self {
+        let mut state = QueryState::default();
+        Self::with(
+            Runner::SharedCmd(Box::new(move |world: &World, cmds: &mut CommandBuffer| {
+                Q::each_cached::<()>(world, &mut state, |item| f(item, cmds));
+            })),
+            Q::access(),
+        )
     }
 
     /// Membangun sistem yang memutasi resource `R` sekali per run (serial-saja),
     /// dengan akses tersimpul (tulis `R`). No-op bila resource tak ada (RFC-0010).
     pub fn resource<R: 'static + Send>(mut f: impl FnMut(&mut R) + Send + 'static) -> Self {
-        Self {
-            runner: Runner::Exclusive(Box::new(move |world: &mut World| {
+        Self::with(
+            Runner::Exclusive(Box::new(move |world: &mut World| {
                 if let Some(r) = world.resource_mut::<R>() {
                     f(r);
                 }
             })),
-            access: Access::new().with_resource_write::<R>(),
-        }
+            Access::new().with_resource_write::<R>(),
+        )
     }
 
     /// Membangun sistem (serial-saja) yang **membaca** resource `R` sambil
@@ -102,20 +135,20 @@ impl System {
     pub fn each_res<R: 'static + Send, Q: QueryData>(
         mut f: impl FnMut(&R, Q::Item<'_>) + Send + 'static,
     ) -> Self {
-        Self {
-            runner: Runner::Exclusive(Box::new(move |world: &mut World| {
+        Self::with(
+            Runner::Exclusive(Box::new(move |world: &mut World| {
                 if let Some(r) = world.remove_resource::<R>() {
                     Q::each(world, |item| f(&r, item));
                     world.insert_resource(r);
                 }
             })),
-            access: Q::access().with_resource_read::<R>(),
-        }
+            Q::access().with_resource_read::<R>(),
+        )
     }
 
     /// Apakah sistem ini paralel-mampu (berbagi `&World`).
     fn is_shared(&self) -> bool {
-        matches!(self.runner, Runner::Shared(_))
+        matches!(self.runner, Runner::Shared(_) | Runner::SharedCmd(_))
     }
 
     /// Menjalankan sistem dengan akses eksklusif (serial).
@@ -123,14 +156,23 @@ impl System {
         match &mut self.runner {
             Runner::Exclusive(f) => f(world),
             Runner::Shared(f) => f(&*world),
+            // Merekam ke buffer sendiri; di-apply belakangan oleh scheduler.
+            Runner::SharedCmd(f) => f(&*world, &mut self.commands),
         }
     }
 
-    /// Menjalankan sistem `Shared` lewat `&World` berbagi (jalur paralel).
+    /// Menjalankan sistem `Shared`/`SharedCmd` lewat `&World` (jalur paralel).
     fn run_shared(&mut self, world: &World) {
-        if let Runner::Shared(f) = &mut self.runner {
-            f(world);
+        match &mut self.runner {
+            Runner::Shared(f) => f(world),
+            Runner::SharedCmd(f) => f(world, &mut self.commands),
+            Runner::Exclusive(_) => {}
         }
+    }
+
+    /// Meng-apply buffer command milik sistem (di akhir run, RFC-0019).
+    fn apply_commands(&mut self, world: &mut World) {
+        self.commands.apply(world);
     }
 }
 
@@ -231,6 +273,7 @@ impl Schedule {
                 self.systems[idx].run(world);
             }
         }
+        self.apply_commands(world);
     }
 
     /// Menjalankan schedule secara **paralel** lewat graf-ketergantungan
@@ -262,6 +305,15 @@ impl Schedule {
                 self.systems[i].run(world);
                 i += 1;
             }
+        }
+        self.apply_commands(world);
+    }
+
+    /// Meng-apply buffer command tiap sistem, **urutan registrasi**, di akhir
+    /// run (RFC-0019). No-op bila tak ada `SharedCmd`.
+    fn apply_commands(&mut self, world: &mut World) {
+        for system in &mut self.systems {
+            system.apply_commands(world);
         }
     }
 
@@ -323,6 +375,71 @@ mod tests {
     struct Tag;
     #[derive(PartialEq, Debug)]
     struct Tally(i32);
+
+    #[test]
+    fn each_cmd_spawn_via_run_serial() {
+        let mut world = World::new();
+        for i in 0..3 {
+            let e = world.spawn();
+            world.insert(e, Counter(i));
+        }
+        let mut s = Schedule::new();
+        // Untuk tiap Counter, spawn entity baru dengan Tally(counter*10).
+        s.add(System::each_cmd::<&Counter>(|c, cmd| {
+            cmd.spawn().insert(Tally(c.0 * 10));
+        }));
+        s.run(&mut world);
+
+        assert_eq!(world.query::<Tally>().count(), 3);
+        let mut tallies: Vec<i32> = world.query::<Tally>().map(|t| t.0).collect();
+        tallies.sort();
+        assert_eq!(tallies, vec![0, 10, 20]);
+    }
+
+    #[test]
+    fn each_cmd_run_parallel_setara_serial() {
+        fn setup() -> World {
+            let mut w = World::new();
+            for i in 0..16 {
+                let e = w.spawn();
+                w.insert(e, Counter(i));
+            }
+            w
+        }
+        fn sched() -> Schedule {
+            let mut s = Schedule::new();
+            s.add(System::each_cmd::<&Counter>(|c, cmd| {
+                cmd.spawn().insert(Tally(c.0));
+            }));
+            s
+        }
+        let mut serial = setup();
+        sched().run(&mut serial);
+        let mut parallel = setup();
+        sched().run_parallel(&mut parallel);
+
+        let mut ss: Vec<i32> = serial.query::<Tally>().map(|t| t.0).collect();
+        ss.sort();
+        let mut ps: Vec<i32> = parallel.query::<Tally>().map(|t| t.0).collect();
+        ps.sort();
+        assert_eq!(ss, ps);
+        assert_eq!(ss.len(), 16);
+    }
+
+    #[test]
+    fn each_cmd_buffer_terkuras_antar_run() {
+        let mut world = World::new();
+        let e = world.spawn();
+        world.insert(e, Counter(0));
+        let mut s = Schedule::new();
+        s.add(System::each_cmd::<&Counter>(|_, cmd| {
+            cmd.spawn().insert(Tally(1));
+        }));
+        s.run(&mut world);
+        s.run(&mut world);
+        // Tiap run cocok 1 Counter → spawn 1 Tally; 2 run → 2 (bukan menumpuk).
+        assert_eq!(world.query::<Tally>().count(), 2);
+    }
 
     // STD-0006 tingkat-sistem: run_parallel == run (serial) untuk sistem disjoint.
     // Dua sistem menulis komponen berbeda pada archetype yang SAMA → berjalan di

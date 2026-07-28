@@ -20,7 +20,8 @@
 //! | [`component`] | Tipe komponen & identitasnya (registrasi otomatis) |
 //! | [`world`] | Otoritas atas entity/komponen/resource + query + `par_for_each` |
 //! | [`query`] | `QueryData` tuple generik + filter `With`/`Without` + `Access` (M-4/12/13); `QueryState` cache inkremental (M-16) |
-//! | [`schedule`] | `System` + `Schedule` (M-2); `each` bertipe (M-4); resources (M-9); `run_parallel` (M-15) |
+//! | [`schedule`] | `System` + `Schedule` (M-2); `each` bertipe (M-4); resources (M-9); `run_parallel` (M-15); `each_cmd` (M-18) |
+//! | [`command`] | `CommandBuffer` — mutasi struktural tertunda (M-18) |
 //! | [`serialize`] | `Value` + trait `Serialize` + JSON tulis-tangan (M-6) |
 //! | [`snapshot`] | `Snapshot` World berversi, round-trip setia (M-6) |
 //! | [`error`] | `EcsError` berkonteks yang menyebut komponen (M-7) |
@@ -33,6 +34,7 @@
 //! `QueryData` generik atas tuple sembarang-arity direncanakan untuk milestone
 //! berikutnya.
 
+pub mod command;
 pub mod component;
 pub mod entity;
 pub mod error;
@@ -45,6 +47,7 @@ pub mod world;
 mod archetype;
 mod storage;
 
+pub use command::{CommandBuffer, EntityCommands};
 pub use component::{Component, ComponentId};
 pub use entity::Entity;
 pub use error::EcsError;

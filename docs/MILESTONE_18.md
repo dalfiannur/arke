@@ -28,16 +28,16 @@ Memungkinkan **mutasi struktural tertunda** (spawn/despawn/insert/remove) direka
 
 ## Kriteria selesai (Definition of Done)
 
-- [ ] `CommandBuffer` merekam & meng-apply spawn/despawn/insert/remove **urutan-rekam** — teruji.
-- [ ] `spawn().insert(..)` menghasilkan entity terkonfigurasi saat apply — teruji.
-- [ ] `apply` menguras buffer (dapat dipakai ulang); `is_empty`/`clear` benar — teruji.
-- [ ] `System::each_cmd` via `run` (serial) menerapkan perubahan struktural — teruji.
-- [ ] `System::each_cmd` via `run_parallel` memberi hasil **identik** dengan `run` (STD-0006) — teruji.
-- [ ] Buffer per-sistem terkuras antar-run (tak menumpuk) — teruji.
-- [ ] Determinisme terjaga (urutan registrasi apply).
-- [ ] Tetap **tanpa `unsafe` baru**; jalur pengguna aman.
-- [ ] RFC-0019 & ADR-0019 ditulis serta konsisten dengan kode.
-- [ ] Semua tes + miri hijau.
+- [x] `CommandBuffer` merekam & meng-apply spawn/despawn/insert/remove **urutan-rekam** — teruji (`apply_menjalankan_command_urutan_rekam`, `despawn_tertunda_menghapus_entity`).
+- [x] `spawn().insert(..)` menghasilkan entity terkonfigurasi saat apply — teruji (idem).
+- [x] `apply` menguras buffer (dapat dipakai ulang); `is_empty`/`clear` benar — teruji.
+- [x] `System::each_cmd` via `run` (serial) menerapkan perubahan struktural — teruji (`each_cmd_spawn_via_run_serial`).
+- [x] `System::each_cmd` via `run_parallel` memberi hasil **identik** dengan `run` (STD-0006) — teruji (`each_cmd_run_parallel_setara_serial`, + 40× stress).
+- [x] Buffer per-sistem terkuras antar-run (tak menumpuk) — teruji (`each_cmd_buffer_terkuras_antar_run`).
+- [x] Determinisme terjaga (urutan registrasi apply).
+- [x] Tetap **tanpa `unsafe` baru**; jalur pengguna aman (contoh `no_unsafe` memakai `CommandBuffer` di bawah `forbid(unsafe_code)`).
+- [x] RFC-0019 & ADR-0019 ditulis serta konsisten dengan kode.
+- [x] Semua tes + miri hijau (miri di CI).
 
 ## Ketergantungan
 
