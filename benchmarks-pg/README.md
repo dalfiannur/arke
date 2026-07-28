@@ -93,26 +93,28 @@ cd bunsane && DB_CONNECTION_URL=postgres://postgres:postgres@localhost:5432/buns
 
 ## Contoh keluaran (spesifik-mesin, jangan dikutip sbg klaim absolut)
 
-Sweep konkurensi, N=8000, Ryzen 5 8645HS (12 core), Postgres lokal — ms rata-rata:
+Sweep konkurensi, **N=20000, iters=5**, Ryzen 5 8645HS (12 core), Postgres 17
+lokal — ms rata-rata (konkurensi tulis disamakan kedua sisi):
 
 ```
-  save                   C=1      C=4      C=8     C=16    scaling
-  arke-postgres       8192.2   3265.2   1708.5   1165.4     7.03×
-  bunsane            10991.3   4854.3   2894.7   2872.6     3.83×
+  save                   C=1       C=4      C=8     C=16    scaling
+  arke-postgres      23875.1   12613.5   6076.0   3149.1     7.58×
+  bunsane            33813.0   11308.5   8854.2   5521.2     6.12×
 
-  incremental            C=1      C=4      C=8     C=16    scaling
-  arke-postgres        663.3    273.6    149.7    383.1*    1.73×
-  bunsane             1183.0    425.2    272.3    305.2     3.88×
+  incremental            C=1       C=4      C=8     C=16    scaling
+  arke-postgres       2908.6     909.6    651.6    337.6     8.61×
+  bunsane             3901.2    1156.7    801.7    469.5     8.31×
 
-  load  (query tunggal, ~datar)     arke ≈ 21 ms   bunsane ≈ 50 ms
-  filter (query tunggal, ~datar)    arke ≈ 5 ms    bunsane ≈ 13 ms
+  load  (query tunggal, ~datar)     arke ≈ 48-56 ms   bunsane ≈ 108-128 ms
+  filter (query tunggal, ~datar)    arke ≈ 11-14 ms   bunsane ≈ 30-32 ms
 ```
 
 Bacaan:
 - **Tulis** (`save`/`incremental`): keduanya skala baik dgn konkurensi. arke lebih
-  cepat di tiap level & scaling `save` lebih tinggi (7× vs 3.8×); BunSane plateau
-  setelah C≈8. (`*` C=16 arke `incremental` = noise ukur; puncak di C=8 ≈ 4.4×.)
-- **Baca** (`load`/`filter`): datar terhadap konkurensi (query tunggal), arke ~2×
+  cepat di **tiap** level, & scaling `save` lebih tinggi (7.6× vs 6.1×). Di C=4
+  `save` sempat berdekatan (bunsane sedikit unggul di titik itu — noise), tapi arke
+  memimpin di C=1/8/16 dan menang telak di C=16 (3149 vs 5521 ms).
+- **Baca** (`load`/`filter`): datar terhadap konkurensi (query tunggal), arke ~2.5×
   lebih cepat — overhead per-op lebih rendah (kolom typed vs JSONB).
 
 ## Struktur
