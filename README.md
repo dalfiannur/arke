@@ -84,9 +84,9 @@ assert_eq!(restored.get::<Health>(e), Some(&Health(100)));
 Integrasi eksternal hidup di **crate adapter terpisah** agar core `arke` tetap
 **0 dependensi** (STD-0003):
 
-| Crate | Isi |
-| --- | --- |
-| [`arke-postgres`](arke-postgres/) | Persistensi PostgreSQL — Postgres sebagai **sumber kebenaran** relasional berkolom-tipe (`save`/`load`/`save_incremental`/`update_entity` optimistic-lock). Lihat [RFC-0021](docs/RFC/RFC-0021-arke-postgres-adapter.md). |
+| Crate | Versi | Isi |
+| --- | --- | --- |
+| [`arke-postgres`](arke-postgres/) | [![crates.io](https://img.shields.io/crates/v/arke-postgres.svg)](https://crates.io/crates/arke-postgres) | Persistensi PostgreSQL — Postgres sebagai **sumber kebenaran** relasional berkolom-tipe. Tulis: `save` / `save_incremental` (diff) / `update_entity` (optimistic-lock). Baca: `load` / `load_where::<T>` (query-scoped). Skema: `migrate` (reconciling) + `#[pg(index/unique/check)]`. Tipe: skalar / `Option` / `JSONB` / `NUMERIC`. Lihat [RFC-0021](docs/RFC/RFC-0021-arke-postgres-adapter.md). |
 
 ## Dokumentasi & tata-kelola
 
