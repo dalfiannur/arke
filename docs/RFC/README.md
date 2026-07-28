@@ -53,3 +53,4 @@ Draft → Discussion → Accepted | Rejected | Superseded
 | [RFC-0018](RFC-0018-dependency-graph-executor.md) | Eksekutor graf-ketergantungan | Accepted |
 | [RFC-0019](RFC-0019-command-buffer.md) | Command buffer (mutasi struktural tertunda) | Accepted |
 | [RFC-0020](RFC-0020-entity-query-term.md) | `Entity` sebagai term query | Accepted |
+| [RFC-0021](RFC-0021-arke-postgres-adapter.md) | `arke-postgres` — adapter Postgres sebagai sumber kebenaran | Draft |
