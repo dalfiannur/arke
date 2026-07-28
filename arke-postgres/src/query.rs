@@ -246,6 +246,15 @@ impl<C: PgComponent> Field<C, EntityRef> {
     }
 }
 
+/// Predikat relasi **bertipe** (RFC-0032) pada token `Field<C, RelRef<Target>>`.
+impl<C: PgComponent, Target: PgComponent> Field<C, RelRef<Target>> {
+    /// Seperti [`Field::matches`] tetapi target `Target` sudah tersimpul → menerima
+    /// `Filter<Target>` langsung (tanpa `::<R>`).
+    pub fn matches(self, f: Filter<Target>) -> Filter<C> {
+        Filter::raw(join_cond(self.column, Target::TABLE, &f.sql), f.params)
+    }
+}
+
 /// Arah pengurutan `ORDER BY`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Dir {
@@ -259,6 +268,11 @@ pub enum Dir {
 /// operator skalar — hanya dipakai sebagai argumen `relation` pada
 /// [`Query::join`]/[`Query::join_load`].
 pub struct EntityRef;
+
+/// Marker token relasi **bertipe** (RFC-0032) untuk field `Ref<Target>`: token
+/// jadi `Field<C, RelRef<Target>>`, target `Target` tersimpul → `matches`/`through`
+/// tanpa anotasi tipe & hop salah-tipe gagal kompilasi.
+pub struct RelRef<Target>(PhantomData<fn() -> Target>);
 
 /// Satu klausa join antar-entity (RFC-0031): `<rel>_id IN (SELECT entity_id FROM
 /// <tabel R> WHERE <filter>)`. Pendekatan sub-query menghindari ambiguitas alias.
@@ -450,6 +464,122 @@ impl<'a, T: PgComponent> Query<'a, T> {
         let n = store.load_by_query(main_sql, main_params, world).await?;
         for (sql, params) in targets {
             store.load_by_query(sql, params, world).await?;
+        }
+        Ok(n)
+    }
+
+    /// Mulai **path relasi bertipe** (RFC-0032): hop pertama `T →(rel)→ Next`.
+    /// Lanjutkan dengan `.through()` lalu `.where_(...).load_all(...)`.
+    pub fn through<Next: PgComponent>(self, rel: Field<T, RelRef<Next>>) -> PathQuery<'a, Next> {
+        PathQuery {
+            store: self.store,
+            hops: vec![Hop {
+                from_table: T::TABLE,
+                rel_column: rel.column,
+                to_table: Next::TABLE,
+            }],
+            _pd: PhantomData,
+        }
+    }
+}
+
+/// Satu hop path relasi (RFC-0032): dari `from_table` lewat `rel_column` ke `to_table`.
+struct Hop {
+    from_table: &'static str,
+    rel_column: &'static str,
+    to_table: &'static str,
+}
+
+/// Path relasi bertipe sedang dibangun; `Current` = tipe komponen di ujung path.
+/// Lanjut `.through()` (hop lagi) atau akhiri `.where_(Filter<Current>)`.
+pub struct PathQuery<'a, Current: PgComponent> {
+    store: &'a mut PgStore,
+    hops: Vec<Hop>,
+    _pd: PhantomData<fn() -> Current>,
+}
+
+impl<'a, Current: PgComponent> PathQuery<'a, Current> {
+    /// Tambah hop `Current →(rel)→ Next` (type-safe: hop salah-tipe gagal kompilasi).
+    pub fn through<Next: PgComponent>(
+        mut self,
+        rel: Field<Current, RelRef<Next>>,
+    ) -> PathQuery<'a, Next> {
+        self.hops.push(Hop {
+            from_table: Current::TABLE,
+            rel_column: rel.column,
+            to_table: Next::TABLE,
+        });
+        PathQuery {
+            store: self.store,
+            hops: self.hops,
+            _pd: PhantomData,
+        }
+    }
+
+    /// Tetapkan filter daun pada komponen ujung path → siap `.load_all(...)`.
+    pub fn where_(self, leaf: Filter<Current>) -> PathLoad<'a> {
+        PathLoad {
+            store: self.store,
+            hops: self.hops,
+            leaf_sql: leaf.sql,
+            leaf_params: leaf.params,
+        }
+    }
+}
+
+/// Path relasi siap dimuat (tipe di-erase). [`load_all`] memuat entity **root**
+/// yang cocok **dan** entity di tiap hop sepanjang path yang cocok (RFC-0032).
+///
+/// [`load_all`]: Self::load_all
+pub struct PathLoad<'a> {
+    store: &'a mut PgStore,
+    hops: Vec<Hop>,
+    leaf_sql: String,
+    leaf_params: Vec<(PgType, PgValue)>,
+}
+
+impl<'a> PathLoad<'a> {
+    /// Filter bersarang pada tabel root: `r1 IN (SELECT … r2 IN (SELECT … <leaf>))`.
+    fn root_filter(&self) -> String {
+        let mut cur = self.leaf_sql.clone();
+        for hop in self.hops.iter().rev() {
+            cur = join_cond(hop.rel_column, hop.to_table, &cur);
+        }
+        cur
+    }
+
+    /// Muat entity root yang cocok + entity target di tiap hop sepanjang path
+    /// yang cocok. Mengembalikan jumlah entity **root** dimuat.
+    pub async fn load_all(self, world: &mut World) -> Result<usize, sqlx::Error> {
+        let root_filter = self.root_filter();
+        let root_table = self.hops[0].from_table;
+
+        // Susun semua SQL (pinjam-baca) sebelum menyentuh store.
+        let root_sql = renumber(&format!(
+            "SELECT entity_id FROM {root_table} WHERE {root_filter} ORDER BY entity_id"
+        ));
+        // Query id entity yang cocok di level sebelumnya (level 0 = root).
+        let mut matched_prev = format!("SELECT entity_id FROM {root_table} WHERE {root_filter}");
+        let mut level_loads: Vec<String> = Vec::new();
+        for hop in &self.hops {
+            let targets = format!(
+                "SELECT DISTINCT {rel} AS entity_id FROM {from} \
+                 WHERE entity_id IN ({matched_prev}) AND {rel} IS NOT NULL",
+                rel = hop.rel_column,
+                from = hop.from_table,
+            );
+            level_loads.push(renumber(&targets));
+            matched_prev = targets; // level ini jadi "sebelumnya" utk hop berikut
+        }
+
+        let store = self.store;
+        let n = store
+            .load_by_query(root_sql, self.leaf_params.clone(), world)
+            .await?;
+        for sql in level_loads {
+            store
+                .load_by_query(sql, self.leaf_params.clone(), world)
+                .await?;
         }
         Ok(n)
     }

@@ -252,3 +252,51 @@ fn create_table_sql_benar() {
          x REAL NOT NULL, y REAL NOT NULL, z REAL NOT NULL)"
     );
 }
+
+// RFC-0032: field Ref<T> → 2 kolom (_id/_gen) + token relasi BERTIPE RelRef<T>.
+#[derive(PgComponent, PartialEq, Debug)]
+struct RefTarget {
+    hp: i32,
+}
+#[derive(PgComponent, PartialEq, Debug)]
+struct RefHolder {
+    a: arke_postgres::Ref<RefTarget>,
+    b: Option<arke_postgres::Ref<RefTarget>>,
+}
+
+#[test]
+fn ref_bertipe_kolom_token_dan_round_trip() {
+    use arke_postgres::{Field, RelRef};
+    // Ref<T> → 2 kolom BIGINT (_id/_gen); Option ikut nullable.
+    assert_eq!(
+        RefHolder::COLUMNS.to_vec(),
+        vec![
+            ColumnDef::scalar("a_id", PgType::BigInt, false),
+            ColumnDef::scalar("a_gen", PgType::BigInt, false),
+            ColumnDef::scalar("b_id", PgType::BigInt, true),
+            ColumnDef::scalar("b_gen", PgType::BigInt, true),
+        ]
+    );
+    // Token relasi bertipe (compile-level).
+    let _: Field<RefHolder, RelRef<RefTarget>> = RefHolder::a();
+    let _: Field<RefHolder, RelRef<RefTarget>> = RefHolder::b();
+
+    // Round-trip tanpa DB.
+    let e = arke::Entity::from_raw(5, 2);
+    let h = RefHolder {
+        a: arke_postgres::Ref::new(e),
+        b: None,
+    };
+    assert_eq!(
+        h.to_params(),
+        vec![
+            PgValue::Int(5),
+            PgValue::Int(2),
+            PgValue::Null,
+            PgValue::Null
+        ]
+    );
+    let back = RefHolder::from_params(&h.to_params()).unwrap();
+    assert_eq!(back.a.entity(), e);
+    assert_eq!(back.b, None);
+}

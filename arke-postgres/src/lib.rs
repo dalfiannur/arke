@@ -12,11 +12,70 @@
 /// Derive `#[derive(PgComponent)]` — menurunkan skema kolom-tipe dari struct.
 pub use arke_postgres_derive::PgComponent;
 
+use std::marker::PhantomData;
+
+/// Handle entity **bertipe** ke komponen target `T` (RFC-0032). Membungkus
+/// [`arke::Entity`] + tipe fantom target → relasi & path menjadi *type-safe*
+/// (hop salah-tipe gagal kompilasi). `Entity` polos tetap didukung sebagai relasi
+/// *untyped*.
+///
+/// ```
+/// # use arke_postgres::Ref;
+/// # struct Unit;
+/// # let mut w = arke::World::new();
+/// let u = w.spawn();
+/// let r: Ref<Unit> = Ref::new(u);
+/// assert_eq!(r.entity(), u);
+/// ```
+pub struct Ref<T> {
+    entity: arke::Entity,
+    _pd: PhantomData<fn() -> T>,
+}
+
+impl<T> Ref<T> {
+    /// Membungkus `entity` sebagai referensi bertipe ke `T`.
+    pub fn new(entity: arke::Entity) -> Self {
+        Self {
+            entity,
+            _pd: PhantomData,
+        }
+    }
+    /// Handle [`arke::Entity`] yang dibungkus.
+    pub fn entity(self) -> arke::Entity {
+        self.entity
+    }
+}
+
+// Impl manual: `Ref<T>` selalu `Copy`/`Send` dsb. tanpa syarat pada `T`
+// (fantom `fn() -> T`), tak seperti `#[derive]` yang menuntut `T: Trait`.
+impl<T> Clone for Ref<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T> Copy for Ref<T> {}
+impl<T> PartialEq for Ref<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.entity == other.entity
+    }
+}
+impl<T> Eq for Ref<T> {}
+impl<T> std::fmt::Debug for Ref<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Ref({:?})", self.entity)
+    }
+}
+impl<T> From<arke::Entity> for Ref<T> {
+    fn from(entity: arke::Entity) -> Self {
+        Self::new(entity)
+    }
+}
+
 mod store;
 pub use store::{PgStore, SyncStats, UpdateError};
 
 pub mod query;
-pub use query::{Dir, EntityRef, Field, Filter, IntoPgValue, Query};
+pub use query::{Dir, EntityRef, Field, Filter, IntoPgValue, PathLoad, PathQuery, Query, RelRef};
 
 /// Tipe kolom SQL yang dipetakan dari tipe field Rust (RFC-0021 §2/§3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

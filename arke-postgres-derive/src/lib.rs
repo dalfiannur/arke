@@ -274,10 +274,20 @@ struct FieldSql {
     slots: usize,
 }
 
-/// Apakah tipe (setelah kupas `Option`) adalah `Entity` (relasi, RFC-0031)?
+/// Apakah tipe (setelah kupas `Option`) adalah `Entity` (relasi untyped, RFC-0031)?
 fn is_entity_ty(ty: &str) -> bool {
     let inner = strip_option(ty);
     inner == "Entity" || inner.ends_with("::Entity")
+}
+
+/// Target `T` bila tipe (setelah kupas `Option`) adalah `Ref<T>` (relasi bertipe,
+/// RFC-0032), atau `None`. Menerima path berkualifikasi (`arke_postgres::Ref<T>`).
+fn ref_target(ty: &str) -> Option<&str> {
+    let inner = strip_option(ty).strip_suffix('>')?;
+    let lt = inner.find('<')?;
+    let (head, rest) = inner.split_at(lt);
+    let last_seg = head.rsplit("::").next().unwrap_or(head);
+    (last_seg == "Ref").then(|| &rest[1..])
 }
 
 /// `ColumnDef` skalar (tanpa FK) sebagai teks kode.
@@ -292,11 +302,12 @@ fn column_def(name: &str, pg_type: &str, nullable: bool) -> String {
 fn field_sql(f: &Field, idx: usize) -> Result<FieldSql, String> {
     let name = &f.name;
 
-    // Relasi `Entity`/`Option<Entity>` (RFC-0031) → dua kolom `<name>_id` (FK ke
-    // arke_entities) + `<name>_gen`. Simpan (index, generation); handle basi
-    // ditolak saat dipakai (`World::get`, STD-0007).
-    if is_entity_ty(&f.ty) {
+    // Relasi `Entity`/`Ref<T>` (+ `Option<…>`) → dua kolom `<name>_id` + `<name>_gen`
+    // (RFC-0031/0032). Simpan (index, generation); handle basi ditolak saat dipakai
+    // (`World::get`, STD-0007). `Ref<T>` = relasi bertipe (token `RelRef<T>`).
+    if is_entity_ty(&f.ty) || ref_target(&f.ty).is_some() {
         let nullable = f.ty.starts_with("Option<");
+        let is_ref = ref_target(&f.ty).is_some();
         // Kolom relasi = BIGINT polos (TANPA FK). Blocking-FK tak kompatibel dgn
         // reconcile-clear (`DELETE FROM arke_entities`); cascade/set-null salah
         // semantik ECS. Integritas by-construction (save tulis arke_entities dulu)
@@ -307,27 +318,42 @@ fn field_sql(f: &Field, idx: usize) -> Result<FieldSql, String> {
             column_def(&format!("{name}_gen"), "BigInt", nullable),
         );
         let idg = idx + 1;
+        // Akses `Entity` dari nilai terikat `e` (`&Ref<T>` → `.entity()`; `&Entity` apa
+        // adanya) & dari field `self.name`. Rekonstruksi: `Entity` mentah → bungkus
+        // `Ref::new` bila relasi bertipe (RFC-0032).
+        let acc_e = if is_ref { "e.entity()" } else { "e" };
+        let acc_self = if is_ref {
+            format!("self.{name}.entity()")
+        } else {
+            format!("self.{name}")
+        };
+        let ent = "::arke::Entity::from_raw(*i as u32, *g as u32)";
+        let mk = if is_ref {
+            format!("::arke_postgres::Ref::new({ent})")
+        } else {
+            ent.to_string()
+        };
         let (to_param, from_field) = if nullable {
             (
                 format!(
-                    "match &self.{name} {{ ::core::option::Option::Some(e) => ::arke_postgres::PgValue::Int(e.index() as i64), ::core::option::Option::None => ::arke_postgres::PgValue::Null }}, \
-                     match &self.{name} {{ ::core::option::Option::Some(e) => ::arke_postgres::PgValue::Int(e.generation() as i64), ::core::option::Option::None => ::arke_postgres::PgValue::Null }}, "
+                    "match &self.{name} {{ ::core::option::Option::Some(e) => ::arke_postgres::PgValue::Int({acc_e}.index() as i64), ::core::option::Option::None => ::arke_postgres::PgValue::Null }}, \
+                     match &self.{name} {{ ::core::option::Option::Some(e) => ::arke_postgres::PgValue::Int({acc_e}.generation() as i64), ::core::option::Option::None => ::arke_postgres::PgValue::Null }}, "
                 ),
                 format!(
                     "{name}: match (values.get({idx}), values.get({idg})) {{ \
                         (::core::option::Option::Some(::arke_postgres::PgValue::Null), _) => ::core::option::Option::None, \
-                        (::core::option::Option::Some(::arke_postgres::PgValue::Int(i)), ::core::option::Option::Some(::arke_postgres::PgValue::Int(g))) => ::core::option::Option::Some(::arke::Entity::from_raw(*i as u32, *g as u32)), \
+                        (::core::option::Option::Some(::arke_postgres::PgValue::Int(i)), ::core::option::Option::Some(::arke_postgres::PgValue::Int(g))) => ::core::option::Option::Some({mk}), \
                         _ => return ::core::option::Option::None }}, "
                 ),
             )
         } else {
             (
                 format!(
-                    "::arke_postgres::PgValue::Int(self.{name}.index() as i64), ::arke_postgres::PgValue::Int(self.{name}.generation() as i64), "
+                    "::arke_postgres::PgValue::Int({acc_self}.index() as i64), ::arke_postgres::PgValue::Int({acc_self}.generation() as i64), "
                 ),
                 format!(
                     "{name}: match (values.get({idx}), values.get({idg})) {{ \
-                        (::core::option::Option::Some(::arke_postgres::PgValue::Int(i)), ::core::option::Option::Some(::arke_postgres::PgValue::Int(g))) => ::arke::Entity::from_raw(*i as u32, *g as u32), \
+                        (::core::option::Option::Some(::arke_postgres::PgValue::Int(i)), ::core::option::Option::Some(::arke_postgres::PgValue::Int(g))) => {mk}, \
                         _ => return ::core::option::Option::None }}, "
                 ),
             )
@@ -459,8 +485,8 @@ fn gen_impl(name: &str, fields: &[Field], checks: &[String]) -> Result<String, S
         to_params.push_str(&frag.to_param);
         from_fields.push_str(&frag.from_field);
         if f.index || f.unique {
-            // Kolom indeks: relasi → `<name>_id`, skalar → `<name>`.
-            let col = if is_entity_ty(&f.ty) {
+            // Kolom indeks: relasi (Entity/Ref) → `<name>_id`, skalar → `<name>`.
+            let col = if is_entity_ty(&f.ty) || ref_target(&f.ty).is_some() {
                 format!("{}_id", f.name)
             } else {
                 f.name.clone()
@@ -483,8 +509,17 @@ fn gen_impl(name: &str, fields: &[Field], checks: &[String]) -> Result<String, S
     let mut tokens = String::new();
     for f in fields {
         let inner = strip_option(&f.ty);
-        if is_entity_ty(&f.ty) {
-            // Token relasi (RFC-0031) → Field<Self, EntityRef> pada kolom `<name>_id`.
+        if let Some(target) = ref_target(&f.ty) {
+            // Token relasi BERTIPE (RFC-0032) → Field<Self, RelRef<Target>>.
+            tokens.push_str(&format!(
+                "    pub fn {field}() -> ::arke_postgres::Field<Self, ::arke_postgres::RelRef<{target}>> {{ \
+                     ::arke_postgres::Field::new({col:?}, ::arke_postgres::PgType::BigInt) }}\n",
+                field = f.name,
+                target = target,
+                col = format!("{}_id", f.name),
+            ));
+        } else if is_entity_ty(&f.ty) {
+            // Token relasi untyped (RFC-0031) → Field<Self, EntityRef> pada `<name>_id`.
             tokens.push_str(&format!(
                 "    pub fn {field}() -> ::arke_postgres::Field<Self, ::arke_postgres::EntityRef> {{ \
                      ::arke_postgres::Field::new({col:?}, ::arke_postgres::PgType::BigInt) }}\n",
