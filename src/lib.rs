@@ -12,6 +12,34 @@
 //!
 //! Arsitektur penyimpanan inti diputuskan di RFC-0002 / ADR-0002.
 //!
+//! ## Contoh
+//!
+//! ```
+//! use arke::{Schedule, System, World};
+//!
+//! #[derive(Debug, PartialEq)]
+//! struct Position(i32, i32);
+//! #[derive(Debug, PartialEq)]
+//! struct Velocity(i32, i32);
+//!
+//! let mut world = World::new();
+//! // `spawn_bundle`: pasang beberapa komponen dalam satu pindah archetype.
+//! let e = world.spawn_bundle((Position(0, 0), Velocity(1, 2)));
+//!
+//! // Sistem berbasis-tipe: akses (baca Velocity, tulis Position) disimpulkan
+//! // dari tipe query — tanpa deklarasi manual, tanpa `unsafe`.
+//! let mut schedule = Schedule::new();
+//! schedule.add(System::each::<(&Velocity, &mut Position)>(|(v, p)| {
+//!     p.0 += v.0;
+//!     p.1 += v.1;
+//! }));
+//! schedule.run(&mut world);
+//!
+//! assert_eq!(world.get::<Position>(e), Some(&Position(1, 2)));
+//! ```
+//!
+//! Contoh onboarding bertahap ada di direktori `examples/`.
+//!
 //! ## Peta modul (Milestone M-1)
 //!
 //! | Modul | Tanggung jawab |
@@ -29,11 +57,12 @@
 //! | `storage` (privat) | Kolom kontigu bertipe (`TypedColumn`) |
 //! | `archetype` (privat) | Tabel per-kombinasi-komponen |
 //!
-//! Query M-1 hadir sebagai method pada [`World`] ([`World::query`],
-//! [`World::query_mut`], [`World::query_pair`]). Seluruh implementasi M-1
-//! **bebas `unsafe`**: pemisahan kolom disjoint memakai `split_at_mut`. Trait
-//! `QueryData` generik atas tuple sembarang-arity direncanakan untuk milestone
-//! berikutnya.
+//! Query tersedia dua jalur: method langsung pada [`World`] ([`World::query`],
+//! [`World::query_mut`], [`World::query_pair`]) untuk kasus sederhana, dan
+//! [`QueryData`] generik atas tuple sembarang-arity (baca/tulis campuran) untuk
+//! sistem. Iterasi dijalankan berkolom (RFC-0023); `unsafe`-nya **terkurung** di
+//! [`query`] & [`world`], semuanya diverifikasi miri. Jalur pengguna tetap bebas
+//! `unsafe` (STD-0004).
 
 pub mod bundle;
 pub mod command;

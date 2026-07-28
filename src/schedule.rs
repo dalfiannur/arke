@@ -244,6 +244,29 @@ fn run_graph_shared(systems: &mut [System], world: &World) {
 }
 
 /// Kumpulan sistem yang dijalankan dalam urutan deterministik.
+///
+/// [`Schedule::run`] (serial) dan [`Schedule::run_parallel`] (multi-thread)
+/// menghasilkan keadaan akhir **identik** — determinisme by construction
+/// (STD-0006). Sistem beraksi-lepas dijalankan paralel; yang bertabrakan
+/// diserialkan otomatis dari akses yang tersimpul.
+///
+/// # Contoh
+///
+/// ```
+/// use arke::{Schedule, System, World};
+///
+/// #[derive(Debug, PartialEq)]
+/// struct Counter(u32);
+///
+/// let mut world = World::new();
+/// world.spawn_bundle((Counter(0),));
+///
+/// let mut schedule = Schedule::new();
+/// schedule.add(System::each::<&mut Counter>(|c| c.0 += 1));
+///
+/// schedule.run_parallel(&mut world); // hasil sama dengan run()
+/// assert_eq!(world.query::<Counter>().next(), Some(&Counter(1)));
+/// ```
 #[derive(Default)]
 pub struct Schedule {
     systems: Vec<System>,

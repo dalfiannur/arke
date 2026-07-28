@@ -37,6 +37,25 @@ struct EntityMeta {
 /// Wadah pemilik semua entity, komponen, dan resource.
 ///
 /// Kemampuan query dikembangkan pada Milestone M-1 (lihat `docs/MILESTONE_1.md`).
+///
+/// # Contoh
+///
+/// ```
+/// use arke::World;
+///
+/// #[derive(Debug, PartialEq)]
+/// struct Health(u32);
+///
+/// let mut world = World::new();
+/// let e = world.spawn();
+/// world.insert(e, Health(100));
+///
+/// assert_eq!(world.get::<Health>(e), Some(&Health(100)));
+///
+/// // Handle menjadi basi setelah despawn (STD-0007).
+/// world.despawn(e);
+/// assert_eq!(world.get::<Health>(e), None);
+/// ```
 #[derive(Default)]
 pub struct World {
     entities: Vec<EntityMeta>,

@@ -4,7 +4,7 @@
 //! sistem — dipakai [`crate::schedule`] untuk analisis konflik. [`QueryData`]
 //! menyimpulkan `Access` dari **tipe** query dan menyediakan iterasi internal.
 //!
-//! `unsafe` di modul ini **terkurung** pada [`QueryTerm::iter_shared`] untuk
+//! `unsafe` di modul ini **terkurung** pada [`QueryTerm::fetch`] untuk
 //! term `&mut T` (memanggil `TypedColumn::data_mut_shared`); sound karena term
 //! query mengakses kolom **distinct** (cek-alias) dan penjadwal menjamin akses
 //! disjoint lintas-sistem (RFC-0016). Diverifikasi miri di CI.

@@ -46,3 +46,8 @@ missing_docs = "warn"
 
 [lints.clippy]
 all = "warn"
+
+# Tautan intra-doc yang putus = dokumen basi diam-diam (mis. item di-rename).
+# Ditolak agar `cargo doc`/`cargo test --doc` di CI menangkapnya.
+[lints.rustdoc]
+broken_intra_doc_links = "deny"
