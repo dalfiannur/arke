@@ -12,7 +12,7 @@ Dua pendirian yang membedakannya:
 - **Jalur ergonomis adalah jalur cepat.** API aman ter-*compile* ke jalur panas optimal — kamu tidak perlu `unsafe` untuk mendapat performa.
 - **Determinisme by construction.** Hasil yang sama setiap kali, apa pun jumlah thread atau penjadwalan.
 
-> Status: **0.5.0** — fondasi inti (M-1…M-13): entity/komponen archetype, query
+> Status: **0.5.2** — fondasi inti (M-1…M-13): entity/komponen archetype, query
 > tuple generik (arity & mutabilitas campuran) + filter `With`/`Without`,
 > scheduler deterministik, iterasi data-parallel, sistem berbasis-tipe,
 > **resources**, snapshot/serialisasi berversi + `#[derive(Serialize)]` (enum,
@@ -25,6 +25,14 @@ Dua pendirian yang membedakannya:
 > ([M-21](docs/MILESTONE_21.md)) — `spawn_bundle`/`insert_bundle` menyisipkan tuple
 > komponen dalam satu pindah archetype (*ergonomis = cepat*). **0 `unsafe`, 0
 > dependensi eksternal** (bahkan derive-nya).
+> **Pengerasan 0.5.x**: uji **model-based property** (oracle) + **stress paralel**
+> ([M-22](docs/MILESTONE_22.md)), lalu **klaim performa tervalidasi** vs hecs &
+> bevy_ecs ([RN-0003](docs/RN/RN-0003-competitive-benchmark.md)) — arke kini
+> **kompetitif/menang di ketiga beban inti** (iterasi ≈ hecs & menang bevy_ecs;
+> *spawn* & *get* menang bevy_ecs; *get* menang hecs), dengan **regresi-guard di
+> CI**. Optimasi: iterasi berkolom ([RFC-0023](docs/RFC/RFC-0023-columnar-query-iteration.md)),
+> resolusi komponen cepat ([RFC-0024](docs/RFC/RFC-0024-fast-component-resolution.md)),
+> downcast `get` tak-tercek terkurung ([RFC-0025](docs/RFC/RFC-0025-unchecked-column-downcast-get.md)).
 > **Jalur pengguna bebas `unsafe`** (STD-0004); `unsafe` internal **terkurung &
 > diverifikasi miri** di CI (menopang paralelisme tingkat-sistem, hasil identik
 > serial). Persistensi Postgres tersedia sebagai adapter terpisah
@@ -35,9 +43,9 @@ Dua pendirian yang membedakannya:
 
 ```toml
 [dependencies]
-arke = "0.4"
+arke = "0.5"
 # Opsional — persistensi PostgreSQL (Postgres sebagai sumber kebenaran):
-arke-postgres = "0.3"
+arke-postgres = "0.4"
 ```
 
 Atau lewat Cargo:
