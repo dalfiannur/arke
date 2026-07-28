@@ -141,8 +141,8 @@ Eksekusi ECS tetap **deterministik** atas working-set yang dimuat; Postgres adal
 
 | Fase | Isi |
 | --- | --- |
-| **v1** (M-20) | `#[derive(PgComponent)]` + pemetaan tipe; skema kolom-tipe (entity + tabel per komponen); `migrate`, `load`/`save` penuh, transaksi, generation optimistic-lock. Field non-skalar → `JSONB` fallback. |
-| v2 | Tulis-balik **inkremental** via change-log (kandidat: memanfaatkan `CommandBuffer`/pelacakan-perubahan sebagai sumber diff); migrasi `ALTER TABLE` saat skema komponen berevolusi. |
+| **v1** (M-20) | `#[derive(PgComponent)]` + pemetaan tipe (skalar/`Option`/`JSONB`/`NUMERIC`); skema kolom-tipe; `migrate`, `load`/`save` penuh; optimistic-lock (`version` + `generation`). |
+| **v2** (M-20) | Tulis-balik **inkremental** `save_incremental` — **diff berbasis-nilai** terhadap rekam sinkron-terakhir (arke tak melacak perubahan otomatis; menyimpan salinan keadaan). Hanya entity baru/berubah ditulis (UPSERT+versi), yang hilang di-DELETE. *(Pendekatan `CommandBuffer`-sebagai-diff ditolak: hanya menangkap perubahan struktural, bukan mutasi-nilai `&mut`.)* Migrasi `ALTER TABLE` → menyusul. |
 | v3 | Materialisasi **query-scoped** (muat subset dunia via predikat SQL); partial worlds; index/constraint yang bisa dikustom per komponen. |
 
 ## Alternatif yang dipertimbangkan

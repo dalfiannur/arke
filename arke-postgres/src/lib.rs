@@ -13,7 +13,7 @@
 pub use arke_postgres_derive::PgComponent;
 
 mod store;
-pub use store::{PgStore, UpdateError};
+pub use store::{PgStore, SyncStats, UpdateError};
 
 /// Tipe kolom SQL yang dipetakan dari tipe field Rust (RFC-0021 §2/§3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

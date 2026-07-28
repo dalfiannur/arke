@@ -1,6 +1,7 @@
 //! [`PgStore`]: persistensi async `World` ↔ Postgres (RFC-0021 §4).
 //!
-//! Fase v1: `connect`/`register`/`migrate`/`save`/`load` penuh, transaksional.
+//! `connect`/`register`/`migrate`/`save`/`load` penuh + `update_entity`
+//! (optimistic-lock) + `save_incremental` (diff), semua transaksional.
 //! `World` adalah *working set*; Postgres sumber kebenaran. Determinisme muat
 //! dijaga dengan `ORDER BY entity_id` (STD-0005). Tipe kolom yang didukung:
 //! INTEGER/BIGINT/NUMERIC (u64/usize)/REAL/DOUBLE PRECISION/BOOLEAN/TEXT +
@@ -15,6 +16,10 @@ use crate::{ColumnDef, PgComponent, PgType, PgValue, create_table_sql_from};
 
 /// Satu baris komponen yang di-dump: `(entity_id, nilai-kolom)`.
 type ComponentRow = (i64, Vec<PgValue>);
+
+/// Keadaan tersimpan satu entity untuk diff inkremental: `generation` + nilai
+/// tiap komponen terdaftar (`None` bila entity tak punya komponen itu).
+type EntityState = (i64, Vec<Option<Vec<PgValue>>>);
 
 /// Operasi type-erased untuk satu tipe komponen terdaftar.
 struct Registered {
@@ -53,6 +58,8 @@ fn apply_of<T: PgComponent + Component>(world: &mut World, entity: Entity, value
 pub struct PgStore {
     pool: PgPool,
     registered: Vec<Registered>,
+    /// Rekam keadaan sinkron terakhir (per entity) untuk `save_incremental`.
+    last: HashMap<i64, EntityState>,
 }
 
 impl PgStore {
@@ -67,6 +74,7 @@ impl PgStore {
         Self {
             pool,
             registered: Vec::new(),
+            last: HashMap::new(),
         }
     }
 
@@ -251,6 +259,101 @@ impl PgStore {
         tx.commit().await.map_err(UpdateError::Db)?;
         Ok(new_version)
     }
+
+    /// Kumpulkan keadaan seluruh entity + komponen `world` (untuk diff).
+    fn dump_state(&self, world: &World) -> HashMap<i64, EntityState> {
+        let n = self.registered.len();
+        let mut current: HashMap<i64, EntityState> = HashMap::new();
+        <Entity>::each_filtered_shared::<()>(world, |e| {
+            current.insert(
+                i64::from(e.index()),
+                (i64::from(e.generation()), vec![None; n]),
+            );
+        });
+        for (ci, r) in self.registered.iter().enumerate() {
+            for (id, params) in (r.dump)(world) {
+                if let Some(state) = current.get_mut(&id) {
+                    state.1[ci] = Some(params);
+                }
+            }
+        }
+        current
+    }
+
+    /// **Tulis-balik inkremental**: menulis (UPSERT, versi naik) hanya entity
+    /// yang **baru atau berubah** sejak sinkron terakhir, dan meng-DELETE yang
+    /// **hilang** — dengan mem-*diff* `world` terhadap rekam internal (RFC-0021 §7).
+    ///
+    /// Panggilan **pertama** (rekam kosong) menulis semua entity `world` (sinkron
+    /// awal); baris DB pra-ada yang tak dikenal rekam **tak** dihapus. Satu
+    /// transaksi. Cocok untuk checkpoint berkala world besar (hemat I/O).
+    ///
+    /// Catatan: diff berbasis-nilai (arke tak melacak perubahan otomatis), jadi
+    /// `PgStore` menyimpan salinan keadaan terakhir (biaya memori per entity).
+    pub async fn save_incremental(&mut self, world: &World) -> Result<SyncStats, sqlx::Error> {
+        let current = self.dump_state(world);
+        let mut tx = self.pool.begin().await?;
+        let mut stats = SyncStats {
+            written: 0,
+            deleted: 0,
+        };
+
+        // Hilang: ada di rekam, tak ada di `current`.
+        for id in self.last.keys() {
+            if !current.contains_key(id) {
+                sqlx::query("DELETE FROM arke_entities WHERE entity_id = $1")
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await?;
+                stats.deleted += 1;
+            }
+        }
+
+        // Baru atau berubah.
+        for (id, state) in &current {
+            if self.last.get(id) == Some(state) {
+                continue; // tak berubah → lewati
+            }
+            sqlx::query(
+                "INSERT INTO arke_entities (entity_id, generation, version) VALUES ($1, $2, 0) \
+                 ON CONFLICT (entity_id) \
+                 DO UPDATE SET generation = EXCLUDED.generation, version = arke_entities.version + 1",
+            )
+            .bind(*id)
+            .bind(state.0)
+            .execute(&mut *tx)
+            .await?;
+            // Ganti baris komponen entity ini.
+            for (ci, r) in self.registered.iter().enumerate() {
+                sqlx::query(&format!("DELETE FROM {} WHERE entity_id = $1", r.table))
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await?;
+                if let Some(params) = &state.1[ci] {
+                    let insert = insert_sql(r);
+                    let mut q = sqlx::query(&insert).bind(*id);
+                    for (value, col) in params.iter().zip(r.columns) {
+                        q = bind_value(q, col.ty, value);
+                    }
+                    q.execute(&mut *tx).await?;
+                }
+            }
+            stats.written += 1;
+        }
+
+        tx.commit().await?;
+        self.last = current;
+        Ok(stats)
+    }
+}
+
+/// Ringkasan sinkron inkremental [`PgStore::save_incremental`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyncStats {
+    /// Jumlah entity yang ditulis (baru/berubah).
+    pub written: usize,
+    /// Jumlah entity yang dihapus (hilang sejak sinkron terakhir).
+    pub deleted: usize,
 }
 
 /// Kegagalan [`PgStore::update_entity`].
