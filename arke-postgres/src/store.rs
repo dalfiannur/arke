@@ -3,8 +3,8 @@
 //! Fase v1: `connect`/`register`/`migrate`/`save`/`load` penuh, transaksional.
 //! `World` adalah *working set*; Postgres sumber kebenaran. Determinisme muat
 //! dijaga dengan `ORDER BY entity_id` (STD-0005). Tipe kolom yang didukung:
-//! INTEGER/BIGINT/REAL/DOUBLE PRECISION/BOOLEAN/TEXT + `Option<T>` nullable +
-//! `JSONB` (field non-skalar via `arke::Serialize`). `NUMERIC` (u64) menyusul.
+//! INTEGER/BIGINT/NUMERIC (u64/usize)/REAL/DOUBLE PRECISION/BOOLEAN/TEXT +
+//! `Option<T>` nullable + `JSONB` (field non-skalar via `arke::Serialize`).
 
 use std::collections::HashMap;
 
@@ -136,7 +136,7 @@ impl PgStore {
             for (entity_id, params) in (r.dump)(world) {
                 let mut q = sqlx::query(&insert).bind(entity_id);
                 for (value, col) in params.iter().zip(r.columns) {
-                    q = bind_value(q, col.ty, value)?;
+                    q = bind_value(q, col.ty, value);
                 }
                 q.execute(&mut *tx).await?;
             }
@@ -242,7 +242,7 @@ impl PgStore {
                 let insert = insert_sql(r);
                 let mut q = sqlx::query(&insert).bind(id);
                 for (value, col) in params.iter().zip(r.columns) {
-                    q = bind_value(q, col.ty, value).map_err(UpdateError::Db)?;
+                    q = bind_value(q, col.ty, value);
                 }
                 q.execute(&mut *tx).await.map_err(UpdateError::Db)?;
             }
@@ -273,21 +273,30 @@ impl std::fmt::Display for UpdateError {
 
 impl std::error::Error for UpdateError {}
 
-/// `INSERT INTO cmp_x (entity_id, c1, c2, …) VALUES ($1, $2, $3::jsonb, …)`.
-///
-/// Kolom `JSONB` memakai `$n::jsonb` (Postgres tak meng-cast text→jsonb implisit).
+/// Cast eksplisit placeholder INSERT untuk tipe yang di-bind sebagai teks
+/// (Postgres tak meng-cast text→jsonb/numeric implisit).
+fn insert_cast(ty: PgType) -> &'static str {
+    match ty {
+        PgType::Jsonb => "::jsonb",
+        PgType::Numeric => "::numeric",
+        _ => "",
+    }
+}
+
+/// Apakah kolom `ty` dibaca sebagai teks (`col::text`) — JSONB & NUMERIC, agar
+/// tak butuh dependensi serde/bigdecimal.
+fn read_as_text(ty: PgType) -> bool {
+    matches!(ty, PgType::Jsonb | PgType::Numeric)
+}
+
+/// `INSERT INTO cmp_x (entity_id, c1, c2::jsonb, …) VALUES ($1, $2, $3::jsonb, …)`.
 fn insert_sql(r: &Registered) -> String {
     let mut cols = String::from("entity_id");
     let mut placeholders = String::from("$1");
     for (i, col) in r.columns.iter().enumerate() {
         cols.push_str(", ");
         cols.push_str(col.name);
-        let cast = if col.ty == PgType::Jsonb {
-            "::jsonb"
-        } else {
-            ""
-        };
-        placeholders.push_str(&format!(", ${}{}", i + 2, cast));
+        placeholders.push_str(&format!(", ${}{}", i + 2, insert_cast(col.ty)));
     }
     format!(
         "INSERT INTO {} ({}) VALUES ({})",
@@ -297,12 +306,12 @@ fn insert_sql(r: &Registered) -> String {
 
 /// `SELECT entity_id, c1, c2::text AS c2, … FROM cmp_x ORDER BY entity_id`.
 ///
-/// Kolom `JSONB` dibaca sebagai teks (`::text`) agar tak butuh dependensi serde.
+/// Kolom `JSONB`/`NUMERIC` dibaca sebagai teks (`::text`).
 fn select_sql(r: &Registered) -> String {
     let mut cols = String::from("entity_id");
     for col in r.columns {
         cols.push_str(", ");
-        if col.ty == PgType::Jsonb {
+        if read_as_text(col.ty) {
             cols.push_str(&format!("{name}::text AS {name}", name = col.name));
         } else {
             cols.push_str(col.name);
@@ -316,17 +325,15 @@ fn bind_value<'q>(
     q: Query<'q, Postgres, PgArguments>,
     col_ty: PgType,
     value: &PgValue,
-) -> Result<Query<'q, Postgres, PgArguments>, sqlx::Error> {
-    Ok(match value {
+) -> Query<'q, Postgres, PgArguments> {
+    match value {
         PgValue::Int(i) => q.bind(*i),
         PgValue::Float(f) => q.bind(*f),
         PgValue::Bool(b) => q.bind(*b),
         PgValue::Text(s) => q.bind(s.clone()),
-        // JSON di-bind sebagai teks; placeholder `$n::jsonb` meng-cast-nya.
+        // JSON/NUMERIC di-bind sebagai teks; placeholder `$n::jsonb`/`::numeric` meng-cast.
         PgValue::Json(s) => q.bind(s.clone()),
-        PgValue::Numeric(_) => {
-            return Err(unsupported("NUMERIC (u64/usize)"));
-        }
+        PgValue::Numeric(s) => q.bind(s.clone()),
         // `NULL` di-bind dengan tipe kolom yang benar (protokol Postgres).
         PgValue::Null => match col_ty {
             PgType::Integer => q.bind(Option::<i32>::None),
@@ -334,13 +341,10 @@ fn bind_value<'q>(
             PgType::Real => q.bind(Option::<f32>::None),
             PgType::DoublePrecision => q.bind(Option::<f64>::None),
             PgType::Boolean => q.bind(Option::<bool>::None),
-            // JSONB NULL di-bind sebagai teks NULL; `$n::jsonb` meng-cast.
-            PgType::Text | PgType::Jsonb => q.bind(Option::<String>::None),
-            PgType::Numeric => {
-                return Err(unsupported("NULL untuk NUMERIC"));
-            }
+            // JSONB/NUMERIC NULL di-bind sebagai teks NULL; `::jsonb`/`::numeric` meng-cast.
+            PgType::Text | PgType::Jsonb | PgType::Numeric => q.bind(Option::<String>::None),
         },
-    })
+    }
 }
 
 /// Baca satu kolom baris menjadi [`PgValue`] sesuai tipenya (`NULL` → `Null`).
@@ -370,17 +374,14 @@ fn read_value(row: &sqlx::postgres::PgRow, col: &ColumnDef) -> Result<PgValue, s
             Some(v) => PgValue::Text(v),
             None => PgValue::Null,
         },
-        // Dibaca lewat `col::text` (lihat `select_sql`) → String JSON.
+        // Dibaca lewat `col::text` (lihat `select_sql`).
         PgType::Jsonb => match row.try_get::<Option<String>, _>(col.name)? {
             Some(v) => PgValue::Json(v),
             None => PgValue::Null,
         },
-        PgType::Numeric => {
-            return Err(unsupported("NUMERIC (load)"));
-        }
+        PgType::Numeric => match row.try_get::<Option<String>, _>(col.name)? {
+            Some(v) => PgValue::Numeric(v),
+            None => PgValue::Null,
+        },
     })
-}
-
-fn unsupported(what: &str) -> sqlx::Error {
-    sqlx::Error::Protocol(format!("arke-postgres v1: tipe {what} belum didukung"))
 }
