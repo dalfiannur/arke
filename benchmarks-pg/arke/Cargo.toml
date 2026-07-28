@@ -10,6 +10,10 @@ publish = false
 arke = { path = "../.." }
 arke-postgres = { path = "../../arke-postgres" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+# Jalur tulis konkuren (sweep multi-core): raw sqlx + buffer_unordered.
+# Samakan versi/fitur sqlx dgn arke-postgres → satu salinan crate (tipe PgPool sama).
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres"] }
+futures = "0.3"
 
 [profile.release]
 opt-level = 3

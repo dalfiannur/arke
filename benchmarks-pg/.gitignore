@@ -1,0 +1,4 @@
+# Artefak build & dependensi — jangan di-commit.
+target/
+node_modules/
+bun.lock
