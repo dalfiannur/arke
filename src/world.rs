@@ -385,10 +385,12 @@ impl World {
 
     /// Mengembalikan referensi ke komponen `T` milik `entity`, bila ada.
     pub fn get<T: Component>(&self, entity: Entity) -> Option<&T> {
-        if !self.contains(entity) {
+        // Satu lookup entity (cek hidup + generasi + lokasi sekaligus).
+        let meta = self.entities.get(entity.index() as usize)?;
+        if !meta.alive || meta.generation != entity.generation() {
             return None;
         }
-        let location = self.entities[entity.index() as usize].location?;
+        let location = meta.location?;
         let cid = self.registry.get::<T>()?;
         let archetype = &self.archetypes[location.archetype];
         let col = archetype.column_index(cid)?;
