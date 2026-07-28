@@ -192,7 +192,7 @@ impl World {
                     let (src, dst) = split_two(&mut self.archetypes, loc.archetype, dst_idx);
                     let dst_row = dst.push_entity(entity);
                     let moved = src.move_row_to(loc.row, dst);
-                    bundle.push(dst, &self.registry);
+                    bundle.push(dst, &bundle_ids);
                     (moved, dst_row)
                 };
                 self.entities[index].location = Some(Location {
@@ -204,7 +204,7 @@ impl World {
             None => {
                 let dst = &mut self.archetypes[dst_idx];
                 let dst_row = dst.push_entity(entity);
-                bundle.push(dst, &self.registry);
+                bundle.push(dst, &bundle_ids);
                 self.entities[index].location = Some(Location {
                     archetype: dst_idx,
                     row: dst_row,

@@ -56,3 +56,4 @@ Draft → Discussion → Accepted | Rejected | Superseded
 | [RFC-0021](RFC-0021-arke-postgres-adapter.md) | `arke-postgres` — adapter Postgres sebagai sumber kebenaran | Accepted |
 | [RFC-0022](RFC-0022-component-bundles.md) | Bundle komponen (spawn/insert tuple) | Accepted |
 | [RFC-0023](RFC-0023-columnar-query-iteration.md) | Iterasi query berbasis-indeks (kolom) — optimasi | Accepted |
+| [RFC-0024](RFC-0024-fast-component-resolution.md) | Resolusi komponen cepat (hasher TypeId + threading cid) | Accepted |

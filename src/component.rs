@@ -30,8 +30,44 @@ impl ComponentId {
 
 use std::any::TypeId;
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
 
 use crate::storage::{Column, TypedColumn};
+
+/// Hasher cepat untuk kunci `TypeId` (algoritma FxHash, dipakai rustc).
+///
+/// `TypeId` sudah berupa hash 128-bit berkualitas; SipHash default boros untuk
+/// kunci sekecil ini. Deterministik (tanpa seed acak) — hanya untuk *lookup*
+/// titik (register/get), tak memengaruhi urutan (STD-0005). Menghemat sebagian
+/// besar biaya resolusi komponen di jalur panas spawn/query.
+#[derive(Default)]
+pub(crate) struct TypeIdHasher(u64);
+
+const FX_K: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+
+impl Hasher for TypeIdHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write_u64(&mut self, i: u64) {
+        self.0 = (self.0.rotate_left(5) ^ i).wrapping_mul(FX_K);
+    }
+    fn write_u128(&mut self, i: u128) {
+        self.write_u64(i as u64);
+        self.write_u64((i >> 64) as u64);
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        // Fallback (jarang; `TypeId` memakai `write_u64`/`write_u128`).
+        for chunk in bytes.chunks(8) {
+            let mut buf = [0u8; 8];
+            buf[..chunk.len()].copy_from_slice(chunk);
+            self.write_u64(u64::from_le_bytes(buf));
+        }
+    }
+}
+
+/// `HashMap` berkunci `TypeId` dengan hasher cepat.
+pub(crate) type TypeIdMap<V> = HashMap<TypeId, V, BuildHasherDefault<TypeIdHasher>>;
 
 /// Pemetaan tipe komponen ke [`ComponentId`], sekaligus pabrik kolom kosong
 /// untuk tiap tipe yang terdaftar.
@@ -41,7 +77,7 @@ use crate::storage::{Column, TypedColumn};
 /// terhadap urutan operasi.
 #[derive(Default)]
 pub(crate) struct ComponentRegistry {
-    ids: HashMap<TypeId, ComponentId>,
+    ids: TypeIdMap<ComponentId>,
     /// Konstruktor kolom kosong per komponen, terindeks oleh `ComponentId`.
     constructors: Vec<fn() -> Box<dyn Column>>,
     /// Nama tipe per komponen, terindeks oleh `ComponentId` (untuk error berkonteks).

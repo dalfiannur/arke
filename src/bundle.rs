@@ -19,9 +19,10 @@ pub trait Bundle {
     /// Registrasikan tipe komponen bundle; kembalikan id-nya (urut tuple).
     #[doc(hidden)]
     fn ids(registry: &mut ComponentRegistry) -> Vec<ComponentId>;
-    /// Dorong tiap komponen ke kolomnya di `archetype` (yang memuat semuanya).
+    /// Dorong tiap komponen ke kolomnya di `archetype`. `cids` = id komponen
+    /// bundle (urut tuple, dari [`Self::ids`]) — menghindari lookup registry ulang.
     #[doc(hidden)]
-    fn push(self, archetype: &mut Archetype, registry: &ComponentRegistry);
+    fn push(self, archetype: &mut Archetype, cids: &[ComponentId]);
 }
 
 macro_rules! impl_bundle {
@@ -31,13 +32,10 @@ macro_rules! impl_bundle {
             fn ids(registry: &mut ComponentRegistry) -> Vec<ComponentId> {
                 ::std::vec![$(registry.register::<$T>()),+]
             }
-            fn push(self, archetype: &mut Archetype, registry: &ComponentRegistry) {
+            fn push(self, archetype: &mut Archetype, cids: &[ComponentId]) {
                 $(
-                    let cid = registry
-                        .get::<$T>()
-                        .expect("tipe bundle sudah diregistrasi oleh ids()");
                     let col = archetype
-                        .column_index(cid)
+                        .column_index(cids[$idx])
                         .expect("archetype tujuan memuat kolom bundle");
                     archetype.push_component(col, self.$idx);
                 )+
