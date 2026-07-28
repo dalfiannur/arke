@@ -63,6 +63,15 @@ pub struct ColumnDef {
     pub nullable: bool,
 }
 
+/// Definisi indeks kustom pada sebuah kolom (dari `#[pg(index)]`/`#[pg(unique)]`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndexDef {
+    /// Kolom yang di-index.
+    pub column: &'static str,
+    /// Apakah indeks `UNIQUE`.
+    pub unique: bool,
+}
+
 /// Nilai kolom yang portabel (batas antara komponen ↔ driver DB).
 ///
 /// `to_params` menghasilkannya; layer `sqlx` (nanti) mem-bind-nya ke query.
@@ -93,6 +102,10 @@ pub trait PgComponent {
     const TABLE: &'static str;
     /// Definisi kolom, urut sesuai field.
     const COLUMNS: &'static [ColumnDef];
+    /// Indeks kustom (`#[pg(index)]`/`#[pg(unique)]`); kosong bila tak ada.
+    const INDEXES: &'static [IndexDef] = &[];
+    /// Ekspresi `CHECK` level-tabel (`#[pg(check = "…")]`); kosong bila tak ada.
+    const CHECKS: &'static [&'static str] = &[];
     /// Nilai kolom untuk baris ini, urut sesuai [`Self::COLUMNS`].
     fn to_params(&self) -> Vec<PgValue>;
     /// Rekonstruksi dari nilai kolom (urut sesuai [`Self::COLUMNS`]); `None`

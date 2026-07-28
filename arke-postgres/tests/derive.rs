@@ -1,6 +1,6 @@
 //! Uji `#[derive(PgComponent)]` — **tanpa database** (skema + round-trip).
 
-use arke_postgres::{ColumnDef, PgComponent, PgType, PgValue, create_table_sql};
+use arke_postgres::{ColumnDef, IndexDef, PgComponent, PgType, PgValue, create_table_sql};
 
 #[derive(PgComponent)]
 struct Position {
@@ -250,6 +250,37 @@ fn jsonb_fallback_untuk_field_non_skalar() {
     };
     assert_eq!(n.to_params()[2], PgValue::Null);
     assert_eq!(Blob::from_params(&n.to_params()).unwrap(), n);
+}
+
+#[derive(PgComponent, PartialEq, Debug)]
+#[pg(check = "hp >= 0")]
+struct Unit {
+    #[pg(index)]
+    kind: i32,
+    #[pg(unique)]
+    tag: i32,
+    hp: i32,
+}
+
+#[test]
+fn index_dan_check_dari_atribut_pg() {
+    assert_eq!(
+        Unit::INDEXES.to_vec(),
+        vec![
+            IndexDef {
+                column: "kind",
+                unique: false
+            },
+            IndexDef {
+                column: "tag",
+                unique: true
+            },
+        ]
+    );
+    assert_eq!(Unit::CHECKS.to_vec(), vec!["hp >= 0"]);
+    // Komponen tanpa atribut → kosong.
+    assert!(Position::INDEXES.is_empty());
+    assert!(Position::CHECKS.is_empty());
 }
 
 #[test]

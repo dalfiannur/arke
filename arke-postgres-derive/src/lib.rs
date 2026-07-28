@@ -8,11 +8,12 @@
 
 use proc_macro::{Delimiter, TokenStream, TokenTree};
 
-/// Turunkan `arke_postgres::PgComponent` untuk struct field-bernama skalar.
+/// Turunkan `arke_postgres::PgComponent` untuk struct field-bernama.
 ///
-/// Tipe field skalar dipetakan ke kolom SQL ber-tipe (RFC-0021 §3). Tipe yang
-/// belum didukung, generic, atau non-struct → `compile_error!`.
-#[proc_macro_derive(PgComponent)]
+/// Tipe field dipetakan ke kolom SQL ber-tipe (RFC-0021 §3). Atribut opsional:
+/// field `#[pg(index)]`/`#[pg(unique)]` → indeks; tipe `#[pg(check = "…")]` →
+/// constraint `CHECK`. Tipe tak didukung, generic, atau non-struct → `compile_error!`.
+#[proc_macro_derive(PgComponent, attributes(pg))]
 pub fn derive_pg_component(input: TokenStream) -> TokenStream {
     let code = match expand(input) {
         Ok(code) => code,
@@ -21,20 +22,82 @@ pub fn derive_pg_component(input: TokenStream) -> TokenStream {
     code.parse().expect("kode hasil-derive tidak valid")
 }
 
-/// Satu field bernama + tipe (dinormalisasi ke string tanpa spasi).
+/// Satu field bernama + tipe (dinormalisasi ke string tanpa spasi) + atribut.
 struct Field {
     name: String,
     ty: String,
+    index: bool,
+    unique: bool,
+}
+
+/// Satu item atribut `#[pg(...)]`.
+enum PgItem {
+    Index,
+    Unique,
+    Check(String),
+}
+
+/// Parse isi bracket `#[pg(...)]` → daftar item. Bracket non-`pg` → kosong.
+fn parse_pg_items(bracket_stream: TokenStream) -> Result<Vec<PgItem>, String> {
+    let toks: Vec<TokenTree> = bracket_stream.into_iter().collect();
+    let Some(TokenTree::Ident(id)) = toks.first() else {
+        return Ok(Vec::new());
+    };
+    if id.to_string() != "pg" {
+        return Ok(Vec::new());
+    }
+    let Some(TokenTree::Group(g)) = toks.get(1) else {
+        return Ok(Vec::new());
+    };
+    let inner: Vec<TokenTree> = g.stream().into_iter().collect();
+    let mut items = Vec::new();
+    let mut j = 0;
+    while j < inner.len() {
+        if let TokenTree::Ident(key) = &inner[j] {
+            match key.to_string().as_str() {
+                "index" => items.push(PgItem::Index),
+                "unique" => items.push(PgItem::Unique),
+                "check" => match (inner.get(j + 1), inner.get(j + 2)) {
+                    (Some(TokenTree::Punct(p)), Some(TokenTree::Literal(lit)))
+                        if p.as_char() == '=' =>
+                    {
+                        items.push(PgItem::Check(unquote(&lit.to_string())));
+                        j += 2;
+                    }
+                    _ => return Err("pg(check = \"...\") tak valid".to_string()),
+                },
+                other => return Err(format!("atribut pg tak dikenal: `{other}`")),
+            }
+        }
+        j += 1;
+    }
+    Ok(items)
+}
+
+/// Hilangkan kutip luar dari literal string.
+fn unquote(s: &str) -> String {
+    s.trim_matches('"').to_string()
 }
 
 fn expand(input: TokenStream) -> Result<String, String> {
     let tokens: Vec<TokenTree> = input.into_iter().collect();
     let mut i = 0;
+    let mut checks: Vec<String> = Vec::new();
 
     // Lewati atribut & visibilitas; temukan `struct` (tolak enum/union).
+    // Atribut tipe `#[pg(check = "...")]` dikumpulkan.
     while i < tokens.len() {
         match &tokens[i] {
             TokenTree::Punct(p) if p.as_char() == '#' => {
+                if let Some(TokenTree::Group(g)) = tokens.get(i + 1)
+                    && g.delimiter() == Delimiter::Bracket
+                {
+                    for item in parse_pg_items(g.stream())? {
+                        if let PgItem::Check(expr) = item {
+                            checks.push(expr);
+                        }
+                    }
+                }
                 i += 2; // '#' + grup bracket
                 continue;
             }
@@ -82,7 +145,7 @@ fn expand(input: TokenStream) -> Result<String, String> {
         return Err("derive(PgComponent): struct tanpa field tak didukung".to_string());
     }
 
-    gen_impl(&name, &fields)
+    gen_impl(&name, &fields, &checks)
 }
 
 fn parse_named_fields(stream: TokenStream) -> Result<Vec<Field>, String> {
@@ -90,11 +153,23 @@ fn parse_named_fields(stream: TokenStream) -> Result<Vec<Field>, String> {
     let mut fields = Vec::new();
     let mut i = 0;
     while i < toks.len() {
-        // Lewati atribut field.
+        // Atribut field: baca `#[pg(index|unique)]`, lewati lainnya.
+        let mut index = false;
+        let mut unique = false;
         while matches!(toks.get(i), Some(TokenTree::Punct(p)) if p.as_char() == '#') {
             i += 1;
-            if matches!(toks.get(i), Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Bracket)
+            if let Some(TokenTree::Group(g)) = toks.get(i)
+                && g.delimiter() == Delimiter::Bracket
             {
+                for item in parse_pg_items(g.stream())? {
+                    match item {
+                        PgItem::Index => index = true,
+                        PgItem::Unique => unique = true,
+                        PgItem::Check(_) => {
+                            return Err("pg(check) hanya valid di level-tipe".to_string());
+                        }
+                    }
+                }
                 i += 1;
             }
         }
@@ -136,7 +211,12 @@ fn parse_named_fields(stream: TokenStream) -> Result<Vec<Field>, String> {
             ty.push_str(&toks[i].to_string());
             i += 1;
         }
-        fields.push(Field { name, ty });
+        fields.push(Field {
+            name,
+            ty,
+            index,
+            unique,
+        });
     }
     Ok(fields)
 }
@@ -301,24 +381,38 @@ fn from_jsonb(name: &str, idx: usize, ty: &str, optional: bool) -> String {
     }
 }
 
-fn gen_impl(name: &str, fields: &[Field]) -> Result<String, String> {
+fn gen_impl(name: &str, fields: &[Field], checks: &[String]) -> Result<String, String> {
     let table = format!("cmp_{}", name.to_lowercase());
 
     let mut columns = String::new();
     let mut to_params = String::new();
     let mut from_fields = String::new();
+    let mut indexes = String::new();
 
     for (idx, f) in fields.iter().enumerate() {
         let frag = field_sql(f, idx)?;
         columns.push_str(&frag.column);
         to_params.push_str(&frag.to_param);
         from_fields.push_str(&frag.from_field);
+        if f.index || f.unique {
+            indexes.push_str(&format!(
+                "::arke_postgres::IndexDef {{ column: {:?}, unique: {} }}, ",
+                f.name, f.unique
+            ));
+        }
+    }
+
+    let mut checks_str = String::new();
+    for c in checks {
+        checks_str.push_str(&format!("{c:?}, "));
     }
 
     Ok(format!(
         "impl ::arke_postgres::PgComponent for {name} {{\n\
             const TABLE: &'static str = {table:?};\n\
             const COLUMNS: &'static [::arke_postgres::ColumnDef] = &[{columns}];\n\
+            const INDEXES: &'static [::arke_postgres::IndexDef] = &[{indexes}];\n\
+            const CHECKS: &'static [&'static str] = &[{checks_str}];\n\
             fn to_params(&self) -> ::std::vec::Vec<::arke_postgres::PgValue> {{\n\
                 ::std::vec![{to_params}]\n\
             }}\n\

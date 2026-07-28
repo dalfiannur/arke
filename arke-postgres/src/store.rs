@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 use arke::{Component, Entity, QueryData, World};
 use sqlx::{PgPool, Postgres, Row, postgres::PgArguments, postgres::PgPoolOptions, query::Query};
 
-use crate::{ColumnDef, PgComponent, PgType, PgValue, create_table_sql_from};
+use crate::{ColumnDef, IndexDef, PgComponent, PgType, PgValue, create_table_sql_from};
 
 /// Satu baris komponen yang di-dump: `(entity_id, nilai-kolom)`.
 type ComponentRow = (i64, Vec<PgValue>);
@@ -25,6 +25,8 @@ type EntityState = (i64, Vec<Option<Vec<PgValue>>>);
 struct Registered {
     table: &'static str,
     columns: &'static [ColumnDef],
+    indexes: &'static [IndexDef],
+    checks: &'static [&'static str],
     /// Kumpulkan baris komponen dari `World`.
     dump: fn(&World) -> Vec<ComponentRow>,
     /// Nilai-kolom komponen `T` milik `entity`, bila ada.
@@ -83,6 +85,8 @@ impl PgStore {
         self.registered.push(Registered {
             table: T::TABLE,
             columns: T::COLUMNS,
+            indexes: T::INDEXES,
+            checks: T::CHECKS,
             dump: dump_of::<T>,
             dump_one: dump_one_of::<T>,
             apply: apply_of::<T>,
@@ -163,6 +167,32 @@ impl PgStore {
                 .execute(&self.pool)
                 .await?;
             }
+        }
+
+        // Indeks kustom (`#[pg(index)]`/`#[pg(unique)]`), idempoten.
+        for idx in r.indexes {
+            let unique = if idx.unique { "UNIQUE " } else { "" };
+            sqlx::query(&format!(
+                "CREATE {unique}INDEX IF NOT EXISTS idx_{table}_{col} ON {table} ({col})",
+                table = r.table,
+                col = idx.column
+            ))
+            .execute(&self.pool)
+            .await?;
+        }
+
+        // Constraint `CHECK` (`#[pg(check = "…")]`), idempoten via nama + guard.
+        for (i, expr) in r.checks.iter().enumerate() {
+            sqlx::query(&format!(
+                "DO $$ BEGIN \
+                   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_{table}_{i}') THEN \
+                     ALTER TABLE {table} ADD CONSTRAINT chk_{table}_{i} CHECK ({expr}); \
+                   END IF; \
+                 END $$;",
+                table = r.table
+            ))
+            .execute(&self.pool)
+            .await?;
         }
         Ok(())
     }

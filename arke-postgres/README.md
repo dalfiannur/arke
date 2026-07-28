@@ -127,6 +127,25 @@ match store.update_entity(world, e, v).await {
 Field non-skalar butuh `#[derive(arke::Serialize)]` pada tipenya; hanya komponen
 ber-`#[derive(PgComponent)]` yang dipersist.
 
+## Index & constraint kustom
+
+Atribut `#[pg(...)]` → `migrate` membuat indeks/constraint (idempoten):
+
+```rust,no_run
+# use arke_postgres::PgComponent;
+#[derive(PgComponent)]
+#[pg(check = "hp >= 0")]           // constraint CHECK level-tabel
+struct Enemy {
+    #[pg(index)]  kind: i32,       // btree index (mempercepat load_where)
+    #[pg(unique)] tag: i64,        // UNIQUE index
+    hp: i32,
+}
+```
+
+- `#[pg(index)]` → `CREATE INDEX idx_<tabel>_<kolom>` (mempercepat filter `load_where`).
+- `#[pg(unique)]` → `CREATE UNIQUE INDEX`.
+- `#[pg(check = "…")]` (level-tipe, boleh banyak) → constraint `CHECK`.
+
 ## Menjalankan uji
 
 Uji integrasi butuh Postgres nyata; di-*skip* bila `DATABASE_URL` tak diset:
