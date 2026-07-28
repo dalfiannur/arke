@@ -12,7 +12,7 @@ Dua pendirian yang membedakannya:
 - **Jalur ergonomis adalah jalur cepat.** API aman ter-*compile* ke jalur panas optimal — kamu tidak perlu `unsafe` untuk mendapat performa.
 - **Determinisme by construction.** Hasil yang sama setiap kali, apa pun jumlah thread atau penjadwalan.
 
-> Status: **0.5.2** — fondasi inti (M-1…M-13): entity/komponen archetype, query
+> Status: **0.6.0** — fondasi inti (M-1…M-13): entity/komponen archetype, query
 > tuple generik (arity & mutabilitas campuran) + filter `With`/`Without`,
 > scheduler deterministik, iterasi data-parallel, sistem berbasis-tipe,
 > **resources**, snapshot/serialisasi berversi + `#[derive(Serialize)]` (enum,
@@ -33,6 +33,12 @@ Dua pendirian yang membedakannya:
 > CI**. Optimasi: iterasi berkolom ([RFC-0023](docs/RFC/RFC-0023-columnar-query-iteration.md)),
 > resolusi komponen cepat ([RFC-0024](docs/RFC/RFC-0024-fast-component-resolution.md)),
 > downcast `get` tak-tercek terkurung ([RFC-0025](docs/RFC/RFC-0025-unchecked-column-downcast-get.md)).
+> **0.6.0 (bentuk-API menuju 1.0, [RN-0004](docs/RN/RN-0004-jalan-menuju-1.0.md))**:
+> trait ekstensi **di-*seal*** ([RFC-0026](docs/RFC/RFC-0026-seal-extension-traits.md)),
+> `query_pair`/`query_pair_ref` **usang** → `QueryData` generik
+> ([RFC-0027](docs/RFC/RFC-0027-deprecate-query-pair.md)), kebijakan **MSRV/semver**
+> + CHANGELOG ([RFC-0028](docs/RFC/RFC-0028-changelog-msrv-semver-policy.md)). Lihat
+> [`CHANGELOG.md`](CHANGELOG.md).
 > **Jalur pengguna bebas `unsafe`** (STD-0004); `unsafe` internal **terkurung &
 > diverifikasi miri** di CI (menopang paralelisme tingkat-sistem, hasil identik
 > serial). Persistensi Postgres tersedia sebagai adapter terpisah
@@ -43,7 +49,7 @@ Dua pendirian yang membedakannya:
 
 ```toml
 [dependencies]
-arke = "0.5"
+arke = "0.6"
 # Opsional — persistensi PostgreSQL (Postgres sebagai sumber kebenaran):
 arke-postgres = "0.4"
 ```

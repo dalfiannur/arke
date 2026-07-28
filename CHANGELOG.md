@@ -5,7 +5,9 @@ Semua perubahan penting pada `arke` didokumentasikan di sini. Format mengikuti
 [Semantic Versioning](https://semver.org) (lihat STD-0010). Riwayat lengkap tiap
 rilis juga ada di [GitHub Releases](https://github.com/dalfiannur/arke/releases).
 
-## [Unreleased] — menuju 0.6.0
+## [Unreleased]
+
+## [0.6.0] — 2026-07-29
 
 Rilis **bentuk-API menuju 1.0** ([RN-0004](docs/RN/RN-0004-jalan-menuju-1.0.md)).
 
@@ -67,7 +69,8 @@ eksekutor graf-ketergantungan, command buffer, `Entity` sebagai term query. Adap
 [`arke-postgres`](arke-postgres/) diperkenalkan pada era 0.4.x. Detail per rilis:
 [GitHub Releases](https://github.com/dalfiannur/arke/releases).
 
-[Unreleased]: https://github.com/dalfiannur/arke/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/dalfiannur/arke/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/dalfiannur/arke/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/dalfiannur/arke/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/dalfiannur/arke/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/dalfiannur/arke/compare/v0.4.2...v0.5.0
