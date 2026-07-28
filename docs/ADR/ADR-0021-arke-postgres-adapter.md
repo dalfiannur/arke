@@ -17,7 +17,7 @@ Kami memilih:
 3. **`#[derive(PgComponent)]`** (tulis-tangan, pola `arke-derive`) menurunkan skema: `TABLE`, `COLUMNS` (nama+tipe SQL), `to_params`, `from_params`. Kolom-tipe butuh tipe Rust konkret yang `Value` buang → derive, bukan `Serialize`/`Value` saja.
 4. **API async (sqlx)**: `connect`/`migrate`/`load`/`save`; pool + migrasi + query cek-kompilasi.
 5. **Model working-set**: `World` materialized dari Postgres, dijalankan deterministik, ditulis-balik di titik terkendali — **bukan** per-tick (impedance mismatch).
-6. **Konsistensi**: `save` transaksional; **generation = optimistic lock** (memakai ulang invarian generational STD-0007 sebagai kolom versi DB); despawn → DELETE cascade.
+6. **Konsistensi**: `save`/`update_entity` transaksional; **optimistic-lock = kolom `version`** (naik tiap tulis-balik) **+ gerbang `generation`** (STD-0007 mendeteksi konflik identitas; `version` mendeteksi konflik nilai). `update_entity` mengembalikan `Conflict` bila versi/identitas berubah; despawn → DELETE cascade.
 7. **Bertahap**: v1 derive+skema+load/save+optimistic-lock; v2 tulis-balik inkremental + `ALTER` migrasi; v3 materialisasi query-scoped.
 
 ## Konsekuensi

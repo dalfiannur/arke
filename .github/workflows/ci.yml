@@ -89,7 +89,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: PgStore round-trip (arke-postgres)
-        run: cargo test -p arke-postgres --test store
+      - name: PgStore integrasi (arke-postgres)
+        run: cargo test -p arke-postgres
         env:
           DATABASE_URL: postgres://arke:arke@localhost:5432/arke_test

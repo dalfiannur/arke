@@ -122,10 +122,11 @@ store.save(&world).await?;
 
 ### 5. Konsistensi & konkurensi
 
-- **Transaksi**: tiap `save` atomik.
-- **Generation = optimistic lock**: tulis-balik `UPDATE … WHERE entity_id=$1 AND generation=$2`; mismatch → error konflik (writer lain mengubah entity itu). Ini **memakai ulang invarian generational** (STD-0007) sebagai kolom versi DB — handle basi = baris usang.
+- **Transaksi**: tiap `save`/`update_entity` atomik.
+- **Optimistic-lock = kolom `version` + gerbang `generation`**: `arke_entities` punya `version BIGINT` yang **naik tiap tulis-balik**. `update_entity(world, entity, expected_version)` menjalankan `UPDATE … SET version=version+1 WHERE entity_id=$1 AND generation=$2 AND version=$3 RETURNING version`; 0 baris → **konflik** (writer lain mengubahnya). Catatan penting: `generation` (STD-0007) hanya naik saat despawn/**re**spawn, jadi ia mendeteksi konflik **identitas**, bukan **nilai** — maka kolom `version` terpisah diperlukan untuk konflik mutasi-komponen. `entity_version(entity)` membaca versi terkini untuk retry.
+- **`save` (overwrite penuh)** mereset `version` ke 0 (baseline single-writer/inisialisasi); multi-writer memakai `update_entity`.
 - **Despawn → DELETE** (cascade ke tabel komponen).
-- **Multi-writer**: Postgres otoritatif; konflik terdeteksi lewat generation. Kebijakan resolusi (retry / last-writer-wins / merge) = **open question**.
+- **Multi-writer**: Postgres otoritatif; konflik terdeteksi lewat `version`. Kebijakan resolusi (retry / LWW / merge) diserahkan ke pemanggil (`update_entity` mengembalikan `Conflict`; contoh retry di uji).
 
 ### 6. Fidelity & versi
 

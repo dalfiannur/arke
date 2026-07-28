@@ -22,6 +22,8 @@ struct Registered {
     columns: &'static [ColumnDef],
     /// Kumpulkan baris komponen dari `World`.
     dump: fn(&World) -> Vec<ComponentRow>,
+    /// Nilai-kolom komponen `T` milik `entity`, bila ada.
+    dump_one: fn(&World, Entity) -> Option<Vec<PgValue>>,
     /// Rekonstruksi komponen dari nilai-kolom lalu sisipkan ke `entity`.
     apply: fn(&mut World, Entity, &[PgValue]),
 }
@@ -32,6 +34,10 @@ fn dump_of<T: PgComponent + Component>(world: &World) -> Vec<ComponentRow> {
         out.push((i64::from(e.index()), c.to_params()));
     });
     out
+}
+
+fn dump_one_of<T: PgComponent + Component>(world: &World, entity: Entity) -> Option<Vec<PgValue>> {
+    world.get::<T>(entity).map(PgComponent::to_params)
 }
 
 fn apply_of<T: PgComponent + Component>(world: &mut World, entity: Entity, values: &[PgValue]) {
@@ -70,6 +76,7 @@ impl PgStore {
             table: T::TABLE,
             columns: T::COLUMNS,
             dump: dump_of::<T>,
+            dump_one: dump_one_of::<T>,
             apply: apply_of::<T>,
         });
         self
@@ -80,7 +87,14 @@ impl PgStore {
     pub async fn migrate(&self) -> Result<(), sqlx::Error> {
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS arke_entities \
-             (entity_id BIGINT PRIMARY KEY, generation BIGINT NOT NULL)",
+             (entity_id BIGINT PRIMARY KEY, generation BIGINT NOT NULL, \
+              version BIGINT NOT NULL DEFAULT 0)",
+        )
+        .execute(&self.pool)
+        .await?;
+        // Tabel lama tanpa kolom `version` → tambahkan (optimistic-lock).
+        sqlx::query(
+            "ALTER TABLE arke_entities ADD COLUMN IF NOT EXISTS version BIGINT NOT NULL DEFAULT 0",
         )
         .execute(&self.pool)
         .await?;
@@ -106,11 +120,14 @@ impl PgStore {
         let mut entities: Vec<Entity> = Vec::new();
         <Entity>::each_filtered_shared::<()>(world, |e| entities.push(e));
         for e in &entities {
-            sqlx::query("INSERT INTO arke_entities (entity_id, generation) VALUES ($1, $2)")
-                .bind(i64::from(e.index()))
-                .bind(i64::from(e.generation()))
-                .execute(&mut *tx)
-                .await?;
+            // Overwrite penuh mereset versi ke 0 (baseline single-writer).
+            sqlx::query(
+                "INSERT INTO arke_entities (entity_id, generation, version) VALUES ($1, $2, 0)",
+            )
+            .bind(i64::from(e.index()))
+            .bind(i64::from(e.generation()))
+            .execute(&mut *tx)
+            .await?;
         }
 
         // Komponen (referensi FK ke arke_entities).
@@ -163,7 +180,98 @@ impl PgStore {
         }
         Ok(())
     }
+
+    /// Versi optimistic-lock `entity` di DB, atau `None` bila entity tak ada
+    /// (identitas dicek lewat `generation`, STD-0007).
+    pub async fn entity_version(&self, entity: Entity) -> Result<Option<i64>, sqlx::Error> {
+        let row = sqlx::query(
+            "SELECT version FROM arke_entities WHERE entity_id = $1 AND generation = $2",
+        )
+        .bind(i64::from(entity.index()))
+        .bind(i64::from(entity.generation()))
+        .fetch_optional(&self.pool)
+        .await?;
+        match row {
+            Some(row) => Ok(Some(row.try_get("version")?)),
+            None => Ok(None),
+        }
+    }
+
+    /// **Tulis-balik ber-optimistic-lock**: memperbarui baris `entity` (versi
+    /// naik) beserta komponennya dari `world`, **hanya bila** versi DB masih
+    /// `expected_version` dan identitas (`generation`) cocok (RFC-0021 §5).
+    ///
+    /// Mengembalikan versi baru bila sukses, atau [`UpdateError::Conflict`] bila
+    /// writer lain telah mengubah entity ini (versi/identitas tak cocok).
+    /// Transaksional: pada konflik, tak ada perubahan.
+    pub async fn update_entity(
+        &self,
+        world: &World,
+        entity: Entity,
+        expected_version: i64,
+    ) -> Result<i64, UpdateError> {
+        let id = i64::from(entity.index());
+        let mut tx = self.pool.begin().await.map_err(UpdateError::Db)?;
+
+        // Gerbang: naikkan versi hanya bila versi & identitas cocok.
+        let new_version: Option<i64> = sqlx::query_scalar(
+            "UPDATE arke_entities SET version = version + 1 \
+             WHERE entity_id = $1 AND generation = $2 AND version = $3 \
+             RETURNING version",
+        )
+        .bind(id)
+        .bind(i64::from(entity.generation()))
+        .bind(expected_version)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(UpdateError::Db)?;
+
+        let Some(new_version) = new_version else {
+            // 0 baris → versi lain / entity tak ada → konflik.
+            return Err(UpdateError::Conflict);
+        };
+
+        // Ganti komponen entity ini dengan keadaan `world` saat ini.
+        for r in &self.registered {
+            sqlx::query(&format!("DELETE FROM {} WHERE entity_id = $1", r.table))
+                .bind(id)
+                .execute(&mut *tx)
+                .await
+                .map_err(UpdateError::Db)?;
+            if let Some(params) = (r.dump_one)(world, entity) {
+                let insert = insert_sql(r);
+                let mut q = sqlx::query(&insert).bind(id);
+                for (value, col) in params.iter().zip(r.columns) {
+                    q = bind_value(q, col.ty, value).map_err(UpdateError::Db)?;
+                }
+                q.execute(&mut *tx).await.map_err(UpdateError::Db)?;
+            }
+        }
+
+        tx.commit().await.map_err(UpdateError::Db)?;
+        Ok(new_version)
+    }
 }
+
+/// Kegagalan [`PgStore::update_entity`].
+#[derive(Debug)]
+pub enum UpdateError {
+    /// Versi/identitas DB tak cocok expektasi — writer lain telah mengubah entity.
+    Conflict,
+    /// Galat database.
+    Db(sqlx::Error),
+}
+
+impl std::fmt::Display for UpdateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UpdateError::Conflict => write!(f, "optimistic-lock: versi/identitas entity berubah"),
+            UpdateError::Db(e) => write!(f, "database: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for UpdateError {}
 
 /// `INSERT INTO cmp_x (entity_id, c1, c2, …) VALUES ($1, $2, $3::jsonb, …)`.
 ///

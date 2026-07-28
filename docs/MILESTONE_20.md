@@ -36,7 +36,7 @@ Menjadikan Postgres sumber kebenaran durable bagi keadaan ECS lewat crate adapte
 - [x] `create_table_sql` (pembangun `migrate`) benar — teruji (`create_table_sql_benar`).
 - [ ] Tipe tak-terpetakan → `compile_error!` (jalur ada; uji trybuild menyusul).
 - [x] `migrate`/`save`/`load` round-trip `World` ↔ Postgres setia; handle direkonstruksi (`spawn_at`); determinisme `ORDER BY entity_id` — teruji Postgres (`pgstore_save_load_round_trip_dan_overwrite`, job CI `postgres`).
-- [ ] Generation optimistic-lock mendeteksi konflik tulis-balik — menyusul (v1 kini overwrite-penuh transaksional; optimistic-lock = subfase).
+- [x] Optimistic-lock mendeteksi konflik tulis-balik — kolom `version` + gerbang `generation`; `update_entity` mengembalikan `Conflict`, `entity_version` untuk retry — teruji vs Postgres (`optimistic_lock_mendeteksi_konflik`: konflik + retry + integritas nilai).
 - [x] `arke` core tetap 0-dep (STD-0003 `-p arke` hijau; cek CI di-scope).
 - [x] Bridge core: `Entity::index/generation` publik + `World::spawn_at` (restore) — teruji.
 - [x] RFC-0021 & ADR-0021 konsisten dengan kode.
