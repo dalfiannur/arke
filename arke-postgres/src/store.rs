@@ -292,6 +292,35 @@ impl PgStore {
         Ok(ids.len())
     }
 
+    /// Mulai **query builder typed** untuk komponen `T` (RFC-0030) — alternatif
+    /// ergonomis & anti-injeksi untuk [`load_where`](Self::load_where).
+    pub fn query<T: PgComponent>(&mut self) -> crate::Query<'_, T> {
+        crate::Query::new(self)
+    }
+
+    /// Eksekutor query builder (RFC-0030): SQL **ter-parameterisasi** + nilai
+    /// bind → materialisasi entity yang cocok ke `world`. Dipakai `Query::load`.
+    pub(crate) async fn load_by_query(
+        &mut self,
+        sql: String,
+        params: Vec<(PgType, PgValue)>,
+        world: &mut World,
+    ) -> Result<usize, sqlx::Error> {
+        let mut q = sqlx::query(&sql);
+        for (ty, val) in &params {
+            q = bind_value(q, *ty, val);
+        }
+        let ids: Vec<i64> = q
+            .fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(|r| r.try_get("entity_id"))
+            .collect::<Result<_, _>>()?;
+        self.materialize(world, &ids).await?;
+        self.last = self.dump_state(world);
+        Ok(ids.len())
+    }
+
     /// Rekonstruksi entity `ids` + seluruh komponennya ke `world`.
     async fn materialize(&self, world: &mut World, ids: &[i64]) -> Result<(), sqlx::Error> {
         if ids.is_empty() {

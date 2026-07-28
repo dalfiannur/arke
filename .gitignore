@@ -1,5 +1,6 @@
-# Artefak build
+# Artefak build (root + dir crate/benchmark tersarang, mis. benchmarks/target)
 /target
+**/target/
 
 # Library: lockfile tidak di-commit (biarkan konsumen menyelesaikan versi)
 Cargo.lock

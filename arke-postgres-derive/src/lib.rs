@@ -407,6 +407,29 @@ fn gen_impl(name: &str, fields: &[Field], checks: &[String]) -> Result<String, S
         checks_str.push_str(&format!("{c:?}, "));
     }
 
+    // Token field typed untuk query builder (RFC-0030): satu metode `fn <field>()
+    // -> Field<Self, V>` per field **skalar**. Field JSONB (non-skalar) dilewati
+    // — pakai `load_where` string untuk itu.
+    let mut tokens = String::new();
+    for f in fields {
+        let inner = strip_option(&f.ty);
+        if let Some(sc) = inner_scalar(inner) {
+            tokens.push_str(&format!(
+                "    pub fn {field}() -> ::arke_postgres::Field<Self, {inner}> {{ \
+                     ::arke_postgres::Field::new({col:?}, ::arke_postgres::PgType::{pg}) }}\n",
+                field = f.name,
+                inner = inner,
+                col = f.name,
+                pg = sc.pg_type,
+            ));
+        }
+    }
+    let token_impl = if tokens.is_empty() {
+        String::new()
+    } else {
+        format!("\n#[allow(dead_code)]\nimpl {name} {{\n{tokens}}}")
+    };
+
     Ok(format!(
         "impl ::arke_postgres::PgComponent for {name} {{\n\
             const TABLE: &'static str = {table:?};\n\
@@ -419,6 +442,13 @@ fn gen_impl(name: &str, fields: &[Field], checks: &[String]) -> Result<String, S
             fn from_params(values: &[::arke_postgres::PgValue]) -> ::core::option::Option<Self> {{\n\
                 ::core::option::Option::Some(Self {{ {from_fields} }})\n\
             }}\n\
-        }}"
+        }}{token_impl}"
     ))
+}
+
+/// Kupas satu lapis `Option<…>` (string tipe tanpa spasi) → tipe dalam.
+fn strip_option(ty: &str) -> &str {
+    ty.strip_prefix("Option<")
+        .and_then(|s| s.strip_suffix('>'))
+        .unwrap_or(ty)
 }

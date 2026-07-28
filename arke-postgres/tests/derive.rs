@@ -19,6 +19,26 @@ struct Stats {
     name: String,
 }
 
+// RFC-0030: derive meng-generate token field typed per field skalar. Uji
+// compile-level: token ada dgn tipe benar + operator/kombinator tersedia.
+#[test]
+fn token_field_typed_di_generate() {
+    use arke_postgres::{Dir, Field};
+    let _: Field<Stats, i32> = Stats::level();
+    let _: Field<Stats, i64> = Stats::hp();
+    let _: Field<Stats, u64> = Stats::xp();
+    let _: Field<Stats, bool> = Stats::alive();
+    let _: Field<Stats, String> = Stats::name();
+    let _: Field<Position, f32> = Position::x();
+    // Operator + kombinator + like (hanya pada String) kompilasi.
+    let _ = Stats::level()
+        .gte(5)
+        .and(Stats::name().like("a%"))
+        .or(Stats::hp().in_([1i64, 2]))
+        .not();
+    let _ = Dir::Desc;
+}
+
 #[test]
 fn table_dan_kolom_untuk_struct_skalar() {
     assert_eq!(Position::TABLE, "cmp_position");
