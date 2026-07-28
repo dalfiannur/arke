@@ -55,3 +55,4 @@ Draft → Discussion → Accepted | Rejected | Superseded
 | [RFC-0020](RFC-0020-entity-query-term.md) | `Entity` sebagai term query | Accepted |
 | [RFC-0021](RFC-0021-arke-postgres-adapter.md) | `arke-postgres` — adapter Postgres sebagai sumber kebenaran | Accepted |
 | [RFC-0022](RFC-0022-component-bundles.md) | Bundle komponen (spawn/insert tuple) | Accepted |
+| [RFC-0023](RFC-0023-columnar-query-iteration.md) | Iterasi query berbasis-indeks (kolom) — optimasi | Accepted |

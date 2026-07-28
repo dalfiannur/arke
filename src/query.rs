@@ -164,8 +164,9 @@ impl<T: Component> QueryData for &T {
         for &ai in &state.matched {
             let archetype = &archetypes[ai];
             let col = archetype.column_index(cid);
-            for item in <&T as QueryTerm>::iter_shared(archetype, col) {
-                f(item);
+            let mut fetch = <&T as QueryTerm>::fetch(archetype, col);
+            for i in 0..archetype.entities().len() {
+                f(<&T as QueryTerm>::get(&mut fetch, i));
             }
         }
     }
@@ -200,8 +201,9 @@ impl<T: Component> QueryData for &mut T {
         for &ai in &state.matched {
             let archetype = &archetypes[ai];
             let col = archetype.column_index(cid);
-            for item in <&mut T as QueryTerm>::iter_shared(archetype, col) {
-                f(item);
+            let mut fetch = <&mut T as QueryTerm>::fetch(archetype, col);
+            for i in 0..archetype.entities().len() {
+                f(<&mut T as QueryTerm>::get(&mut fetch, i));
             }
         }
     }
@@ -266,21 +268,24 @@ enum Requirement {
 pub trait QueryTerm {
     /// Item yang dihasilkan per baris.
     type Item<'w>;
+    /// Keadaan fetch per-archetype (slice kolom / entity) — diakses **per-indeks**
+    /// agar loop iterasi berbasis-indeks dapat di-vektorisasi (RFC-0023).
+    type Fetch<'w>;
     /// Menambahkan akses (baca/tulis) term ini. `Entity` tak menambah apa pun.
     fn access(access: &mut Access);
     /// Syarat pencocokan term ini terhadap archetype.
     fn requirement(world: &World) -> Requirement;
-    /// Iterator atas item untuk sebuah `archetype`. `col` = indeks kolom
-    /// teresolusi (untuk term komponen) atau `None` (untuk `Entity`).
-    fn iter_shared(
-        archetype: &Archetype,
-        col: Option<usize>,
-    ) -> impl Iterator<Item = Self::Item<'_>>;
+    /// Bangun keadaan fetch untuk `archetype`. `col` = indeks kolom teresolusi
+    /// (untuk term komponen) atau `None` (untuk `Entity`).
+    fn fetch(archetype: &Archetype, col: Option<usize>) -> Self::Fetch<'_>;
+    /// Ambil item pada baris `i` (dijamin `i < len` oleh pemanggil).
+    fn get<'a>(fetch: &'a mut Self::Fetch<'_>, i: usize) -> Self::Item<'a>;
 }
 
 #[allow(private_interfaces)]
 impl<T: Component> QueryTerm for &T {
     type Item<'w> = &'w T;
+    type Fetch<'w> = &'w [T];
     fn access(access: &mut Access) {
         access.reads.push(TypeId::of::<T>());
     }
@@ -290,19 +295,24 @@ impl<T: Component> QueryTerm for &T {
             None => Requirement::Never,
         }
     }
-    fn iter_shared(archetype: &Archetype, col: Option<usize>) -> impl Iterator<Item = &T> {
-        let col = archetype.column(col.expect("term komponen butuh kolom teresolusi"));
-        col.as_any()
+    fn fetch(archetype: &Archetype, col: Option<usize>) -> &[T] {
+        archetype
+            .column(col.expect("term komponen butuh kolom teresolusi"))
+            .as_any()
             .downcast_ref::<TypedColumn<T>>()
             .expect("tipe kolom tak cocok")
             .data()
-            .iter()
+            .as_slice()
+    }
+    fn get<'a>(fetch: &'a mut &[T], i: usize) -> &'a T {
+        &fetch[i]
     }
 }
 
 #[allow(private_interfaces)]
 impl<T: Component> QueryTerm for &mut T {
     type Item<'w> = &'w mut T;
+    type Fetch<'w> = &'w mut [T];
     fn access(access: &mut Access) {
         access.writes.push(TypeId::of::<T>());
     }
@@ -312,30 +322,37 @@ impl<T: Component> QueryTerm for &mut T {
             None => Requirement::Never,
         }
     }
-    fn iter_shared(archetype: &Archetype, col: Option<usize>) -> impl Iterator<Item = &mut T> {
-        let col = archetype.column(col.expect("term komponen butuh kolom teresolusi"));
-        let typed = col
+    fn fetch(archetype: &Archetype, col: Option<usize>) -> &mut [T] {
+        let typed = archetype
+            .column(col.expect("term komponen butuh kolom teresolusi"))
             .as_any()
             .downcast_ref::<TypedColumn<T>>()
             .expect("tipe kolom tak cocok");
-        // SAFETY: term query mengakses kolom distinct (cek-alias) dan stage
-        // penjadwal menjamin akses disjoint → tak ada peminjaman lain ke data
-        // kolom ini (RFC-0016). Diverifikasi miri.
-        unsafe { typed.data_mut_shared() }.iter_mut()
+        // SAFETY: term query mengakses kolom distinct (cek-alias) dan penjadwal
+        // menjamin akses disjoint → tak ada peminjaman lain ke data kolom ini
+        // (RFC-0016). Diverifikasi miri.
+        unsafe { typed.data_mut_shared() }.as_mut_slice()
+    }
+    fn get<'a>(fetch: &'a mut &mut [T], i: usize) -> &'a mut T {
+        &mut fetch[i]
     }
 }
 
 #[allow(private_interfaces)]
 impl QueryTerm for Entity {
     type Item<'w> = Entity;
+    type Fetch<'w> = &'w [Entity];
     fn access(_access: &mut Access) {
         // Handle entity bersifat baca-saja; tak menyumbang akses komponen.
     }
     fn requirement(_world: &World) -> Requirement {
         Requirement::Any // cocok archetype mana saja
     }
-    fn iter_shared(archetype: &Archetype, _col: Option<usize>) -> impl Iterator<Item = Entity> {
-        archetype.entities().iter().copied()
+    fn fetch(archetype: &Archetype, _col: Option<usize>) -> &[Entity] {
+        archetype.entities()
+    }
+    fn get(fetch: &mut &[Entity], i: usize) -> Entity {
+        fetch[i]
     }
 }
 
@@ -496,7 +513,7 @@ macro_rules! impl_query_tuple {
                     let archetype = &archetypes[ai];
                     // Kolom teresolusi per-term: `Column` → Some(idx), lainnya None.
                     let ($(mut $var,)+) = (
-                        $(<$T as QueryTerm>::iter_shared(
+                        $(<$T as QueryTerm>::fetch(
                             archetype,
                             match &$req {
                                 Requirement::Column(c) => archetype.column_index(*c),
@@ -504,11 +521,10 @@ macro_rules! impl_query_tuple {
                             },
                         ),)+
                     );
-                    loop {
-                        match ($($var.next(),)+) {
-                            ($(::core::option::Option::Some($var),)+) => f(($($var,)+)),
-                            _ => break,
-                        }
+                    // Loop berbasis-indeks (dapat di-vektorisasi) — semua term
+                    // punya panjang sama (= jumlah baris archetype).
+                    for i in 0..archetype.entities().len() {
+                        f(($(<$T as QueryTerm>::get(&mut $var, i),)+));
                     }
                 }
             }

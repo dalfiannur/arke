@@ -46,3 +46,4 @@ ADR bersifat **immutable** setelah Accepted: jangan menulis ulang isinya. Jika k
 | [ADR-0020](ADR-0020-entity-query-term.md) | `Entity` sebagai term query | Accepted |
 | [ADR-0021](ADR-0021-arke-postgres-adapter.md) | `arke-postgres` — adapter Postgres sebagai sumber kebenaran | Accepted |
 | [ADR-0022](ADR-0022-component-bundles.md) | Bundle komponen (spawn/insert tuple) | Accepted |
+| [ADR-0023](ADR-0023-columnar-query-iteration.md) | Iterasi query berbasis-indeks (kolom) | Accepted |

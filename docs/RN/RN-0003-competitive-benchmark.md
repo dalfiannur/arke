@@ -49,3 +49,4 @@ Bila performa kompetitif **bukan** tujuan (arke memilih ergonomis+aman+determini
 ## Catatan / temuan
 
 - 2026-07-28: benchmark kompetitif dibuat (`benchmarks/`, dikecualikan dari workspace inti). arke 1.8–3.5× lebih lambat pada iter2/spawn/get. Overhead iter2 di loop, bukan scan. Belum ada optimasi dilakukan — RN ini men-*dokumentasikan* gap sebagai baseline jujur.
+- 2026-07-28: **iter2 dioptimasi** → graduate ke [RFC-0023](../RFC/RFC-0023-columnar-query-iteration.md) (iterasi berbasis-indeks/kolom). Hasil: arke iter2 **~2.0 → ~1.3 ns/op** (~1.5× lebih cepat), kini **setara bevy_ecs** & ~1.5× hecs (dari ~2.2×). `spawn` (~3.5×) & `get` (~1.9×) **masih** gap — target lanjutan.
