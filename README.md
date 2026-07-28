@@ -28,6 +28,22 @@ Dua pendirian yang membedakannya:
 > [`arke-postgres`](arke-postgres/). Butuh **Rust 1.86+**. API masih dapat berubah
 > sebelum 1.0.
 
+## Instalasi
+
+```toml
+[dependencies]
+arke = "0.4"
+# Opsional — persistensi PostgreSQL (Postgres sebagai sumber kebenaran):
+arke-postgres = "0.3"
+```
+
+Atau lewat Cargo:
+
+```sh
+cargo add arke
+cargo add arke-postgres   # opsional
+```
+
 ## Contoh
 
 ```rust
