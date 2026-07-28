@@ -25,7 +25,7 @@ fn world_with(e_idx_gen: (u32, u32), value: i32) -> (World, Entity) {
 
 #[tokio::test]
 async fn optimistic_lock_mendeteksi_konflik() {
-    let Some(store) = store().await else {
+    let Some(mut store) = store().await else {
         eprintln!("skip: DATABASE_URL tak diset");
         return;
     };

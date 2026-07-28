@@ -76,6 +76,15 @@ assert_eq!(restored.get::<Health>(e), Some(&Health(100)));
 
 > `#[derive(Serialize)]` ditulis tangan dengan `proc_macro` bawaan — **tetap 0 dependensi crates.io.**
 
+## Ekosistem
+
+Integrasi eksternal hidup di **crate adapter terpisah** agar core `arke` tetap
+**0 dependensi** (STD-0003):
+
+| Crate | Isi |
+| --- | --- |
+| [`arke-postgres`](arke-postgres/) | Persistensi PostgreSQL — Postgres sebagai **sumber kebenaran** relasional berkolom-tipe (`save`/`load`/`save_incremental`/`update_entity` optimistic-lock). Lihat [RFC-0021](docs/RFC/RFC-0021-arke-postgres-adapter.md). |
+
 ## Dokumentasi & tata-kelola
 
 Proyek ini *documentation-first*. Arah dan keputusannya hidup di [`docs/`](docs/):

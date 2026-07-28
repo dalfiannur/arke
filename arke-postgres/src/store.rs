@@ -116,7 +116,10 @@ impl PgStore {
 
     /// Menulis seluruh working-set `world` ke Postgres dalam **satu transaksi**
     /// (overwrite penuh: hapus lalu tulis-ulang). Deterministik.
-    pub async fn save(&self, world: &World) -> Result<(), sqlx::Error> {
+    ///
+    /// Menyelaraskan rekam sinkron internal, jadi `save_incremental` berikutnya
+    /// hanya menulis perubahan **setelah** `save` ini.
+    pub async fn save(&mut self, world: &World) -> Result<(), sqlx::Error> {
         let mut tx = self.pool.begin().await?;
 
         // Overwrite penuh: DELETE meng-cascade ke tabel komponen.
@@ -151,6 +154,8 @@ impl PgStore {
         }
 
         tx.commit().await?;
+        // Selaraskan rekam sinkron dengan keadaan yang baru ditulis.
+        self.last = self.dump_state(world);
         Ok(())
     }
 

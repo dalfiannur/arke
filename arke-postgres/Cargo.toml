@@ -6,6 +6,11 @@ rust-version = "1.86"
 description = "PostgreSQL adapter for the arke ECS — relational, typed-column persistence (source of truth)."
 license = "MIT"
 repository = "https://github.com/dalfiannur/arke"
+readme = "README.md"
+keywords = ["ecs", "postgres", "sqlx", "persistence", "orm"]
+categories = ["database", "game-development"]
+# Paket ramping: sumber + README + lisensi.
+include = ["/src", "/examples", "/Cargo.toml", "/README.md", "/LICENSE-MIT"]
 
 # Adapter: BOLEH punya dependensi (di luar STD-0003 yang mengikat core `arke`).
 [dependencies]

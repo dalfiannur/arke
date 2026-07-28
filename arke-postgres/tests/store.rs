@@ -59,7 +59,7 @@ fn entity_count(world: &mut World) -> usize {
 
 #[tokio::test]
 async fn pgstore_save_load_round_trip_dan_overwrite() {
-    let Some(store) = connect().await else {
+    let Some(mut store) = connect().await else {
         eprintln!("skip: DATABASE_URL tak diset");
         return;
     };
