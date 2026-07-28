@@ -60,3 +60,4 @@ Draft → Discussion → Accepted | Rejected | Superseded
 | [RFC-0025](RFC-0025-unchecked-column-downcast-get.md) | Downcast kolom tak-tercek pada `World::get` (unsafe terkurung) | Accepted |
 | [RFC-0026](RFC-0026-seal-extension-traits.md) | Seal trait ekstensi (`Bundle`/`QueryData`/`QueryTerm`/`QueryFilter`) | Accepted |
 | [RFC-0027](RFC-0027-deprecate-query-pair.md) | Deprecate `query_pair`/`query_pair_ref` → konvergen `QueryData` | Accepted |
+| [RFC-0028](RFC-0028-changelog-msrv-semver-policy.md) | CHANGELOG + kebijakan MSRV, semver & stabilitas snapshot | Accepted |

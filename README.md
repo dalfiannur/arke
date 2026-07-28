@@ -36,7 +36,7 @@ Dua pendirian yang membedakannya:
 > **Jalur pengguna bebas `unsafe`** (STD-0004); `unsafe` internal **terkurung &
 > diverifikasi miri** di CI (menopang paralelisme tingkat-sistem, hasil identik
 > serial). Persistensi Postgres tersedia sebagai adapter terpisah
-> [`arke-postgres`](arke-postgres/). Butuh **Rust 1.86+**. API masih dapat berubah
+> [`arke-postgres`](arke-postgres/). Butuh **Rust 1.88+** (MSRV, STD-0009). API masih dapat berubah
 > sebelum 1.0.
 
 ## Instalasi

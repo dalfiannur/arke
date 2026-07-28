@@ -161,3 +161,24 @@ impl Snapshot {
         Self::from_value(&Value::from_json(json)?)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Guard stabilitas format snapshot (STD-0001, RFC-0028). Menaikkan
+    /// `SCHEMA_VERSION` menggeser format on-disk — perubahan yang **wajib**
+    /// disengaja: sertakan jalur migrasi (baca versi lama) + entri CHANGELOG,
+    /// lalu perbarui angka ini. Uji ini sengaja gagal agar kenaikan tak-sengaja
+    /// tertangkap.
+    #[test]
+    fn schema_version_terkunci_ke_1() {
+        assert_eq!(
+            SCHEMA_VERSION, 1,
+            "format snapshot berubah — lihat STD-0001/RFC-0028: butuh migrasi + CHANGELOG"
+        );
+        // Snapshot baru harus melapor versi yang sama (round-trip STD-0002).
+        let snap = World::new().snapshot();
+        assert_eq!(snap.schema_version(), SCHEMA_VERSION);
+    }
+}

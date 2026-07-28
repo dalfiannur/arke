@@ -78,6 +78,21 @@ jobs:
         env:
           MIRIFLAGS: "-Zmiri-disable-isolation"
 
+  # STD-0009: MSRV = Rust 1.88. Membangun core `arke` pada toolchain MSRV persis
+  # menegakkan floor secara empiris (menangkap pemakaian fitur > MSRV). Di-scope
+  # ke `-p arke` — `arke-postgres` menarik dep eksternal (sqlx) ber-MSRV sendiri.
+  # `RUSTFLAGS` dikosongkan agar perbedaan lint antar-versi tak jadi false-fail;
+  # yang diuji adalah "kompilasi pada MSRV", bukan kebersihan lint.
+  msrv:
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - name: Build arke pada MSRV
+        run: cargo build -p arke --verbose
+
   # Uji integrasi adapter `arke-postgres` terhadap Postgres nyata (RFC-0021).
   # Tanpa job ini, uji `store` di-skip (DATABASE_URL tak diset).
   postgres:

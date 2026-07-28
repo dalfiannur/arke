@@ -63,6 +63,18 @@ STD-<NNNN>: <judul singkat>
 - **Why:** Prinsip "pesan error mengajari" (Philosophy §3).
 - **Verify:** Tes snapshot atas pesan error untuk konflik borrow query dan komponen tak terdaftar.
 
+### STD-0009: Kebijakan MSRV (RFC-0028)
+
+- **Rule:** MSRV = **Rust 1.88** (`rust-version` di `Cargo.toml`). **MAY** naik di rilis **minor** atau **major**; **MUST NOT** naik di rilis **patch**. Setiap kenaikan **MUST** dicatat di `CHANGELOG.md`.
+- **Why:** Pengguna berhak tahu toolchain yang didukung; kenaikan diam-diam di patch memutus build tanpa peringatan (menuju 1.0, RN-0004 §3).
+- **Verify:** Job CI `msrv` membangun `arke` pada toolchain MSRV persis.
+
+### STD-0010: Kebijakan semver & deprecation (RFC-0028)
+
+- **Rule:** Ikuti [semver](https://semver.org). Perubahan **breaking** hanya di rilis **major** (pra-1.0: boleh di **minor**). Item yang akan dihapus **MUST** ditandai `#[deprecated]` + `note` pengganti, dengan **jendela ≥ 1 rilis minor** sebelum penghapusan. Penghapusan pasca-1.0 hanya di **major** berikutnya.
+- **Why:** Janji stabilitas 1.0; deprecation memberi jendela migrasi mulus.
+- **Verify:** `CHANGELOG.md` memuat bagian `Deprecated`/`Removed`; item usang membawa atribut `#[deprecated]` (mis. RFC-0027).
+
 > Prioritaskan aturan yang benar-benar bisa diverifikasi otomatis — aturan yang hanya bisa dinilai manusia sebaiknya tinggal di Philosophy.
 
 ## Menuju conformance yang machine-checkable
