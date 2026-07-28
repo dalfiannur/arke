@@ -35,7 +35,9 @@ impl GetField for Value {
     fn get_field(&self, key: &str) -> Option<i64> {
         if let Value::Map(entries) = self {
             for (k, v) in entries {
-                if k == key && let Value::Int(i) = v {
+                if k == key
+                    && let Value::Int(i) = v
+                {
                     return Some(*i);
                 }
             }
