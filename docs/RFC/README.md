@@ -59,3 +59,4 @@ Draft → Discussion → Accepted | Rejected | Superseded
 | [RFC-0024](RFC-0024-fast-component-resolution.md) | Resolusi komponen cepat (hasher TypeId + threading cid) | Accepted |
 | [RFC-0025](RFC-0025-unchecked-column-downcast-get.md) | Downcast kolom tak-tercek pada `World::get` (unsafe terkurung) | Accepted |
 | [RFC-0026](RFC-0026-seal-extension-traits.md) | Seal trait ekstensi (`Bundle`/`QueryData`/`QueryTerm`/`QueryFilter`) | Accepted |
+| [RFC-0027](RFC-0027-deprecate-query-pair.md) | Deprecate `query_pair`/`query_pair_ref` → konvergen `QueryData` | Accepted |

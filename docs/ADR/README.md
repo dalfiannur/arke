@@ -50,3 +50,4 @@ ADR bersifat **immutable** setelah Accepted: jangan menulis ulang isinya. Jika k
 | [ADR-0024](ADR-0024-fast-component-resolution.md) | Resolusi komponen cepat (hasher TypeId + threading cid) | Accepted |
 | [ADR-0025](ADR-0025-unchecked-column-downcast-get.md) | Downcast kolom tak-tercek pada `World::get` (unsafe terkurung) | Accepted |
 | [ADR-0026](ADR-0026-seal-extension-traits.md) | Seal trait ekstensi via supertrait penanda privat | Accepted |
+| [ADR-0027](ADR-0027-deprecate-query-pair.md) | Deprecate `query_pair`/`query_pair_ref`, konvergen ke `QueryData` | Accepted |

@@ -313,12 +313,43 @@ impl World {
     /// Mengiterasi pasangan `(&A, &mut B)` pada setiap entity yang memiliki
     /// **kedua** komponen. Membaca `A`, memodifikasi `B`.
     ///
+    /// # Usang (deprecated)
+    ///
+    /// Usang sejak 0.6.0 (RFC-0027); dihapus di 1.0. Pakai jalur [`QueryData`]
+    /// generik yang menangani arity sembarang:
+    ///
+    /// ```
+    /// use arke::{QueryData, World};
+    /// struct A(i32);
+    /// struct B(i32);
+    /// let mut world = World::new();
+    /// world.spawn_bundle((A(1), B(0)));
+    /// <(&A, &mut B)>::each(&mut world, |(a, b)| b.0 += a.0);
+    /// ```
+    ///
+    /// Pemakaian API usang gagal dikompilasi di bawah `#![deny(deprecated)]`:
+    ///
+    /// ```compile_fail
+    /// #![deny(deprecated)]
+    /// use arke::World;
+    /// struct A(i32);
+    /// struct B(i32);
+    /// let mut world = World::new();
+    /// let _ = world.query_pair::<A, B>();
+    /// ```
+    ///
     /// # Panics
     ///
     /// Panik bila `A` dan `B` adalah tipe komponen yang sama — itu berarti alias
     /// `&mut` ke komponen yang sama, yang ditolak (invarian *paralelisme aman*).
     ///
     /// Kedua kolom dipinjam disjoint via `split_at_mut` — tanpa `unsafe`.
+    ///
+    /// [`QueryData`]: crate::QueryData
+    #[deprecated(
+        since = "0.6.0",
+        note = "pakai QueryData generik: <(&A, &mut B)>::each(&mut world, |(a, b)| { .. }) — butuh `use arke::QueryData;`"
+    )]
     pub fn query_pair<A: Component, B: Component>(&mut self) -> impl Iterator<Item = (&A, &mut B)> {
         let ca = self.registry.get::<A>();
         let cb = self.registry.get::<B>();
@@ -389,6 +420,15 @@ impl World {
 
     /// Mengiterasi pasangan `(&A, &B)` pada setiap entity yang memiliki **kedua**
     /// komponen. Keduanya dibaca (dua peminjaman bersama, tanpa `unsafe`).
+    ///
+    /// # Usang (deprecated)
+    ///
+    /// Usang sejak 0.6.0 (RFC-0027); dihapus di 1.0. Pakai
+    /// `<(&A, &B)>::each(&mut world, |(a, b)| { .. })` ([`QueryData`](crate::QueryData)).
+    #[deprecated(
+        since = "0.6.0",
+        note = "pakai QueryData generik: <(&A, &B)>::each(&mut world, |(a, b)| { .. }) — butuh `use arke::QueryData;`"
+    )]
     pub fn query_pair_ref<A: Component, B: Component>(&self) -> impl Iterator<Item = (&A, &B)> {
         let ca = self.registry.get::<A>();
         let cb = self.registry.get::<B>();
@@ -1021,6 +1061,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)] // sengaja menguji method usang (RFC-0027) sampai dihapus di 1.0
     fn query_pair_membaca_a_dan_memodifikasi_b_hanya_pada_yang_cocok() {
         let mut world = World::new();
         let e = world.spawn();
@@ -1040,6 +1081,7 @@ mod tests {
     // Menolak alias &mut ke komponen yang sama; pesan menyebut tipe (STD-0008).
     #[test]
     #[should_panic(expected = "Position")]
+    #[allow(deprecated)] // sengaja menguji method usang (RFC-0027) sampai dihapus di 1.0
     fn query_pair_menolak_alias_ke_komponen_sama() {
         let mut world = World::new();
         let e = world.spawn();

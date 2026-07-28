@@ -57,10 +57,11 @@
 //! | `storage` (privat) | Kolom kontigu bertipe (`TypedColumn`) |
 //! | `archetype` (privat) | Tabel per-kombinasi-komponen |
 //!
-//! Query tersedia dua jalur: method langsung pada [`World`] ([`World::query`],
-//! [`World::query_mut`], [`World::query_pair`]) untuk kasus sederhana, dan
+//! Query tersedia dua jalur: method arity-1 langsung pada [`World`]
+//! ([`World::query`], [`World::query_mut`]) untuk kasus sederhana, dan
 //! [`QueryData`] generik atas tuple sembarang-arity (baca/tulis campuran) untuk
-//! sistem. Iterasi dijalankan berkolom (RFC-0023); `unsafe`-nya **terkurung** di
+//! selebihnya (`query_pair`/`query_pair_ref` usang sejak 0.6.0, RFC-0027).
+//! Iterasi dijalankan berkolom (RFC-0023); `unsafe`-nya **terkurung** di
 //! [`query`] & [`world`], semuanya diverifikasi miri. Jalur pengguna tetap bebas
 //! `unsafe` (STD-0004).
 

@@ -21,10 +21,11 @@ fn main() {
     world.insert(b, Position(10, 10)); // tanpa Velocity
 
     // "Sistem gerak": position += velocity, hanya untuk entity yang punya keduanya.
-    for (vel, pos) in world.query_pair::<Velocity, Position>() {
+    // Jalur QueryData generik (RFC-0027) — menggantikan query_pair yang usang.
+    <(&Velocity, &mut Position)>::each(&mut world, |(vel, pos)| {
         pos.0 += vel.0;
         pos.1 += vel.1;
-    }
+    });
 
     // Baca semua Position.
     let total: i32 = world.query::<Position>().map(|p| p.0 + p.1).sum();

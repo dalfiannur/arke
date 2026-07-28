@@ -3,7 +3,7 @@
 //! Contoh onboarding paling dasar. Ajari empat gerakan inti arke:
 //!
 //! 1. **Spawn** entity & pasang komponen (`insert` / `spawn_bundle`).
-//! 2. **Query** komponen langsung (`query` / `query_pair`).
+//! 2. **Query** komponen langsung (`query`) & tuple generik (`QueryData::each`).
 //! 3. **System + Schedule** — logika berbasis-tipe yang aksesnya *disimpulkan*
 //!    dari tipe query (tak ada deklarasi baca/tulis manual).
 //! 4. **Get** — baca komponen satu entity lewat handle-nya.
