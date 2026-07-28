@@ -261,13 +261,18 @@ fn w5_fragmented(b: &Bench) {
             world.insert(e, M3);
         }
     }
-    b.run("W5 fragmented iter Position (16 arch)", n as u64, 8.0, || {
-        let mut sum = 0u64;
-        for p in world.query::<Position>() {
-            sum = sum.wrapping_add(p.x as u64);
-        }
-        sum
-    });
+    b.run(
+        "W5 fragmented iter Position (16 arch)",
+        n as u64,
+        8.0,
+        || {
+            let mut sum = 0u64;
+            for p in world.query::<Position>() {
+                sum = sum.wrapping_add(p.x as u64);
+            }
+            sum
+        },
+    );
 }
 
 fn main() {
