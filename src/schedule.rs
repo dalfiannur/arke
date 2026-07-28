@@ -426,6 +426,70 @@ mod tests {
         assert_eq!(ss.len(), 16);
     }
 
+    // Uji **stress** STD-0006: berapa pun kali `run_parallel` dijalankan, hasilnya
+    // WAJIB identik dengan `run` serial — mengguncang interleaving thread pada
+    // eksekutor graf (RFC-0018). Kecil di bawah miri, besar di `cargo test`.
+    #[test]
+    fn stress_run_parallel_selalu_setara_serial() {
+        #[derive(PartialEq, Debug, Clone, Copy)]
+        struct A(i64);
+        #[derive(PartialEq, Debug, Clone, Copy)]
+        struct Bc(i64);
+        #[derive(PartialEq, Debug, Clone, Copy)]
+        struct Cc(i64);
+
+        fn build(n: usize) -> World {
+            let mut w = World::new();
+            for i in 0..n {
+                let e = w.spawn();
+                w.insert(e, A(i as i64));
+                w.insert(e, Bc(i as i64 + 1));
+                w.insert(e, Cc(0));
+            }
+            w
+        }
+        // Schedule dengan graf-ketergantungan non-trivial (konflik campuran).
+        fn sched() -> Schedule {
+            let mut s = Schedule::new();
+            s.add(System::each::<&mut A>(|a| a.0 = a.0.wrapping_add(1)));
+            s.add(System::each::<&mut Bc>(|b| b.0 = b.0.wrapping_mul(3)));
+            s.add(System::each::<(&A, &mut Cc)>(|(a, c)| {
+                c.0 = c.0.wrapping_add(a.0)
+            }));
+            s.add(System::each::<&mut A>(|a| a.0 = a.0.wrapping_add(7)));
+            s.add(System::each::<(&Cc, &mut Bc)>(|(c, b)| {
+                b.0 = b.0.wrapping_add(c.0)
+            }));
+            s
+        }
+        fn snap(w: &World) -> Vec<(i64, i64, i64)> {
+            let a: Vec<i64> = w.query::<A>().map(|x| x.0).collect();
+            let b: Vec<i64> = w.query::<Bc>().map(|x| x.0).collect();
+            let c: Vec<i64> = w.query::<Cc>().map(|x| x.0).collect();
+            a.into_iter()
+                .zip(b)
+                .zip(c)
+                .map(|((a, b), c)| (a, b, c))
+                .collect()
+        }
+
+        let (n, iters) = if cfg!(miri) {
+            (4usize, 3)
+        } else {
+            (64usize, 300)
+        };
+
+        let mut serial = build(n);
+        sched().run(&mut serial);
+        let expected = snap(&serial);
+
+        for it in 0..iters {
+            let mut par = build(n);
+            sched().run_parallel(&mut par);
+            assert_eq!(snap(&par), expected, "iterasi {it}: run_parallel != serial");
+        }
+    }
+
     #[test]
     fn each_cmd_despawn_self_via_entity_term() {
         use crate::Entity;

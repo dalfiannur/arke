@@ -620,6 +620,169 @@ mod tests {
         assert!(!world.contains(e));
     }
 
+    /// PRNG deterministik (LCG Numerical Recipes) — reproducible, 0-dependensi.
+    struct Lcg(u64);
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Lcg(seed ^ 0x9E37_79B9_7F4A_7C15)
+        }
+        fn next_u32(&mut self) -> u32 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (self.0 >> 33) as u32
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next_u32() as usize) % n
+        }
+    }
+
+    // Uji **model-based**: barisan operasi acak diterapkan ke `World` DAN ke
+    // oracle referensi; keduanya wajib konsisten. Mengguncang pindah archetype,
+    // swap-remove, recycling generational, dan bundle. Kecil di bawah miri
+    // (soundness), besar di `cargo test` (skala).
+    #[test]
+    fn model_based_storage_konsisten_dengan_oracle() {
+        #[derive(Clone, Copy, PartialEq, Debug)]
+        struct A(u32);
+        #[derive(Clone, Copy, PartialEq, Debug)]
+        struct B(u32);
+        #[derive(Clone, Copy, PartialEq, Debug)]
+        struct C(u32);
+        #[derive(Clone, Copy, PartialEq, Debug)]
+        struct D(u32);
+
+        let (seeds, ops) = if cfg!(miri) {
+            (1u64, 120)
+        } else {
+            (8u64, 4000)
+        };
+
+        for seed in 0..seeds {
+            let mut world = World::new();
+            let mut rng = Lcg::new(seed);
+            // Oracle: entity hidup + nilai komponennya [A,B,C,D].
+            let mut alive: Vec<(Entity, [Option<u32>; 4])> = Vec::new();
+            let mut dead: Vec<Entity> = Vec::new();
+
+            let get_k = |world: &World, e: Entity, k: usize| -> Option<u32> {
+                match k {
+                    0 => world.get::<A>(e).map(|x| x.0),
+                    1 => world.get::<B>(e).map(|x| x.0),
+                    2 => world.get::<C>(e).map(|x| x.0),
+                    _ => world.get::<D>(e).map(|x| x.0),
+                }
+            };
+
+            for _ in 0..ops {
+                match rng.below(6) {
+                    // spawn
+                    0 => alive.push((world.spawn(), [None; 4])),
+                    // despawn
+                    1 if !alive.is_empty() => {
+                        let i = rng.below(alive.len());
+                        let (e, _) = alive.swap_remove(i);
+                        world.despawn(e);
+                        dead.push(e);
+                    }
+                    // insert satu komponen yang belum dimiliki
+                    2 if !alive.is_empty() => {
+                        let i = rng.below(alive.len());
+                        let lacking: Vec<usize> =
+                            (0..4).filter(|&k| alive[i].1[k].is_none()).collect();
+                        if !lacking.is_empty() {
+                            let k = lacking[rng.below(lacking.len())];
+                            let v = rng.next_u32();
+                            let e = alive[i].0;
+                            match k {
+                                0 => world.insert(e, A(v)),
+                                1 => world.insert(e, B(v)),
+                                2 => world.insert(e, C(v)),
+                                _ => world.insert(e, D(v)),
+                            }
+                            alive[i].1[k] = Some(v);
+                        }
+                    }
+                    // remove satu komponen yang dimiliki
+                    3 if !alive.is_empty() => {
+                        let i = rng.below(alive.len());
+                        let having: Vec<usize> =
+                            (0..4).filter(|&k| alive[i].1[k].is_some()).collect();
+                        if !having.is_empty() {
+                            let k = having[rng.below(having.len())];
+                            let e = alive[i].0;
+                            match k {
+                                0 => {
+                                    world.remove::<A>(e);
+                                }
+                                1 => {
+                                    world.remove::<B>(e);
+                                }
+                                2 => {
+                                    world.remove::<C>(e);
+                                }
+                                _ => {
+                                    world.remove::<D>(e);
+                                }
+                            }
+                            alive[i].1[k] = None;
+                        }
+                    }
+                    // bundle (arity 2/3) atas komponen yang belum dimiliki
+                    4 if !alive.is_empty() => {
+                        let i = rng.below(alive.len());
+                        let e = alive[i].0;
+                        let free =
+                            |c: &[Option<u32>; 4], ks: &[usize]| ks.iter().all(|&k| c[k].is_none());
+                        let (va, vb, vc) = (rng.next_u32(), rng.next_u32(), rng.next_u32());
+                        match rng.below(3) {
+                            0 if free(&alive[i].1, &[0, 1]) => {
+                                world.insert_bundle(e, (A(va), B(vb)));
+                                alive[i].1[0] = Some(va);
+                                alive[i].1[1] = Some(vb);
+                            }
+                            1 if free(&alive[i].1, &[2, 3]) => {
+                                world.insert_bundle(e, (C(va), D(vb)));
+                                alive[i].1[2] = Some(va);
+                                alive[i].1[3] = Some(vb);
+                            }
+                            2 if free(&alive[i].1, &[0, 1, 2]) => {
+                                world.insert_bundle(e, (A(va), B(vb), C(vc)));
+                                alive[i].1[0] = Some(va);
+                                alive[i].1[1] = Some(vb);
+                                alive[i].1[2] = Some(vc);
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            // Verifikasi menyeluruh terhadap oracle.
+            for &(e, comps) in &alive {
+                assert!(world.contains(e), "seed {seed}: entity hidup hilang");
+                for (k, &expected) in comps.iter().enumerate() {
+                    assert_eq!(
+                        get_k(&world, e, k),
+                        expected,
+                        "seed {seed}: nilai komponen {k} salah"
+                    );
+                }
+            }
+            for &e in &dead {
+                assert!(!world.contains(e), "seed {seed}: handle basi masih hidup");
+            }
+            // Jumlah query = jumlah entity ber-komponen di oracle.
+            let count = |k: usize| alive.iter().filter(|(_, c)| c[k].is_some()).count();
+            assert_eq!(world.query::<A>().count(), count(0), "seed {seed}: query A");
+            assert_eq!(world.query::<B>().count(), count(1), "seed {seed}: query B");
+            assert_eq!(world.query::<C>().count(), count(2), "seed {seed}: query C");
+            assert_eq!(world.query::<D>().count(), count(3), "seed {seed}: query D");
+        }
+    }
+
     #[test]
     fn spawn_bundle_dan_insert_bundle_setara_insert_berurutan() {
         #[derive(PartialEq, Debug)]
