@@ -26,6 +26,31 @@ subset sering, banyak pembaca konkuren, hasil query/join mahal dipakai ulang).
 Postgres jadi bottleneck. Tanpa itu, ini **YAGNI** — jangan tambah dependensi +
 kompleksitas invalidasi untuk kemenangan tak-terukur.
 
+### Pengukuran gate (2026-07-29, lokal Ryzen 5 8645HS)
+
+Diukur **sebelum** membangun (pola RFC-0029): latency point-read Postgres vs Redis-
+compatible (backend hidup di :6379), K=2000 sekuensial:
+
+| | ms/read | Catatan |
+| --- | ---: | --- |
+| Postgres `SELECT WHERE id` | **0.094** | round-trip lokal |
+| Redis/Dragonfly `GET` | **0.032** | round-trip lokal |
+| **Rasio** | **3.0×** | hemat absolut ~0.06 ms/read |
+
+**Kesimpulan jujur — sinyal BERSYARAT, gate umum TAK terpenuhi:**
+
+1. **Point-read**: cache ~3× lebih cepat **lokal**; hemat absolut mungil (0.06 ms).
+   Melintasi **jaringan** (Postgres di host lain, RTT ~0.5–2 ms; cache co-located
+   ~0.03 ms) rasio bisa **20–60×** — **kemenangan didominasi topologi jaringan**,
+   bukan mesin cache (Dragonfly vs Redis vs PG).
+2. **Bulk-load** (pola arke sesungguhnya lewat `materialize`): PG **query ter-batch**
+   (~0.0024 ms/entity dari RN pg-bench) **sudah mengalahkan** GET Redis per-entity.
+   Cache naif per-entity malah **lebih lambat** untuk bulk kecuali MGET/pipeline.
+
+→ Cache **sepadan hanya bila**: (a) Postgres **remote** (latency jaringan) **DAN**
+(b) pola akses **banyak point-read berulang** (bukan bulk). Untuk kasus umum
+(lokal / bulk-load-lalu-in-memory), **marginal atau negatif → tetap Draft**.
+
 ## Non-goals
 
 - **Cache untuk core ECS in-memory** — `World` sudah memegang state; cache jaringan
