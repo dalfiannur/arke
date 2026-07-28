@@ -9,7 +9,7 @@ use arke_cache::RedisCache;
 use arke_postgres::{ComponentCache, PgComponent, PgStore};
 
 #[derive(PgComponent, PartialEq, Debug)]
-struct Coin {
+struct CacheProbe {
     value: i32,
 }
 
@@ -28,33 +28,33 @@ async fn redis_cache_end_to_end() {
     cache.clear().await; // slate bersih
 
     let mut store = PgStore::connect(&db).await.expect("connect pg");
-    store.register::<Coin>();
+    store.register::<CacheProbe>();
     store.migrate().await.unwrap();
     let mut store = store.with_cache(cache.clone());
 
     let mut world = World::new();
     let e0 = world.spawn();
-    world.insert(e0, Coin { value: 7 });
+    world.insert(e0, CacheProbe { value: 7 });
     let e1 = world.spawn();
-    world.insert(e1, Coin { value: 8 });
+    world.insert(e1, CacheProbe { value: 8 });
     store.save(&world).await.unwrap(); // clear cache
 
     // Muat #1 → isi cache Redis.
     let mut w1 = World::new();
     store.load(&mut w1).await.unwrap();
-    assert_eq!(w1.get::<Coin>(e0), Some(&Coin { value: 7 }));
+    assert_eq!(w1.get::<CacheProbe>(e0), Some(&CacheProbe { value: 7 }));
 
     // Bukti: kunci terisi di Redis (MGET langsung via cache).
-    let probe = cache.get_many("cmp_coin", &[i64::from(e0.index())]).await;
+    let probe = cache.get_many("cmp_cacheprobe", &[i64::from(e0.index())]).await;
     assert!(probe[0].is_some(), "load harus mengisi cache Redis");
 
     // Muat #2 → dilayani cache; data tetap benar.
     let mut w2 = World::new();
     store.load(&mut w2).await.unwrap();
-    assert_eq!(w2.get::<Coin>(e1), Some(&Coin { value: 8 }));
+    assert_eq!(w2.get::<CacheProbe>(e1), Some(&CacheProbe { value: 8 }));
 
     // Ubah e0 (7→77) → save_incremental → invalidate → muat #3 = NILAI BARU.
-    for c in world.query_mut::<Coin>() {
+    for c in world.query_mut::<CacheProbe>() {
         if c.value == 7 {
             c.value = 77;
         }
@@ -63,8 +63,8 @@ async fn redis_cache_end_to_end() {
     let mut w3 = World::new();
     store.load(&mut w3).await.unwrap();
     assert_eq!(
-        w3.get::<Coin>(e0),
-        Some(&Coin { value: 77 }),
+        w3.get::<CacheProbe>(e0),
+        Some(&CacheProbe { value: 77 }),
         "cache tak boleh basi setelah tulis"
     );
 }
