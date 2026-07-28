@@ -64,3 +64,4 @@ Draft → Discussion → Accepted | Rejected | Superseded
 | [RFC-0029](RFC-0029-archetype-resolution-index-edges.md) | Resolusi archetype O(1) — index lookup + edge transisi | **Rejected** (diukur: resolusi bukan bottleneck) |
 | [RFC-0030](RFC-0030-arke-postgres-typed-query-builder.md) | Query builder typed untuk arke-postgres (Eloquent-inspired) | Accepted |
 | [RFC-0031](RFC-0031-persistent-entity-relations-join.md) | Relasi entity persisten + join builder (arke-postgres) | Accepted |
+| [RFC-0032](RFC-0032-nested-relations-recursive.md) | Relasi bersarang (nested) + rekursif | Accepted (bertahap) |

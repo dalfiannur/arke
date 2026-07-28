@@ -234,6 +234,18 @@ impl<C: PgComponent> Field<C, String> {
     }
 }
 
+/// Predikat relasi (RFC-0031/0032) pada token relasi `Field<C, EntityRef>`.
+impl<C: PgComponent> Field<C, EntityRef> {
+    /// Cocok bila entity yang ditunjuk kolom relasi ini memenuhi `f` atas komponen
+    /// `R`: `<rel>_id IN (SELECT entity_id FROM cmp_R WHERE <f>)`.
+    ///
+    /// Menghasilkan `Filter<C>` → **bersarang** (argumen `f` boleh hasil `matches`
+    /// lagi, relasi 3–4 deep) & digabung `and`/`or` (RFC-0032).
+    pub fn matches<R: PgComponent>(self, f: Filter<R>) -> Filter<C> {
+        Filter::raw(join_cond(self.column, R::TABLE, &f.sql), f.params)
+    }
+}
+
 /// Arah pengurutan `ORDER BY`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Dir {
@@ -294,8 +306,11 @@ impl<'a, T: PgComponent> Query<'a, T> {
     /// Join antar-entity (RFC-0031): saring `T` bila entity yang ditunjuk
     /// `relation` (kolom FK di `T`, mis. `Owner::of()`) memenuhi `filter` atas
     /// komponen `R`. Entity `R` **tidak** dimuat — pakai [`Self::join_load`] untuk itu.
+    ///
+    /// Gula untuk `filter(relation.matches(filter))` (RFC-0032); `filter` boleh
+    /// bersarang (`matches`) untuk relasi 3–4 deep.
     pub fn join<R: PgComponent>(self, relation: Field<T, EntityRef>, filter: Filter<R>) -> Self {
-        self.push_join(relation, filter, false)
+        self.filter(relation.matches(filter))
     }
 
     /// Seperti [`Self::join`], **plus** memuat entity `R` yang menjadi target
@@ -491,6 +506,10 @@ mod tests {
         fn name() -> Field<Self, String> {
             Field::new("name", PgType::Text)
         }
+        // Token relasi (untuk uji nesting RFC-0032).
+        fn boss() -> Field<Self, EntityRef> {
+            Field::new("boss_id", PgType::BigInt)
+        }
     }
 
     // Susun query lengkap tanpa store (uji `build` via helper).
@@ -634,5 +653,21 @@ mod tests {
             "SELECT entity_id FROM cmp_owner WHERE hp >= $1 AND of_id IN \
              (SELECT entity_id FROM cmp_health WHERE hp < $2) ORDER BY entity_id"
         );
+    }
+
+    #[test]
+    fn matches_bersarang_3_deep() {
+        // boss → boss → hp (rantai relasi 3-deep, RFC-0032). Sub-query bersarang,
+        // placeholder global.
+        let f =
+            Health::boss().matches::<Health>(Health::boss().matches::<Health>(Health::hp().lt(20)));
+        let (sql, params) = built(Some(f), vec![], None, None);
+        assert_eq!(
+            sql,
+            "SELECT entity_id FROM cmp_health WHERE boss_id IN \
+             (SELECT entity_id FROM cmp_health WHERE boss_id IN \
+             (SELECT entity_id FROM cmp_health WHERE hp < $1)) ORDER BY entity_id"
+        );
+        assert_eq!(params, vec![(PgType::Integer, PgValue::Int(20))]);
     }
 }

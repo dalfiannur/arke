@@ -55,3 +55,4 @@ ADR bersifat **immutable** setelah Accepted: jangan menulis ulang isinya. Jika k
 | [ADR-0029](ADR-0029-archetype-resolution-index-edges.md) | Index lookup + edge transisi untuk resolusi archetype | **Rejected** |
 | [ADR-0030](ADR-0030-arke-postgres-typed-query-builder.md) | Query builder typed untuk arke-postgres | Accepted |
 | [ADR-0031](ADR-0031-persistent-entity-relations-join.md) | Relasi entity persisten + join builder (arke-postgres) | Accepted |
+| [ADR-0032](ADR-0032-nested-relations-recursive.md) | Relasi bersarang (nested) + rekursif | Accepted |
