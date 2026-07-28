@@ -41,13 +41,15 @@ jobs:
       - name: Benchmark smoke (RN-0002)
         run: ARKE_BENCH_QUICK=1 cargo bench --bench storage_workloads
 
-      # STD-0003: standalone — tidak boleh ada dependensi PIHAK-KETIGA (crates.io).
-      # `arke` & `arke-derive` adalah crate first-party workspace; sisanya dilarang.
-      - name: Standalone (STD-0003)
+      # STD-0003: CORE `arke` standalone — tidak boleh ada dependensi PIHAK-KETIGA
+      # (crates.io). Di-scope ke `-p arke`: hanya `arke` + `arke-derive` (first-party)
+      # yang boleh. Crate adapter (mis. `arke-postgres`) SENGAJA di luar cek ini —
+      # merekalah gerbang dependensi (RFC-0021).
+      - name: Standalone core (STD-0003)
         run: |
-          extra=$(cargo tree -e normal --prefix none | sort -u | grep -vE '^arke(-derive)? ' | grep -v '^$' || true)
+          extra=$(cargo tree -p arke -e normal --prefix none | sort -u | grep -vE '^arke(-derive)? ' | grep -v '^$' || true)
           if [ -n "$extra" ]; then
-            echo "Dependensi pihak-ketiga terdeteksi (melanggar STD-0003):"
+            echo "Dependensi pihak-ketiga terdeteksi pada core arke (melanggar STD-0003):"
             echo "$extra"
             exit 1
           fi

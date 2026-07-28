@@ -1,0 +1,18 @@
+[package]
+name = "arke-postgres-derive"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.86"
+description = "Derive macro for arke-postgres' PgComponent trait — zero crates.io dependencies (built-in proc_macro only)."
+license = "MIT"
+repository = "https://github.com/dalfiannur/arke"
+
+[lib]
+proc-macro = true
+
+# Nol dependensi crates.io: hanya `proc_macro` bawaan (pola arke-derive, STD-0003).
+[dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"

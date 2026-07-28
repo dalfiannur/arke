@@ -1,0 +1,17 @@
+[package]
+name = "arke-postgres"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.86"
+description = "PostgreSQL adapter for the arke ECS — relational, typed-column persistence (source of truth)."
+license = "MIT"
+repository = "https://github.com/dalfiannur/arke"
+
+# Adapter: BOLEH punya dependensi (di luar STD-0003 yang mengikat core `arke`).
+# Fase v1 derive belum menyeret `sqlx`; ia ditambahkan saat PgStore diimplementasi.
+[dependencies]
+arke-postgres-derive = { version = "0.1.0", path = "../arke-postgres-derive" }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"

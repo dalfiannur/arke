@@ -30,15 +30,15 @@ Menjadikan Postgres sumber kebenaran durable bagi keadaan ECS lewat crate adapte
 
 ## Kriteria selesai (Definition of Done)
 
-- [ ] `#[derive(PgComponent)]` meng-emit `TABLE` + `COLUMNS` benar untuk struct skalar — teruji (tanpa DB).
-- [ ] Pemetaan tipe Rust → SQL benar (i32/i64/u32/u64/f32/f64/bool/String + `Option<T>`) — teruji.
-- [ ] `to_params`/`from_params` round-trip setia — teruji (tanpa DB).
-- [ ] Tipe tak-terpetakan → `compile_error!` yang jelas — teruji (trybuild atau manual).
-- [ ] `migrate` menghasilkan `CREATE TABLE` yang benar — teruji.
-- [ ] `load`/`save` round-trip `World` ↔ Postgres setia; determinisme `ORDER BY entity_id` — teruji (Postgres uji).
-- [ ] Generation optimistic-lock mendeteksi konflik tulis-balik — teruji (Postgres uji).
-- [ ] `arke` core tetap 0-dep (STD-0003 `-p arke` hijau).
-- [ ] RFC-0021 & ADR-0021 konsisten dengan kode.
+- [x] `#[derive(PgComponent)]` meng-emit `TABLE` + `COLUMNS` benar untuk struct skalar — teruji tanpa DB (`table_dan_kolom_untuk_struct_skalar`).
+- [x] Pemetaan tipe Rust → SQL benar (i8..i64/isize, u8..u64/usize, f32/f64/bool/String) — teruji. *(`Option<T>` nullable: menyusul.)*
+- [x] `to_params`/`from_params` round-trip setia — teruji (`to_params_from_params_round_trip`, `from_params_menolak_bentuk_salah`).
+- [x] `create_table_sql` (pembangun `migrate`) benar — teruji (`create_table_sql_benar`).
+- [ ] Tipe tak-terpetakan → `compile_error!` (jalur ada; uji trybuild menyusul).
+- [ ] `migrate`/`load`/`save` round-trip `World` ↔ Postgres; determinisme `ORDER BY entity_id` — Postgres uji (subfase sqlx).
+- [ ] Generation optimistic-lock mendeteksi konflik tulis-balik — Postgres uji.
+- [x] `arke` core tetap 0-dep (STD-0003 `-p arke` hijau; cek CI di-scope).
+- [x] RFC-0021 & ADR-0021 konsisten dengan kode.
 
 ## Ketergantungan
 

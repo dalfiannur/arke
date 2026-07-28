@@ -1,5 +1,5 @@
 [workspace]
-members = ["arke-derive"]
+members = ["arke-derive", "arke-postgres", "arke-postgres-derive"]
 resolver = "2"
 
 [package]
