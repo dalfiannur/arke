@@ -52,3 +52,4 @@ Draft → Discussion → Accepted | Rejected | Superseded
 | [RFC-0017](RFC-0017-query-cache.md) | Query Cache sebagai first-class citizen | Accepted |
 | [RFC-0018](RFC-0018-dependency-graph-executor.md) | Eksekutor graf-ketergantungan | Accepted |
 | [RFC-0019](RFC-0019-command-buffer.md) | Command buffer (mutasi struktural tertunda) | Accepted |
+| [RFC-0020](RFC-0020-entity-query-term.md) | `Entity` sebagai term query | Accepted |
