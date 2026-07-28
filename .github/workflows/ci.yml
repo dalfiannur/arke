@@ -36,6 +36,14 @@ jobs:
       - name: No-unsafe example (STD-0004)
         run: cargo run --example no_unsafe
 
+      # Contoh onboarding self-verifying: tiap contoh diakhiri assert!, jadi
+      # menjalankannya = regresi-guard perilaku yang terdokumentasi untuk pengguna.
+      - name: Onboarding examples
+        run: |
+          cargo run --example 01_hello_ecs
+          cargo run --example 02_determinisme_paralel
+          cargo run --example 03_simulasi
+
       # Regresi-guard performa (RN-0003): benchmark 0-dependensi dijalankan dengan
       # ceiling ns/op **longgar** (min beberapa pass). Gagal (exit≠0) hanya pada
       # regresi BESAR/algoritmik (mis. loop lockstep balik) — bukan fluktuasi

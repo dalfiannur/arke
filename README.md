@@ -106,6 +106,21 @@ assert_eq!(restored.get::<Health>(e), Some(&Health(100)));
 
 > `#[derive(Serialize)]` ditulis tangan dengan `proc_macro` bawaan — **tetap 0 dependensi crates.io.**
 
+### Contoh runnable
+
+Contoh onboarding bertahap di [`examples/`](examples/) — masing-masing
+**memverifikasi dirinya sendiri** (diakhiri `assert!`, dijalankan di CI):
+
+| Contoh | Sorotan |
+| --- | --- |
+| [`01_hello_ecs`](examples/01_hello_ecs.rs) | Fundamental: spawn/bundle, query, `System` + `Schedule::run`, `get`. |
+| [`02_determinisme_paralel`](examples/02_determinisme_paralel.rs) | `run` vs `run_parallel` → hasil **identik** (STD-0006). |
+| [`03_simulasi`](examples/03_simulasi.rs) | End-to-end: resource + command buffer + *despawn-self* (`Entity` sebagai term query). |
+
+```sh
+cargo run --example 01_hello_ecs
+```
+
 ## Ekosistem
 
 Integrasi eksternal hidup di **crate adapter terpisah** agar core `arke` tetap
