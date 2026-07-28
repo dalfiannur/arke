@@ -1,6 +1,6 @@
 [package]
 name = "arke-postgres"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.88"
 description = "PostgreSQL adapter for the arke ECS — relational, typed-column persistence (source of truth)."
@@ -15,7 +15,7 @@ include = ["/src", "/examples", "/Cargo.toml", "/README.md", "/LICENSE-MIT"]
 # Adapter: BOLEH punya dependensi (di luar STD-0003 yang mengikat core `arke`).
 [dependencies]
 arke = { version = "0.6", path = ".." }
-arke-postgres-derive = { version = "0.2.0", path = "../arke-postgres-derive" }
+arke-postgres-derive = { version = "0.3.0", path = "../arke-postgres-derive" }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres"] }
 
 [dev-dependencies]
