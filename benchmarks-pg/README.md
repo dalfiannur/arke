@@ -18,10 +18,15 @@ Butuh: **Postgres** jalan, **Rust** toolchain, **Bun**. Skrip membuat dua databa
 terpisah (`arke_bench`, `bunsane_bench`) — pastikan sudah ada (lihat di bawah).
 
 ```sh
-./run.sh [N] [ITERS]          # default: 20000 5
+./run.sh [N] [ITERS] [C]      # default: 20000 5 8
 # contoh:
-./run.sh 10000 5
+./run.sh 10000 5 8
 ```
+
+`C` = konkurensi tulis, **disamakan kedua sisi** (arke `--concurrency C`, BunSane
+`SAVE_CONCURRENCY=C`) → perbandingan apel-ke-apel. Tanpa penyamaan ini, default
+tiap sisi berbeda (arke C=1 sekuensial vs BunSane C=20) sehingga `save` timpang &
+menyesatkan. Untuk **kurva scaling** lintas beberapa `C`, pakai `sweep.sh`.
 
 Env opsional: `PGHOST PGPORT PGUSER PGPASS` (default `postgres:postgres@localhost:5432`).
 

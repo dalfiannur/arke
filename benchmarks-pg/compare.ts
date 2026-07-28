@@ -44,5 +44,5 @@ for (const wl of workloads) {
 console.log();
 console.log("  Catatan: micro-benchmark lintas-bahasa di atas Postgres yang sama.");
 console.log("  Angka RELATIF & spesifik-mesin — didominasi round-trip DB & pola query.");
-console.log("  Asimetri: BunSane menulis dgn koneksi konkuren (pool), arke sekuensial");
-console.log("  dalam 1 transaksi → write-heavy condong ke BunSane, read ke arke.\n");
+console.log("  Konkurensi tulis disamakan kedua sisi (run.sh C, default 8) → apel-");
+console.log("  ke-apel. Untuk kurva scaling lintas beberapa C, pakai sweep.sh.\n");
