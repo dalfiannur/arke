@@ -1,0 +1,17 @@
+[package]
+name = "arke-pg-bench"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Benchmark kompetitif lintas-bahasa: arke-postgres (Rust) vs BunSane (TS/Bun),
+# keduanya EC-store di atas Postgres. Bukan bagian core; jalankan manual.
+[dependencies]
+arke = { path = "../.." }
+arke-postgres = { path = "../../arke-postgres" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

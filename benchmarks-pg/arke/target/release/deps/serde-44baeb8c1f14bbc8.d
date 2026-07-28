@@ -1,0 +1,14 @@
+/home/qyubit/Workspace/personal/rust-ecs/benchmarks-pg/arke/target/release/deps/serde-44baeb8c1f14bbc8.d: /home/qyubit/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs /home/qyubit/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs /home/qyubit/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs /home/qyubit/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs /home/qyubit/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs /home/qyubit/Workspace/personal/rust-ecs/benchmarks-pg/arke/target/release/build/serde-5ee39fffc061669a/out/private.rs
+
+/home/qyubit/Workspace/personal/rust-ecs/benchmarks-pg/arke/target/release/deps/libserde-44baeb8c1f14bbc8.rlib: /home/qyubit/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs /home/qyubit/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs /home/qyubit/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs /home/qyubit/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs /home/qyubit/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs /home/qyubit/Workspace/personal/rust-ecs/benchmarks-pg/arke/target/release/build/serde-5ee39fffc061669a/out/private.rs
+
+/home/qyubit/Workspace/personal/rust-ecs/benchmarks-pg/arke/target/release/deps/libserde-44baeb8c1f14bbc8.rmeta: /home/qyubit/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs /home/qyubit/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs /home/qyubit/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs /home/qyubit/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs /home/qyubit/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs /home/qyubit/Workspace/personal/rust-ecs/benchmarks-pg/arke/target/release/build/serde-5ee39fffc061669a/out/private.rs
+
+/home/qyubit/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs:
+/home/qyubit/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs:
+/home/qyubit/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs:
+/home/qyubit/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs:
+/home/qyubit/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs:
+/home/qyubit/Workspace/personal/rust-ecs/benchmarks-pg/arke/target/release/build/serde-5ee39fffc061669a/out/private.rs:
+
+# env-dep:OUT_DIR=/home/qyubit/Workspace/personal/rust-ecs/benchmarks-pg/arke/target/release/build/serde-5ee39fffc061669a/out
