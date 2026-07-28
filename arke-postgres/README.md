@@ -70,8 +70,24 @@ WHERE h.hp < 20;
 | `save_incremental(world)` | **Diff** vs sinkron-terakhir → hanya entity baru/berubah ditulis, yang hilang di-DELETE | World besar, checkpoint berkala (hemat I/O) |
 | `update_entity(world, e, ver)` | **Optimistic-lock** per-entity: menulis hanya bila versi & identitas cocok | Multi-writer (service lain juga menulis) |
 
-`load(world)` me-materialize `World` dari Postgres, merekonstruksi entity dengan
-**handle identik** (deterministik, `ORDER BY entity_id`).
+`load(world)` me-materialize **seluruh** `World` dari Postgres, merekonstruksi
+entity dengan **handle identik** (deterministik, `ORDER BY entity_id`).
+
+`load_where::<T>(world, predicate)` memuat **subset** (working-set parsial):
+entity yang cocok predikat SQL atas kolom komponen `T`, beserta seluruh
+komponennya — mis. muat hanya yang "sekarat":
+
+```rust,no_run
+# use arke::World;
+# use arke_postgres::{PgComponent, PgStore};
+# #[derive(PgComponent)] struct Health { hp: i32 }
+# async fn f(store: &mut PgStore, world: &mut World) -> Result<(), sqlx::Error> {
+let n = store.load_where::<Health>(world, "hp < 20").await?; // predikat = SQL mentah, tepercaya
+# Ok(())
+# }
+```
+
+Aman dikombinasi dengan `save_incremental` (entity tak-dimuat tak tersentuh).
 
 ### Optimistic-lock (multi-writer)
 

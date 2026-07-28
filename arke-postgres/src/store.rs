@@ -212,15 +212,68 @@ impl PgStore {
         Ok(())
     }
 
-    /// Memuat (materialize) keadaan dari Postgres ke `world`, merekonstruksi
-    /// entity dengan **handle identik** (via [`World::spawn_at`]). Ditujukan
-    /// untuk `World` kosong/segar. Deterministik (`ORDER BY entity_id`).
-    pub async fn load(&self, world: &mut World) -> Result<(), sqlx::Error> {
-        // Entity dulu (parent FK), urutan deterministik.
+    /// Memuat (materialize) **seluruh** keadaan dari Postgres ke `world`,
+    /// merekonstruksi entity dengan **handle identik** (via [`World::spawn_at`]).
+    /// Ditujukan untuk `World` kosong/segar. Deterministik (`ORDER BY entity_id`).
+    ///
+    /// Menyelaraskan rekam sinkron internal → `save_incremental` berikutnya hanya
+    /// menulis perubahan setelah muat ini.
+    pub async fn load(&mut self, world: &mut World) -> Result<(), sqlx::Error> {
         let rows =
             sqlx::query("SELECT entity_id, generation FROM arke_entities ORDER BY entity_id")
                 .fetch_all(&self.pool)
                 .await?;
+        let ids: Vec<i64> = rows
+            .iter()
+            .map(|r| r.try_get("entity_id"))
+            .collect::<Result<_, _>>()?;
+        self.materialize(world, &ids).await?;
+        self.last = self.dump_state(world);
+        Ok(())
+    }
+
+    /// Memuat **subset** entity yang cocok `predicate` (fragmen SQL `WHERE` atas
+    /// kolom tabel komponen `T`) beserta **seluruh** komponennya (RFC-0021 §7 v3).
+    ///
+    /// Contoh: `store.load_where::<Health>(&mut world, "hp < 20").await?` memuat
+    /// entity ber-`Health.hp < 20`. Mengembalikan jumlah entity yang dimuat.
+    /// Menyelaraskan rekam sinkron (working-set) → aman dikombinasi dengan
+    /// `save_incremental` (entity tak-dimuat tak tersentuh).
+    ///
+    /// **Peringatan:** `predicate` adalah SQL mentah — untuk masukan tepercaya,
+    /// bukan input pengguna-akhir (risiko injeksi).
+    pub async fn load_where<T: PgComponent>(
+        &mut self,
+        world: &mut World,
+        predicate: &str,
+    ) -> Result<usize, sqlx::Error> {
+        let sql = format!(
+            "SELECT entity_id FROM {} WHERE {} ORDER BY entity_id",
+            T::TABLE,
+            predicate
+        );
+        let rows = sqlx::query(&sql).fetch_all(&self.pool).await?;
+        let ids: Vec<i64> = rows
+            .iter()
+            .map(|r| r.try_get("entity_id"))
+            .collect::<Result<_, _>>()?;
+        self.materialize(world, &ids).await?;
+        self.last = self.dump_state(world);
+        Ok(ids.len())
+    }
+
+    /// Rekonstruksi entity `ids` + seluruh komponennya ke `world`.
+    async fn materialize(&self, world: &mut World, ids: &[i64]) -> Result<(), sqlx::Error> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let rows = sqlx::query(
+            "SELECT entity_id, generation FROM arke_entities \
+             WHERE entity_id = ANY($1) ORDER BY entity_id",
+        )
+        .bind(ids)
+        .fetch_all(&self.pool)
+        .await?;
         let mut by_id: HashMap<i64, Entity> = HashMap::with_capacity(rows.len());
         for row in rows {
             let id: i64 = row.try_get("entity_id")?;
@@ -229,9 +282,11 @@ impl PgStore {
             by_id.insert(id, entity);
         }
 
-        // Komponen.
         for r in &self.registered {
-            let rows = sqlx::query(&select_sql(r)).fetch_all(&self.pool).await?;
+            let rows = sqlx::query(&select_sql(r, Some("entity_id = ANY($1)")))
+                .bind(ids)
+                .fetch_all(&self.pool)
+                .await?;
             for row in rows {
                 let id: i64 = row.try_get("entity_id")?;
                 let Some(&entity) = by_id.get(&id) else {
@@ -479,10 +534,10 @@ fn insert_sql(r: &Registered) -> String {
     )
 }
 
-/// `SELECT entity_id, c1, c2::text AS c2, … FROM cmp_x ORDER BY entity_id`.
+/// `SELECT entity_id, c1, c2::text AS c2, … FROM cmp_x [WHERE <filter>] ORDER BY entity_id`.
 ///
 /// Kolom `JSONB`/`NUMERIC` dibaca sebagai teks (`::text`).
-fn select_sql(r: &Registered) -> String {
+fn select_sql(r: &Registered, filter: Option<&str>) -> String {
     let mut cols = String::from("entity_id");
     for col in r.columns {
         cols.push_str(", ");
@@ -492,7 +547,14 @@ fn select_sql(r: &Registered) -> String {
             cols.push_str(col.name);
         }
     }
-    format!("SELECT {} FROM {} ORDER BY entity_id", cols, r.table)
+    let where_clause = match filter {
+        Some(f) => format!(" WHERE {f}"),
+        None => String::new(),
+    };
+    format!(
+        "SELECT {} FROM {}{} ORDER BY entity_id",
+        cols, r.table, where_clause
+    )
 }
 
 /// Bind satu [`PgValue`] ke query. `col_ty` menentukan tipe `NULL` yang benar.
