@@ -21,10 +21,19 @@ struct Label {
     active: bool,
 }
 
+#[derive(PgComponent, PartialEq, Debug)]
+struct Target {
+    id: Option<i64>,
+    note: Option<String>,
+}
+
 async fn connect() -> Option<PgStore> {
     let url = std::env::var("DATABASE_URL").ok()?;
     let mut store = PgStore::connect(&url).await.expect("connect Postgres");
-    store.register::<Position>().register::<Label>();
+    store
+        .register::<Position>()
+        .register::<Label>()
+        .register::<Target>();
     Some(store)
 }
 
@@ -55,8 +64,22 @@ async fn pgstore_save_load_round_trip_dan_overwrite() {
             active: true,
         },
     );
+    world.insert(
+        e1,
+        Target {
+            id: Some(7),
+            note: Some("locked".to_string()),
+        },
+    );
     let e2 = world.spawn();
     world.insert(e2, Position { x: -5.0, y: 0.5 }); // tanpa Label
+    world.insert(
+        e2,
+        Target {
+            id: None,
+            note: None,
+        },
+    ); // kolom NULL
 
     store.save(&world).await.unwrap();
 
@@ -84,6 +107,21 @@ async fn pgstore_save_load_round_trip_dan_overwrite() {
         Some(&Position { x: -5.0, y: 0.5 })
     );
     assert_eq!(loaded.get::<Label>(e2), None);
+    // Option: Some round-trip, None → NULL → None.
+    assert_eq!(
+        loaded.get::<Target>(e1),
+        Some(&Target {
+            id: Some(7),
+            note: Some("locked".to_string()),
+        })
+    );
+    assert_eq!(
+        loaded.get::<Target>(e2),
+        Some(&Target {
+            id: None,
+            note: None
+        })
+    );
 
     // --- Save kedua menimpa state lama ---
     let mut b = World::new();

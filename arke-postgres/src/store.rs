@@ -117,8 +117,8 @@ impl PgStore {
             let insert = insert_sql(r);
             for (entity_id, params) in (r.dump)(world) {
                 let mut q = sqlx::query(&insert).bind(entity_id);
-                for value in &params {
-                    q = bind_value(q, value)?;
+                for (value, col) in params.iter().zip(r.columns) {
+                    q = bind_value(q, col.ty, value)?;
                 }
                 q.execute(&mut *tx).await?;
             }
@@ -189,9 +189,10 @@ fn select_sql(r: &Registered) -> String {
     format!("SELECT {} FROM {} ORDER BY entity_id", cols, r.table)
 }
 
-/// Bind satu [`PgValue`] ke query.
+/// Bind satu [`PgValue`] ke query. `col_ty` menentukan tipe `NULL` yang benar.
 fn bind_value<'q>(
     q: Query<'q, Postgres, PgArguments>,
+    col_ty: PgType,
     value: &PgValue,
 ) -> Result<Query<'q, Postgres, PgArguments>, sqlx::Error> {
     Ok(match value {
@@ -202,21 +203,48 @@ fn bind_value<'q>(
         PgValue::Numeric(_) => {
             return Err(unsupported("NUMERIC (u64/usize)"));
         }
-        PgValue::Null => {
-            return Err(unsupported("NULL (Option<T>)"));
-        }
+        // `NULL` di-bind dengan tipe kolom yang benar (protokol Postgres).
+        PgValue::Null => match col_ty {
+            PgType::Integer => q.bind(Option::<i32>::None),
+            PgType::BigInt => q.bind(Option::<i64>::None),
+            PgType::Real => q.bind(Option::<f32>::None),
+            PgType::DoublePrecision => q.bind(Option::<f64>::None),
+            PgType::Boolean => q.bind(Option::<bool>::None),
+            PgType::Text => q.bind(Option::<String>::None),
+            PgType::Numeric | PgType::Jsonb => {
+                return Err(unsupported("NULL untuk NUMERIC/JSONB"));
+            }
+        },
     })
 }
 
-/// Baca satu kolom baris menjadi [`PgValue`] sesuai tipenya.
+/// Baca satu kolom baris menjadi [`PgValue`] sesuai tipenya (`NULL` → `Null`).
 fn read_value(row: &sqlx::postgres::PgRow, col: &ColumnDef) -> Result<PgValue, sqlx::Error> {
     Ok(match col.ty {
-        PgType::Integer => PgValue::Int(i64::from(row.try_get::<i32, _>(col.name)?)),
-        PgType::BigInt => PgValue::Int(row.try_get::<i64, _>(col.name)?),
-        PgType::Real => PgValue::Float(f64::from(row.try_get::<f32, _>(col.name)?)),
-        PgType::DoublePrecision => PgValue::Float(row.try_get::<f64, _>(col.name)?),
-        PgType::Boolean => PgValue::Bool(row.try_get::<bool, _>(col.name)?),
-        PgType::Text => PgValue::Text(row.try_get::<String, _>(col.name)?),
+        PgType::Integer => match row.try_get::<Option<i32>, _>(col.name)? {
+            Some(v) => PgValue::Int(i64::from(v)),
+            None => PgValue::Null,
+        },
+        PgType::BigInt => match row.try_get::<Option<i64>, _>(col.name)? {
+            Some(v) => PgValue::Int(v),
+            None => PgValue::Null,
+        },
+        PgType::Real => match row.try_get::<Option<f32>, _>(col.name)? {
+            Some(v) => PgValue::Float(f64::from(v)),
+            None => PgValue::Null,
+        },
+        PgType::DoublePrecision => match row.try_get::<Option<f64>, _>(col.name)? {
+            Some(v) => PgValue::Float(v),
+            None => PgValue::Null,
+        },
+        PgType::Boolean => match row.try_get::<Option<bool>, _>(col.name)? {
+            Some(v) => PgValue::Bool(v),
+            None => PgValue::Null,
+        },
+        PgType::Text => match row.try_get::<Option<String>, _>(col.name)? {
+            Some(v) => PgValue::Text(v),
+            None => PgValue::Null,
+        },
         PgType::Numeric | PgType::Jsonb => {
             return Err(unsupported("NUMERIC/JSONB (load)"));
         }

@@ -123,6 +123,67 @@ fn from_params_menolak_bentuk_salah() {
     assert!(Position::from_params(&[PgValue::Int(1), PgValue::Int(2), PgValue::Int(3)]).is_none());
 }
 
+#[derive(PgComponent, PartialEq, Debug)]
+struct Optional {
+    hp: Option<i32>,
+    tag: Option<String>,
+    ratio: Option<f32>,
+}
+
+#[test]
+fn option_jadi_kolom_nullable() {
+    assert_eq!(
+        Optional::COLUMNS.to_vec(),
+        vec![
+            ColumnDef {
+                name: "hp",
+                ty: PgType::Integer,
+                nullable: true
+            },
+            ColumnDef {
+                name: "tag",
+                ty: PgType::Text,
+                nullable: true
+            },
+            ColumnDef {
+                name: "ratio",
+                ty: PgType::Real,
+                nullable: true
+            },
+        ]
+    );
+}
+
+#[test]
+fn option_round_trip_some_dan_none() {
+    let full = Optional {
+        hp: Some(42),
+        tag: Some("x".to_string()),
+        ratio: Some(1.5),
+    };
+    assert_eq!(
+        full.to_params(),
+        vec![
+            PgValue::Int(42),
+            PgValue::Text("x".to_string()),
+            PgValue::Float(1.5),
+        ]
+    );
+    let back = Optional::from_params(&full.to_params()).unwrap();
+    assert_eq!(back, full);
+
+    let empty = Optional {
+        hp: None,
+        tag: None,
+        ratio: None,
+    };
+    assert_eq!(
+        empty.to_params(),
+        vec![PgValue::Null, PgValue::Null, PgValue::Null]
+    );
+    assert_eq!(Optional::from_params(&empty.to_params()).unwrap(), empty);
+}
+
 #[test]
 fn create_table_sql_benar() {
     assert_eq!(

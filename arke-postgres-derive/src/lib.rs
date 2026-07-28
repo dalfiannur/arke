@@ -139,67 +139,117 @@ fn parse_named_fields(stream: TokenStream) -> Result<Vec<Field>, String> {
     Ok(fields)
 }
 
-/// Info pemetaan satu tipe skalar Rust → SQL.
+/// Pemetaan satu tipe skalar Rust → SQL, berbasis **binding referensi** `v`.
 struct Scalar {
     /// Varian `PgType` (untuk `COLUMNS`).
     pg_type: &'static str,
     /// Varian `PgValue` (untuk `to_params`/`from_params`).
     value: &'static str,
-    /// Ekspresi bind (dari `self.<field>`) di dalam `PgValue::<value>(…)`.
-    to_expr: String,
-    /// Ekspresi rekonstruksi (dari `v` yang di-bind pola) untuk field.
-    from_expr: String,
+    /// Ekspresi bind dari `v: &INNER` → nilai di dalam `PgValue::<value>(…)`.
+    to_ref: &'static str,
+    /// Ekspresi rekonstruksi dari `v` (di-bind pola `PgValue::<value>(v)`).
+    from_expr: &'static str,
 }
 
 /// Petakan tipe skalar (string tanpa spasi) → [`Scalar`]. `None` = tak didukung.
-fn scalar(ty: &str, field: &str) -> Option<Scalar> {
-    let acc = format!("self.{field}");
-    let int = |pg: &'static str, rust: &str| Scalar {
+///
+/// Semua ekspresi berasumsi `v` bertipe `&INNER` (untuk `to_ref`) atau
+/// `&INNER` yang di-bind pola `PgValue` (untuk `from_expr`) — seragam antara
+/// field skalar biasa dan pembungkus `Option<T>`.
+fn inner_scalar(ty: &str) -> Option<Scalar> {
+    let s = |pg, value, to_ref, from_expr| Scalar {
         pg_type: pg,
-        value: "Int",
-        to_expr: format!("{acc} as i64"),
-        from_expr: format!("*v as {rust}"),
+        value,
+        to_ref,
+        from_expr,
     };
     Some(match ty {
-        "i8" => int("Integer", "i8"),
-        "i16" => int("Integer", "i16"),
-        "i32" => int("Integer", "i32"),
-        "u8" => int("Integer", "u8"),
-        "u16" => int("Integer", "u16"),
-        "i64" => int("BigInt", "i64"),
-        "isize" => int("BigInt", "isize"),
-        "u32" => int("BigInt", "u32"),
-        "u64" | "usize" => Scalar {
-            pg_type: "Numeric",
-            value: "Numeric",
-            to_expr: format!("{acc}.to_string()"),
-            from_expr: "v.parse().ok()?".to_string(),
-        },
-        "f32" => Scalar {
-            pg_type: "Real",
-            value: "Float",
-            to_expr: format!("{acc} as f64"),
-            from_expr: "*v as f32".to_string(),
-        },
-        "f64" => Scalar {
-            pg_type: "DoublePrecision",
-            value: "Float",
-            to_expr: format!("{acc} as f64"),
-            from_expr: "*v".to_string(),
-        },
-        "bool" => Scalar {
-            pg_type: "Boolean",
-            value: "Bool",
-            to_expr: acc.clone(),
-            from_expr: "*v".to_string(),
-        },
-        "String" => Scalar {
-            pg_type: "Text",
-            value: "Text",
-            to_expr: format!("{acc}.clone()"),
-            from_expr: "v.clone()".to_string(),
-        },
+        "i8" => s("Integer", "Int", "*v as i64", "*v as i8"),
+        "i16" => s("Integer", "Int", "*v as i64", "*v as i16"),
+        "i32" => s("Integer", "Int", "*v as i64", "*v as i32"),
+        "u8" => s("Integer", "Int", "*v as i64", "*v as u8"),
+        "u16" => s("Integer", "Int", "*v as i64", "*v as u16"),
+        "i64" => s("BigInt", "Int", "*v", "*v"),
+        "isize" => s("BigInt", "Int", "*v as i64", "*v as isize"),
+        "u32" => s("BigInt", "Int", "*v as i64", "*v as u32"),
+        "u64" => s("Numeric", "Numeric", "v.to_string()", "v.parse().ok()?"),
+        "usize" => s("Numeric", "Numeric", "v.to_string()", "v.parse().ok()?"),
+        "f32" => s("Real", "Float", "*v as f64", "*v as f32"),
+        "f64" => s("DoublePrecision", "Float", "*v", "*v"),
+        "bool" => s("Boolean", "Bool", "*v", "*v"),
+        "String" => s("Text", "Text", "v.clone()", "v.clone()"),
         _ => return None,
+    })
+}
+
+/// Fragmen kode SQL/serde untuk satu field.
+struct FieldSql {
+    column: String,
+    to_param: String,
+    from_field: String,
+}
+
+/// Hasilkan fragmen untuk satu field (skalar atau `Option<skalar>`).
+fn field_sql(f: &Field, idx: usize) -> Result<FieldSql, String> {
+    let name = &f.name;
+    // `Option<INNER>` → kolom nullable; None ↔ NULL.
+    if let Some(inner_ty) =
+        f.ty.strip_prefix("Option<")
+            .and_then(|r| r.strip_suffix('>'))
+    {
+        let Some(s) = inner_scalar(inner_ty) else {
+            return Err(format!(
+                "derive(PgComponent): `Option<{inner_ty}>` (field `{name}`) belum didukung"
+            ));
+        };
+        return Ok(FieldSql {
+            column: format!(
+                "::arke_postgres::ColumnDef {{ name: {name:?}, ty: ::arke_postgres::PgType::{}, nullable: true }}, ",
+                s.pg_type
+            ),
+            to_param: format!(
+                "match &self.{name} {{ \
+                    ::core::option::Option::Some(v) => ::arke_postgres::PgValue::{}({}), \
+                    ::core::option::Option::None => ::arke_postgres::PgValue::Null, \
+                 }}, ",
+                s.value, s.to_ref
+            ),
+            from_field: format!(
+                "{name}: match values.get({idx}) {{ \
+                    ::core::option::Option::Some(::arke_postgres::PgValue::Null) => ::core::option::Option::None, \
+                    ::core::option::Option::Some(::arke_postgres::PgValue::{val}(v)) => ::core::option::Option::Some({from}), \
+                    _ => return ::core::option::Option::None, \
+                 }}, ",
+                val = s.value,
+                from = s.from_expr,
+            ),
+        });
+    }
+
+    // Skalar biasa (non-null).
+    let Some(s) = inner_scalar(&f.ty) else {
+        return Err(format!(
+            "derive(PgComponent): tipe field `{name}: {}` belum didukung (skalar/`Option<skalar>`)",
+            f.ty
+        ));
+    };
+    Ok(FieldSql {
+        column: format!(
+            "::arke_postgres::ColumnDef {{ name: {name:?}, ty: ::arke_postgres::PgType::{}, nullable: false }}, ",
+            s.pg_type
+        ),
+        to_param: format!(
+            "::arke_postgres::PgValue::{}({{ let v = &self.{name}; {} }}), ",
+            s.value, s.to_ref
+        ),
+        from_field: format!(
+            "{name}: match values.get({idx}) {{ \
+                ::core::option::Option::Some(::arke_postgres::PgValue::{val}(v)) => {from}, \
+                _ => return ::core::option::Option::None, \
+             }}, ",
+            val = s.value,
+            from = s.from_expr,
+        ),
     })
 }
 
@@ -211,30 +261,10 @@ fn gen_impl(name: &str, fields: &[Field]) -> Result<String, String> {
     let mut from_fields = String::new();
 
     for (idx, f) in fields.iter().enumerate() {
-        let Some(s) = scalar(&f.ty, &f.name) else {
-            return Err(format!(
-                "derive(PgComponent): tipe field `{}: {}` belum didukung (skalar saja untuk saat ini)",
-                f.name, f.ty
-            ));
-        };
-        columns.push_str(&format!(
-            "::arke_postgres::ColumnDef {{ name: {:?}, ty: ::arke_postgres::PgType::{}, nullable: false }}, ",
-            f.name, s.pg_type
-        ));
-        to_params.push_str(&format!(
-            "::arke_postgres::PgValue::{}({}), ",
-            s.value, s.to_expr
-        ));
-        from_fields.push_str(&format!(
-            "{name}: match values.get({idx}) {{ \
-                ::core::option::Option::Some(::arke_postgres::PgValue::{val}(v)) => {from}, \
-                _ => return ::core::option::Option::None, \
-             }}, ",
-            name = f.name,
-            idx = idx,
-            val = s.value,
-            from = s.from_expr,
-        ));
+        let frag = field_sql(f, idx)?;
+        columns.push_str(&frag.column);
+        to_params.push_str(&frag.to_param);
+        from_fields.push_str(&frag.from_field);
     }
 
     Ok(format!(
