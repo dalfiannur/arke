@@ -102,7 +102,7 @@ Integrasi eksternal hidup di **crate adapter terpisah** agar core `arke` tetap
 
 | Crate | Versi | Isi |
 | --- | --- | --- |
-| [`arke-postgres`](arke-postgres/) | [![crates.io](https://img.shields.io/crates/v/arke-postgres.svg)](https://crates.io/crates/arke-postgres) | Persistensi PostgreSQL — Postgres sebagai **sumber kebenaran** relasional berkolom-tipe. Tulis: `save` / `save_incremental` (diff) / `update_entity` (optimistic-lock). Baca: `load` / `load_where::<T>` (query-scoped). Skema: `migrate` (reconciling) + `#[pg(index/unique/check)]`. Tipe: skalar / `Option` / `JSONB` / `NUMERIC`. Lihat [RFC-0021](docs/RFC/RFC-0021-arke-postgres-adapter.md). |
+| [`arke-postgres`](arke-postgres/) | [![crates.io](https://img.shields.io/crates/v/arke-postgres.svg)](https://crates.io/crates/arke-postgres) [![docs.rs](https://img.shields.io/docsrs/arke-postgres)](https://docs.rs/arke-postgres) | Persistensi PostgreSQL — Postgres sebagai **sumber kebenaran** relasional berkolom-tipe. Tulis: `save` / `save_incremental` (diff) / `update_entity` (optimistic-lock). Baca: `load` / `load_where::<T>` (query-scoped). Skema: `migrate` (reconciling) + `#[pg(index/unique/check)]`. Tipe: skalar / `Option` / `JSONB` / `NUMERIC`. Lihat [RFC-0021](docs/RFC/RFC-0021-arke-postgres-adapter.md). |
 
 ## Dokumentasi & tata-kelola
 
