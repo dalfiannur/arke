@@ -7,7 +7,7 @@ resolver = "2"
 
 [package]
 name = "arke"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2024"
 rust-version = "1.88"
 description = "ECS standalone, deterministik, berbasis archetype untuk Rust — jalur ergonomis adalah jalur cepat."

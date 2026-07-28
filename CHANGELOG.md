@@ -7,6 +7,15 @@ rilis juga ada di [GitHub Releases](https://github.com/dalfiannur/arke/releases)
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-07-29
+
+### Added
+
+- **`Entity::from_raw(index, generation)`** — merekonstruksi handle dari nilai
+  mentah (deserialisasi), mis. relasi persisten `arke-postgres`
+  ([RFC-0031](docs/RFC/RFC-0031-persistent-entity-relations-join.md)). Additif;
+  handle basi tetap ditolak saat dipakai (`World::get`, STD-0007).
+
 ## [0.6.0] — 2026-07-29
 
 Rilis **bentuk-API menuju 1.0** ([RN-0004](docs/RN/RN-0004-jalan-menuju-1.0.md)).
@@ -69,7 +78,8 @@ eksekutor graf-ketergantungan, command buffer, `Entity` sebagai term query. Adap
 [`arke-postgres`](arke-postgres/) diperkenalkan pada era 0.4.x. Detail per rilis:
 [GitHub Releases](https://github.com/dalfiannur/arke/releases).
 
-[Unreleased]: https://github.com/dalfiannur/arke/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/dalfiannur/arke/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/dalfiannur/arke/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/dalfiannur/arke/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/dalfiannur/arke/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/dalfiannur/arke/compare/v0.5.0...v0.5.1
