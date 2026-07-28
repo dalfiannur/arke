@@ -1,10 +1,16 @@
 # RFC-0033: Cache adapter (read-through, Redis-compatible) untuk arke-postgres
 
-- **Status:** Draft (konsep) <!-- Draft | Discussion | Accepted | Rejected | Superseded by RFC-XXXX -->
+- **Status:** **Accepted** — gate terpenuhi (deployment remote-PG + point-read) → diimplementasi
 - **Tanggal:** 2026-07-29
 - **Crate:** **baru** `arke-cache` (adapter; core `arke` tetap 0-dependensi, STD-0003)
 - **Memperluas:** [RFC-0021](RFC-0021-arke-postgres-adapter.md) (arke-postgres)
-- **ADR terkait:** (menyusul bila di-Accept)
+- **ADR terkait:** [ADR-0033](../ADR/ADR-0033-cache-adapter.md)
+
+> **Diterima & diimplementasi (2026-07-29).** Gate "ukur dulu" menghasilkan sinyal
+> **bersyarat** (cache sepadan bila Postgres remote + point-read-berat). Pemilik
+> proyek mengonfirmasi deployment cocok syarat → diimplementasi: hook
+> `ComponentCache` di `arke-postgres` (read-through `materialize` + invalidate-on-
+> write) + crate `arke-cache` (backend Redis/Dragonfly). Encode baris biner 0-serde.
 
 ## Ringkasan
 

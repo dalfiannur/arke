@@ -8,10 +8,12 @@
 //! `Option<T>` nullable + `JSONB` (field non-skalar via `arke::Serialize`).
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use arke::{Component, Entity, QueryData, World};
 use sqlx::{PgPool, Postgres, Row, postgres::PgArguments, postgres::PgPoolOptions, query::Query};
 
+use crate::cache::{ComponentCache, decode_row, encode_row};
 use crate::{ColumnDef, IndexDef, PgComponent, PgType, PgValue, create_table_sql_from};
 
 /// Satu baris komponen yang di-dump: `(entity_id, nilai-kolom)`.
@@ -62,6 +64,8 @@ pub struct PgStore {
     registered: Vec<Registered>,
     /// Rekam keadaan sinkron terakhir (per entity) untuk `save_incremental`.
     last: HashMap<i64, EntityState>,
+    /// Cache read-through opsional (RFC-0033); `None` → langsung Postgres.
+    cache: Option<Arc<dyn ComponentCache>>,
 }
 
 impl PgStore {
@@ -77,7 +81,16 @@ impl PgStore {
             pool,
             registered: Vec::new(),
             last: HashMap::new(),
+            cache: None,
         }
+    }
+
+    /// Memasang **cache read-through** (RFC-0033): baca komponen dilayani cache
+    /// (hit) atau Postgres (miss, lalu isi cache); tulis meng-invalidate. Postgres
+    /// tetap sumber kebenaran. Backend (Redis/Dragonfly) via crate `arke-cache`.
+    pub fn with_cache(mut self, cache: Arc<dyn ComponentCache>) -> Self {
+        self.cache = Some(cache);
+        self
     }
 
     /// Mendaftarkan tipe komponen `T` untuk dipersist.
@@ -237,6 +250,10 @@ impl PgStore {
         }
 
         tx.commit().await?;
+        // `save` menulis-ulang semua → kosongkan cache (RFC-0033).
+        if let Some(c) = &self.cache {
+            c.clear().await;
+        }
         // Selaraskan rekam sinkron dengan keadaan yang baru ditulis.
         self.last = self.dump_state(world);
         Ok(())
@@ -342,20 +359,52 @@ impl PgStore {
         }
 
         for r in &self.registered {
+            // Read-through cache (RFC-0033): layani hit dari cache, ambil miss dari
+            // Postgres lalu isi cache. Tanpa cache → jalur langsung.
+            let cached = match &self.cache {
+                Some(c) => c.get_many(r.table, ids).await,
+                None => vec![None; ids.len()],
+            };
+            let mut miss_ids: Vec<i64> = Vec::new();
+            for (i, &id) in ids.iter().enumerate() {
+                match cached
+                    .get(i)
+                    .and_then(|b| b.as_deref())
+                    .and_then(decode_row)
+                {
+                    Some(values) => {
+                        if let Some(&entity) = by_id.get(&id) {
+                            (r.apply)(world, entity, &values);
+                        }
+                    }
+                    None => miss_ids.push(id),
+                }
+            }
+            if miss_ids.is_empty() {
+                continue;
+            }
             let rows = sqlx::query(&select_sql(r, Some("entity_id = ANY($1)")))
-                .bind(ids)
+                .bind(&miss_ids)
                 .fetch_all(&self.pool)
                 .await?;
+            let mut to_cache: Vec<(i64, Vec<u8>)> = Vec::new();
             for row in rows {
                 let id: i64 = row.try_get("entity_id")?;
-                let Some(&entity) = by_id.get(&id) else {
-                    continue;
-                };
                 let mut values = Vec::with_capacity(r.columns.len());
                 for col in r.columns {
                     values.push(read_value(&row, col)?);
                 }
-                (r.apply)(world, entity, &values);
+                if self.cache.is_some() {
+                    to_cache.push((id, encode_row(&values)));
+                }
+                if let Some(&entity) = by_id.get(&id) {
+                    (r.apply)(world, entity, &values);
+                }
+            }
+            if let Some(c) = &self.cache
+                && !to_cache.is_empty()
+            {
+                c.put_many(r.table, &to_cache).await;
             }
         }
         Ok(())
@@ -429,6 +478,12 @@ impl PgStore {
         }
 
         tx.commit().await.map_err(UpdateError::Db)?;
+        // Invalidate cache untuk entity ini di tiap tabel (RFC-0033).
+        if let Some(c) = &self.cache {
+            for r in &self.registered {
+                c.invalidate(r.table, &[id]).await;
+            }
+        }
         Ok(new_version)
     }
 
@@ -469,6 +524,8 @@ impl PgStore {
             written: 0,
             deleted: 0,
         };
+        // Entity yang tersentuh (dihapus/berubah) → invalidate cache (RFC-0033).
+        let mut affected: Vec<i64> = Vec::new();
 
         // Hilang: ada di rekam, tak ada di `current`.
         for id in self.last.keys() {
@@ -477,6 +534,7 @@ impl PgStore {
                     .bind(id)
                     .execute(&mut *tx)
                     .await?;
+                affected.push(*id);
                 stats.deleted += 1;
             }
         }
@@ -510,10 +568,18 @@ impl PgStore {
                     q.execute(&mut *tx).await?;
                 }
             }
+            affected.push(*id);
             stats.written += 1;
         }
 
         tx.commit().await?;
+        if let Some(c) = &self.cache
+            && !affected.is_empty()
+        {
+            for r in &self.registered {
+                c.invalidate(r.table, &affected).await;
+            }
+        }
         self.last = current;
         Ok(stats)
     }

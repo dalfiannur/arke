@@ -1,5 +1,5 @@
 [workspace]
-members = ["arke-derive", "arke-postgres", "arke-postgres-derive"]
+members = ["arke-derive", "arke-postgres", "arke-postgres-derive", "arke-cache"]
 # Crate benchmark kompetitif memakai ECS pihak-ketiga (hecs/bevy_ecs) untuk
 # perbandingan — di luar workspace inti & CI agar core tetap 0-dependensi.
 exclude = ["benchmarks", "benchmarks-pg/arke"]

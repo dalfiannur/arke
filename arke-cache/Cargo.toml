@@ -1,0 +1,31 @@
+[package]
+name = "arke-cache"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Redis/DragonflyDB-backed read-through cache for arke-postgres (ComponentCache)."
+license = "MIT"
+repository = "https://github.com/dalfiannur/arke"
+readme = "README.md"
+keywords = ["ecs", "cache", "redis", "dragonfly", "postgres"]
+categories = ["database", "caching"]
+include = ["/src", "/Cargo.toml", "/README.md", "/LICENSE-MIT"]
+
+[dependencies]
+arke-postgres = { version = "0.11", path = "../arke-postgres" }
+async-trait = "0.1"
+redis = { version = "0.27", default-features = false, features = ["tokio-comp", "connection-manager"] }
+
+[dev-dependencies]
+arke = { path = ".." }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+all = "warn"
+
+[lints.rustdoc]
+broken_intra_doc_links = "deny"

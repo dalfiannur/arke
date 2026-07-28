@@ -93,8 +93,8 @@ jobs:
       - name: Build arke pada MSRV
         run: cargo build -p arke --verbose
 
-  # Uji integrasi adapter `arke-postgres` terhadap Postgres nyata (RFC-0021).
-  # Tanpa job ini, uji `store` di-skip (DATABASE_URL tak diset).
+  # Uji integrasi adapter `arke-postgres` (RFC-0021) + cache `arke-cache` (RFC-0033)
+  # terhadap Postgres & Redis nyata. Tanpa job ini, uji integrasi di-skip.
   postgres:
     runs-on: ubuntu-latest
     services:
@@ -111,6 +111,15 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -118,3 +127,8 @@ jobs:
         run: cargo test -p arke-postgres
         env:
           DATABASE_URL: postgres://arke:arke@localhost:5432/arke_test
+      - name: Cache integrasi (arke-cache, RFC-0033)
+        run: cargo test -p arke-cache
+        env:
+          DATABASE_URL: postgres://arke:arke@localhost:5432/arke_test
+          REDIS_URL: redis://localhost:6379

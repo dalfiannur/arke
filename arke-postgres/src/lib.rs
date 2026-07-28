@@ -74,6 +74,9 @@ impl<T> From<arke::Entity> for Ref<T> {
 mod store;
 pub use store::{PgStore, SyncStats, UpdateError};
 
+pub mod cache;
+pub use cache::ComponentCache;
+
 pub mod query;
 pub use query::{
     Dir, EntityRef, Field, Filter, IntoPgValue, PathLoad, PathQuery, Query, Recursive,

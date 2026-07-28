@@ -56,3 +56,4 @@ ADR bersifat **immutable** setelah Accepted: jangan menulis ulang isinya. Jika k
 | [ADR-0030](ADR-0030-arke-postgres-typed-query-builder.md) | Query builder typed untuk arke-postgres | Accepted |
 | [ADR-0031](ADR-0031-persistent-entity-relations-join.md) | Relasi entity persisten + join builder (arke-postgres) | Accepted |
 | [ADR-0032](ADR-0032-nested-relations-recursive.md) | Relasi bersarang (nested) + rekursif | Accepted |
+| [ADR-0033](ADR-0033-cache-adapter.md) | Cache adapter read-through (Redis-compatible) | Accepted |
