@@ -29,16 +29,16 @@ Menjadikan `Entity` sebuah term query yang menghasilkan handle entity baris — 
 
 ## Kriteria selesai (Definition of Done)
 
-- [ ] `<(Entity, &T)>::each` menghasilkan handle + komponen yang benar — teruji.
-- [ ] `<Entity>::each` mengiterasi semua entity ber-komponen — teruji.
-- [ ] `Entity` dalam tuple tak mengubah pencocokan komponen lain (mis. `(Entity, &Pos)` = entity ber-Pos) — teruji.
-- [ ] `each_cmd::<(Entity, &Health)>` men-despawn entity yang diiterasi (despawn-self) — teruji.
-- [ ] `run` ≡ `run_parallel` untuk sistem entity+cmd (STD-0006) — teruji.
-- [ ] `Entity` tak menyumbang akses (tak menambah konflik/stage) — teruji.
-- [ ] Determinisme & urutan iterasi identik dengan sebelumnya.
-- [ ] Tetap **tanpa `unsafe` baru**; jalur pengguna aman.
-- [ ] RFC-0020 & ADR-0020 ditulis serta konsisten dengan kode.
-- [ ] Semua tes + miri hijau.
+- [x] `<(Entity, &T)>::each` menghasilkan handle + komponen yang benar — teruji (`tuple_entity_dan_komponen_menghasilkan_handle`).
+- [x] `<Entity>::each` mengiterasi semua entity ber-komponen — teruji (`entity_tunggal_mengiterasi_semua_ber_komponen`).
+- [x] `Entity` dalam tuple tak mengubah pencocokan komponen lain — teruji (idem: `f` tanpa Pos tak cocok).
+- [x] `each_cmd::<(Entity, &Health)>` men-despawn entity yang diiterasi (despawn-self) — teruji (`each_cmd_despawn_self_via_entity_term`).
+- [x] `run` ≡ `run_parallel` untuk sistem entity+cmd (STD-0006) — teruji (`each_cmd_despawn_self_run_parallel_setara_serial`, + 40× stress).
+- [x] `Entity` tak menyumbang akses (tak menambah konflik/stage) — teruji (`entity_term_tak_menyumbang_akses`).
+- [x] Determinisme & urutan iterasi identik dengan sebelumnya — 82 tes hijau.
+- [x] Tetap **tanpa `unsafe` baru**; jalur pengguna aman (contoh `no_unsafe` memakai term `Entity` di bawah `forbid(unsafe_code)`).
+- [x] RFC-0020 & ADR-0020 ditulis serta konsisten dengan kode.
+- [x] Semua tes + miri hijau (miri di CI).
 
 ## Ketergantungan
 

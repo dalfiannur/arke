@@ -52,6 +52,12 @@ impl Archetype {
         &*self.columns[col]
     }
 
+    /// Handle entity per baris (`entities[row]`), untuk term query `Entity`
+    /// (RFC-0020). Urutannya sama dengan baris kolom.
+    pub(crate) fn entities(&self) -> &[Entity] {
+        &self.entities
+    }
+
     /// Slice bertipe untuk kolom pada posisi `col`.
     ///
     /// Downcast dilakukan **sekali per archetype**; iterasi berlangsung atas

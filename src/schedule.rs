@@ -427,6 +427,66 @@ mod tests {
     }
 
     #[test]
+    fn each_cmd_despawn_self_via_entity_term() {
+        use crate::Entity;
+        let mut world = World::new();
+        let mut ids = Vec::new();
+        for i in 0..6 {
+            let e = world.spawn();
+            world.insert(e, Counter(i - 3)); // health: -3..2
+            ids.push(e);
+        }
+        let mut s = Schedule::new();
+        // Despawn entity yang "mati" (Counter <= 0), pakai handle Entity.
+        s.add(System::each_cmd::<(Entity, &Counter)>(|(e, c), cmd| {
+            if c.0 <= 0 {
+                cmd.despawn(e);
+            }
+        }));
+        s.run(&mut world);
+
+        // Counter -3,-2,-1,0 → despawn (4); tersisa 1,2 (ids[4], ids[5]).
+        assert!(!world.contains(ids[0]));
+        assert!(!world.contains(ids[3]));
+        assert!(world.contains(ids[4]));
+        assert!(world.contains(ids[5]));
+        assert_eq!(world.query::<Counter>().count(), 2);
+    }
+
+    #[test]
+    fn each_cmd_despawn_self_run_parallel_setara_serial() {
+        use crate::Entity;
+        fn setup() -> World {
+            let mut w = World::new();
+            for i in 0..20 {
+                let e = w.spawn();
+                w.insert(e, Counter(i % 5)); // 0..4 berulang
+            }
+            w
+        }
+        fn sched() -> Schedule {
+            let mut s = Schedule::new();
+            s.add(System::each_cmd::<(Entity, &Counter)>(|(e, c), cmd| {
+                if c.0 == 0 {
+                    cmd.despawn(e);
+                }
+            }));
+            s
+        }
+        let mut serial = setup();
+        sched().run(&mut serial);
+        let mut parallel = setup();
+        sched().run_parallel(&mut parallel);
+
+        let mut ss: Vec<i32> = serial.query::<Counter>().map(|c| c.0).collect();
+        ss.sort();
+        let mut ps: Vec<i32> = parallel.query::<Counter>().map(|c| c.0).collect();
+        ps.sort();
+        assert_eq!(ss, ps);
+        assert_eq!(ss.len(), 16); // 4 dari 20 (Counter==0) ter-despawn
+    }
+
+    #[test]
     fn each_cmd_buffer_terkuras_antar_run() {
         let mut world = World::new();
         let e = world.spawn();

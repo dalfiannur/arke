@@ -163,10 +163,8 @@ impl<T: Component> QueryData for &T {
         state.scanned = archetypes.len();
         for &ai in &state.matched {
             let archetype = &archetypes[ai];
-            let col = archetype
-                .column_index(cid)
-                .expect("archetype cocok memuat kolom");
-            for item in <&T as QueryTerm>::iter_shared(archetype.column(col)) {
+            let col = archetype.column_index(cid);
+            for item in <&T as QueryTerm>::iter_shared(archetype, col) {
                 f(item);
             }
         }
@@ -201,11 +199,40 @@ impl<T: Component> QueryData for &mut T {
         state.scanned = archetypes.len();
         for &ai in &state.matched {
             let archetype = &archetypes[ai];
-            let col = archetype
-                .column_index(cid)
-                .expect("archetype cocok memuat kolom");
-            for item in <&mut T as QueryTerm>::iter_shared(archetype.column(col)) {
+            let col = archetype.column_index(cid);
+            for item in <&mut T as QueryTerm>::iter_shared(archetype, col) {
                 f(item);
+            }
+        }
+    }
+}
+
+impl QueryData for Entity {
+    type Item<'w> = Entity;
+
+    fn access() -> Access {
+        Access::new() // handle entity: tak baca/tulis komponen (RFC-0020)
+    }
+
+    fn each_cached<F: QueryFilter>(
+        world: &World,
+        state: &mut QueryState,
+        mut f: impl FnMut(Entity),
+    ) {
+        let (with, without) = match resolve_filter::<F>(world) {
+            Some(v) => v,
+            None => return,
+        };
+        let archetypes = world.archetypes();
+        for (i, archetype) in archetypes.iter().enumerate().skip(state.scanned) {
+            if filter_matches(archetype, &with, &without) {
+                state.matched.push(i);
+            }
+        }
+        state.scanned = archetypes.len();
+        for &ai in &state.matched {
+            for &entity in archetypes[ai].entities() {
+                f(entity);
             }
         }
     }
@@ -215,25 +242,40 @@ impl<T: Component> QueryData for &mut T {
 
 use crate::archetype::Archetype;
 use crate::component::ComponentId;
+use crate::entity::Entity;
 use crate::error::EcsError;
-use crate::storage::{Column, TypedColumn};
+use crate::storage::TypedColumn;
 
-/// Satu elemen (`&T` atau `&mut T`) dari sebuah query tuple.
+/// Syarat pencocokan sebuah [`QueryTerm`] terhadap archetype (RFC-0020).
+enum Requirement {
+    /// Butuh kolom komponen `cid` hadir (`&T` / `&mut T`).
+    Column(ComponentId),
+    /// Tak butuh kolom apa pun; cocok archetype mana saja (`Entity`).
+    Any,
+    /// Tipe komponen tak pernah terdaftar → query tak mungkin cocok.
+    Never,
+}
+
+/// Satu elemen dari sebuah query tuple: `&T`, `&mut T`, atau [`Entity`]
+/// (RFC-0013/0020).
 ///
-/// Detail implementasi: hanya `&T`/`&mut T` yang mengimplementasikannya;
-/// pengguna tak perlu menyentuhnya langsung (dipakai sebagai *bound* oleh impl
-/// `QueryData` tuple).
+/// Detail implementasi; pengguna tak perlu menyentuhnya langsung (dipakai
+/// sebagai *bound* oleh impl `QueryData` tuple).
 #[doc(hidden)]
 #[allow(private_interfaces)]
 pub trait QueryTerm {
     /// Item yang dihasilkan per baris.
     type Item<'w>;
-    /// Menambahkan akses (baca/tulis) term ini.
+    /// Menambahkan akses (baca/tulis) term ini. `Entity` tak menambah apa pun.
     fn access(access: &mut Access);
-    /// `ComponentId` komponen term ini, bila terdaftar.
-    fn component_id(world: &World) -> Option<ComponentId>;
-    /// Iterator atas item dari sebuah kolom **berbagi** (`&dyn Column`, RFC-0016).
-    fn iter_shared(col: &dyn Column) -> impl Iterator<Item = Self::Item<'_>>;
+    /// Syarat pencocokan term ini terhadap archetype.
+    fn requirement(world: &World) -> Requirement;
+    /// Iterator atas item untuk sebuah `archetype`. `col` = indeks kolom
+    /// teresolusi (untuk term komponen) atau `None` (untuk `Entity`).
+    fn iter_shared(
+        archetype: &Archetype,
+        col: Option<usize>,
+    ) -> impl Iterator<Item = Self::Item<'_>>;
 }
 
 #[allow(private_interfaces)]
@@ -242,10 +284,14 @@ impl<T: Component> QueryTerm for &T {
     fn access(access: &mut Access) {
         access.reads.push(TypeId::of::<T>());
     }
-    fn component_id(world: &World) -> Option<ComponentId> {
-        world.component_id::<T>()
+    fn requirement(world: &World) -> Requirement {
+        match world.component_id::<T>() {
+            Some(cid) => Requirement::Column(cid),
+            None => Requirement::Never,
+        }
     }
-    fn iter_shared(col: &dyn Column) -> impl Iterator<Item = &T> {
+    fn iter_shared(archetype: &Archetype, col: Option<usize>) -> impl Iterator<Item = &T> {
+        let col = archetype.column(col.expect("term komponen butuh kolom teresolusi"));
         col.as_any()
             .downcast_ref::<TypedColumn<T>>()
             .expect("tipe kolom tak cocok")
@@ -260,10 +306,14 @@ impl<T: Component> QueryTerm for &mut T {
     fn access(access: &mut Access) {
         access.writes.push(TypeId::of::<T>());
     }
-    fn component_id(world: &World) -> Option<ComponentId> {
-        world.component_id::<T>()
+    fn requirement(world: &World) -> Requirement {
+        match world.component_id::<T>() {
+            Some(cid) => Requirement::Column(cid),
+            None => Requirement::Never,
+        }
     }
-    fn iter_shared(col: &dyn Column) -> impl Iterator<Item = &mut T> {
+    fn iter_shared(archetype: &Archetype, col: Option<usize>) -> impl Iterator<Item = &mut T> {
+        let col = archetype.column(col.expect("term komponen butuh kolom teresolusi"));
         let typed = col
             .as_any()
             .downcast_ref::<TypedColumn<T>>()
@@ -272,6 +322,20 @@ impl<T: Component> QueryTerm for &mut T {
         // penjadwal menjamin akses disjoint → tak ada peminjaman lain ke data
         // kolom ini (RFC-0016). Diverifikasi miri.
         unsafe { typed.data_mut_shared() }.iter_mut()
+    }
+}
+
+#[allow(private_interfaces)]
+impl QueryTerm for Entity {
+    type Item<'w> = Entity;
+    fn access(_access: &mut Access) {
+        // Handle entity bersifat baca-saja; tak menyumbang akses komponen.
+    }
+    fn requirement(_world: &World) -> Requirement {
+        Requirement::Any // cocok archetype mana saja
+    }
+    fn iter_shared(archetype: &Archetype, _col: Option<usize>) -> impl Iterator<Item = Entity> {
+        archetype.entities().iter().copied()
     }
 }
 
@@ -378,11 +442,11 @@ fn filter_matches(archetype: &Archetype, with: &[ComponentId], without: &[Compon
     with.iter().all(|&c| archetype.contains(c)) && without.iter().all(|&c| !archetype.contains(c))
 }
 
-/// Menghasilkan `impl QueryData` untuk tuple dengan arity tertentu (jalur
-/// berbagi: tiap term mengakses kolom **distinct** lewat `&dyn Column`,
-/// RFC-0016).
+/// Menghasilkan `impl QueryData` untuk tuple dengan arity tertentu. Tiap term
+/// (`&T`/`&mut T`/`Entity`) melapor [`Requirement`] lalu diiterasi lockstep;
+/// term komponen mengakses kolom **distinct** (RFC-0013/0016/0020).
 macro_rules! impl_query_tuple {
-    ($($T:ident $cid:ident $var:ident $colidx:ident),+) => {
+    ($($T:ident $req:ident $var:ident),+) => {
         impl<$($T: QueryTerm),+> QueryData for ($($T,)+) {
             type Item<'w> = ($($T::Item<'w>,)+);
 
@@ -397,13 +461,21 @@ macro_rules! impl_query_tuple {
                 state: &mut QueryState,
                 mut f: impl FnMut(Self::Item<'_>),
             ) {
-                let ($(::core::option::Option::Some($cid),)+) =
-                    ($(<$T as QueryTerm>::component_id(world),)+)
-                else {
+                // Syarat per-term; bila ada `Never` → query tak mungkin cocok.
+                $(let $req = <$T as QueryTerm>::requirement(world);)+
+                if $(matches!($req, Requirement::Never) ||)+ false {
                     return;
-                };
-                let cids = [$($cid),+];
-                assert_no_alias(world, &cids);
+                }
+                // cid wajib (dari term `Column`) untuk alias-check & pencocokan;
+                // term `Entity` (`Any`) tak menyumbang.
+                let required_cids: Vec<ComponentId> = [$(&$req),+]
+                    .into_iter()
+                    .filter_map(|r| match r {
+                        Requirement::Column(c) => ::core::option::Option::Some(*c),
+                        _ => ::core::option::Option::None,
+                    })
+                    .collect();
+                assert_no_alias(world, &required_cids);
                 let (with, without) = match resolve_filter::<Fil>(world) {
                     ::core::option::Option::Some(v) => v,
                     ::core::option::Option::None => return,
@@ -411,9 +483,9 @@ macro_rules! impl_query_tuple {
 
                 let archetypes = world.archetypes();
                 for (i, archetype) in archetypes.iter().enumerate().skip(state.scanned) {
-                    let present = [$(archetype.column_index($cid)),+]
+                    let present = required_cids
                         .iter()
-                        .all(::core::option::Option::is_some);
+                        .all(|&c| archetype.column_index(c).is_some());
                     if present && filter_matches(archetype, &with, &without) {
                         state.matched.push(i);
                     }
@@ -422,13 +494,15 @@ macro_rules! impl_query_tuple {
 
                 for &ai in &state.matched {
                     let archetype = &archetypes[ai];
-                    let [$($colidx),+] = [$(
-                        archetype
-                            .column_index($cid)
-                            .expect("archetype cocok memuat kolom"),
-                    )+];
+                    // Kolom teresolusi per-term: `Column` → Some(idx), lainnya None.
                     let ($(mut $var,)+) = (
-                        $(<$T as QueryTerm>::iter_shared(archetype.column($colidx)),)+
+                        $(<$T as QueryTerm>::iter_shared(
+                            archetype,
+                            match &$req {
+                                Requirement::Column(c) => archetype.column_index(*c),
+                                _ => ::core::option::Option::None,
+                            },
+                        ),)+
                     );
                     loop {
                         match ($($var.next(),)+) {
@@ -442,16 +516,55 @@ macro_rules! impl_query_tuple {
     };
 }
 
-impl_query_tuple!(A ca va ia, B cb vb ib);
-impl_query_tuple!(A ca va ia, B cb vb ib, C cc vc ic);
-impl_query_tuple!(A ca va ia, B cb vb ib, C cc vc ic, D cd vd id);
-impl_query_tuple!(A ca va ia, B cb vb ib, C cc vc ic, D cd vd id, E ce ve ie);
-impl_query_tuple!(A ca va ia, B cb vb ib, C cc vc ic, D cd vd id, E ce ve ie, F cf vf if_);
+impl_query_tuple!(A ra va, B rb vb);
+impl_query_tuple!(A ra va, B rb vb, C rc vc);
+impl_query_tuple!(A ra va, B rb vb, C rc vc, D rd vd);
+impl_query_tuple!(A ra va, B rb vb, C rc vc, D rd vd, E re ve);
+impl_query_tuple!(A ra va, B rb vb, C rc vc, D rd vd, E re ve, F rf vf);
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::World;
+    use crate::{Entity, World};
+
+    #[test]
+    fn tuple_entity_dan_komponen_menghasilkan_handle() {
+        let mut world = World::new();
+        let e1 = world.spawn();
+        world.insert(e1, Pos(10));
+        let e2 = world.spawn();
+        world.insert(e2, Pos(20));
+        let f = world.spawn();
+        world.insert(f, Vel(0)); // tanpa Pos → tak cocok
+
+        let mut got: Vec<(Entity, i32)> = Vec::new();
+        <(Entity, &Pos)>::each(&mut world, |(e, p)| got.push((e, p.0)));
+        got.sort_by_key(|&(_, v)| v);
+        assert_eq!(got, vec![(e1, 10), (e2, 20)]);
+    }
+
+    #[test]
+    fn entity_tunggal_mengiterasi_semua_ber_komponen() {
+        let mut world = World::new();
+        let e1 = world.spawn();
+        world.insert(e1, Pos(1));
+        let e2 = world.spawn();
+        world.insert(e2, Vel(2));
+        let _bare = world.spawn(); // tanpa komponen → tak ada di archetype
+
+        let mut got: Vec<Entity> = Vec::new();
+        <Entity>::each(&mut world, |e| got.push(e));
+        got.sort_by_key(|e| e.index());
+        assert_eq!(got, vec![e1, e2]);
+    }
+
+    #[test]
+    fn entity_term_tak_menyumbang_akses() {
+        // Entity tidak baca/tulis komponen apa pun.
+        let acc = <(Entity, &Pos)>::access();
+        assert!(acc.reads.contains(&TypeId::of::<Pos>()));
+        assert!(acc.writes.is_empty());
+    }
 
     #[test]
     fn each_cached_menangkap_archetype_baru_inkremental() {

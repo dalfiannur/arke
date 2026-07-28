@@ -4,7 +4,7 @@
 
 #![forbid(unsafe_code)]
 
-use arke::{CommandBuffer, World};
+use arke::{CommandBuffer, Entity, QueryData, World};
 
 #[derive(Debug, PartialEq)]
 struct Position(i32, i32);
@@ -39,10 +39,18 @@ fn main() {
     assert!(world.contains(a));
     assert!(!world.contains(b));
 
-    // Mutasi struktural tertunda via command buffer (RFC-0019).
+    // `Entity` sebagai term query: kumpulkan handle + komponen (RFC-0020).
+    let mut handles: Vec<(Entity, i32)> = Vec::new();
+    <(Entity, &Position)>::each(&mut world, |(e, p)| handles.push((e, p.0)));
+    assert_eq!(handles, vec![(a, 1)]); // hanya `a` yang punya Position kini
+
+    // Mutasi struktural tertunda via command buffer (RFC-0019); despawn-self
+    // memakai handle Entity dari query (RFC-0020).
     let mut cmd = CommandBuffer::new();
     cmd.spawn().insert(Position(5, 5)).insert(Velocity(1, 1));
-    cmd.despawn(a);
+    for (e, _) in &handles {
+        cmd.despawn(*e); // despawn `a` lewat handle
+    }
     cmd.apply(&mut world);
     assert!(!world.contains(a)); // a ter-despawn (tertunda)
     assert_eq!(world.query::<Position>().count(), 1); // hanya entity baru
