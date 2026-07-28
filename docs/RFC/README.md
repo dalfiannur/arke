@@ -65,3 +65,4 @@ Draft → Discussion → Accepted | Rejected | Superseded
 | [RFC-0030](RFC-0030-arke-postgres-typed-query-builder.md) | Query builder typed untuk arke-postgres (Eloquent-inspired) | Accepted |
 | [RFC-0031](RFC-0031-persistent-entity-relations-join.md) | Relasi entity persisten + join builder (arke-postgres) | Accepted |
 | [RFC-0032](RFC-0032-nested-relations-recursive.md) | Relasi bersarang (nested) + rekursif | Accepted (bertahap) |
+| [RFC-0033](RFC-0033-cache-adapter.md) | Cache adapter (read-through, Redis-compatible) untuk arke-postgres | Draft (konsep) |
