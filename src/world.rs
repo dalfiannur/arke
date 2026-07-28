@@ -437,6 +437,18 @@ impl World {
         }
     }
 
+    /// **Merekonstruksi** sebuah entity pada slot `index` dengan `generation`
+    /// tertentu, mengembalikan handle-nya (RFC-0021).
+    ///
+    /// Primitif *restore* untuk adapter persistensi (mis. `arke-postgres`):
+    /// memungkinkan memuat kembali entity dengan **handle yang identik** dengan
+    /// saat disimpan. Ditujukan untuk `World` kosong/segar — bila slot `index`
+    /// sudah terisi entity hidup, isinya **ditimpa**. Untuk pemakaian normal
+    /// gunakan [`World::spawn`].
+    pub fn spawn_at(&mut self, index: u32, generation: u32) -> Entity {
+        self.allocate_at(index, generation)
+    }
+
     /// Membuat entity pada slot `index` dengan `generation` tertentu (untuk
     /// restore). Slot antara diisi placeholder mati.
     fn allocate_at(&mut self, index: u32, generation: u32) -> Entity {
@@ -537,6 +549,21 @@ mod tests {
         let e = world.spawn();
         world.despawn(e);
         assert!(!world.contains(e));
+    }
+
+    #[test]
+    fn spawn_at_merekonstruksi_handle_dan_menerima_komponen() {
+        #[derive(PartialEq, Debug)]
+        struct Mark(i32);
+        let mut world = World::new();
+        // Rekonstruksi entity dengan handle spesifik (index=5, generation=3).
+        let e = world.spawn_at(5, 3);
+        assert_eq!((e.index(), e.generation()), (5, 3));
+        assert!(world.contains(e));
+        world.insert(e, Mark(42));
+        assert_eq!(world.get::<Mark>(e), Some(&Mark(42)));
+        // Handle dengan generation berbeda → basi (STD-0007).
+        assert!(!world.contains(Entity::new(5, 2)));
     }
 
     // STD-0007: handle basi tidak boleh valid meski slot indeksnya dipakai ulang.

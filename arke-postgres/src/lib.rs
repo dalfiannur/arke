@@ -12,6 +12,9 @@
 /// Derive `#[derive(PgComponent)]` — menurunkan skema kolom-tipe dari struct.
 pub use arke_postgres_derive::PgComponent;
 
+mod store;
+pub use store::PgStore;
+
 /// Tipe kolom SQL yang dipetakan dari tipe field Rust (RFC-0021 §2/§3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PgType {
@@ -101,17 +104,23 @@ pub trait PgComponent {
 ///
 /// Kolom `entity_id` merujuk `arke_entities` dengan `ON DELETE CASCADE`.
 pub fn create_table_sql<T: PgComponent>() -> String {
-    let mut columns = String::from(
+    create_table_sql_from(T::TABLE, T::COLUMNS)
+}
+
+/// Seperti [`create_table_sql`] tetapi dari nama tabel + kolom (dipakai runtime,
+/// mis. oleh `PgStore` yang menyimpan skema type-erased).
+pub fn create_table_sql_from(table: &str, columns: &[ColumnDef]) -> String {
+    let mut cols = String::from(
         "entity_id BIGINT PRIMARY KEY REFERENCES arke_entities(entity_id) ON DELETE CASCADE",
     );
-    for col in T::COLUMNS {
-        columns.push_str(", ");
-        columns.push_str(col.name);
-        columns.push(' ');
-        columns.push_str(col.ty.sql());
+    for col in columns {
+        cols.push_str(", ");
+        cols.push_str(col.name);
+        cols.push(' ');
+        cols.push_str(col.ty.sql());
         if !col.nullable {
-            columns.push_str(" NOT NULL");
+            cols.push_str(" NOT NULL");
         }
     }
-    format!("CREATE TABLE IF NOT EXISTS {} ({})", T::TABLE, columns)
+    format!("CREATE TABLE IF NOT EXISTS {table} ({cols})")
 }

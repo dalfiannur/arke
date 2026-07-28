@@ -22,11 +22,14 @@ impl Entity {
         Self { index, generation }
     }
 
-    pub(crate) fn index(self) -> u32 {
+    /// Indeks slot entity ini di `World`-nya (mis. untuk persistensi eksternal,
+    /// RFC-0021). Bersama [`Self::generation`] membentuk identitas stabil.
+    pub fn index(self) -> u32 {
         self.index
     }
 
-    pub(crate) fn generation(self) -> u32 {
+    /// Nomor generasi entity ini (naik saat slot dipakai ulang, STD-0007).
+    pub fn generation(self) -> u32 {
         self.generation
     }
 }

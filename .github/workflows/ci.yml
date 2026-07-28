@@ -67,3 +67,29 @@ jobs:
         run: cargo miri test -p arke --lib
         env:
           MIRIFLAGS: "-Zmiri-disable-isolation"
+
+  # Uji integrasi adapter `arke-postgres` terhadap Postgres nyata (RFC-0021).
+  # Tanpa job ini, uji `store` di-skip (DATABASE_URL tak diset).
+  postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: arke
+          POSTGRES_PASSWORD: arke
+          POSTGRES_DB: arke_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: PgStore round-trip (arke-postgres)
+        run: cargo test -p arke-postgres --test store
+        env:
+          DATABASE_URL: postgres://arke:arke@localhost:5432/arke_test

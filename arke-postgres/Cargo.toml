@@ -8,9 +8,13 @@ license = "MIT"
 repository = "https://github.com/dalfiannur/arke"
 
 # Adapter: BOLEH punya dependensi (di luar STD-0003 yang mengikat core `arke`).
-# Fase v1 derive belum menyeret `sqlx`; ia ditambahkan saat PgStore diimplementasi.
 [dependencies]
+arke = { version = "0.3.0", path = ".." }
 arke-postgres-derive = { version = "0.1.0", path = "../arke-postgres-derive" }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 [lints.rust]
 unsafe_code = "forbid"
