@@ -45,7 +45,9 @@ async fn redis_cache_end_to_end() {
     assert_eq!(w1.get::<CacheProbe>(e0), Some(&CacheProbe { value: 7 }));
 
     // Bukti: kunci terisi di Redis (MGET langsung via cache).
-    let probe = cache.get_many("cmp_cacheprobe", &[i64::from(e0.index())]).await;
+    let probe = cache
+        .get_many("cmp_cacheprobe", &[i64::from(e0.index())])
+        .await;
     assert!(probe[0].is_some(), "load harus mengisi cache Redis");
 
     // Muat #2 → dilayani cache; data tetap benar.
