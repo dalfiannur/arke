@@ -100,3 +100,4 @@ Setelah ketiganya mendarat di **0.6.0** dan periode soak lewat tanpa perubahan b
 ## Catatan / temuan
 
 - 2026-07-28: RN dibuka. Penilaian: kualitas siap 1.0; penghalangnya bentuk-API. Diputuskan (bersama pemilik proyek): **seal trait ekstensi**, **deprecate query khusus-arity → konvergen ke `QueryData`**, **freeze minimal** (0.6.0 breaking → soak → 1.0). Fitur besar ditunda aditif pasca-1.0.
+- 2026-07-28: **Penghalang #1 selesai** → [RFC-0026](../RFC/RFC-0026-seal-extension-traits.md) / [M-23](../MILESTONE_23.md). Keempat trait di-seal via `pub(crate) mod sealed`; diverifikasi doc-test `compile_fail` (RED disaksikan: impl downstream `QueryData`/`QueryFilter` kompilasi sebelum seal). 0 dependensi, tanpa perubahan perilaku. Sisa untuk 0.6.0: RFC-0027 (deprecate query), RFC-0028 (CHANGELOG+policy).

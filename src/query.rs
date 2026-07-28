@@ -99,7 +99,28 @@ pub struct QueryState {
 /// Diterapkan untuk `&T`, `&mut T`, dan **tuple sembarang-arity** (2–8) dengan
 /// mutabilitas campuran (RFC-0013). Iterasi bersifat **internal**: `each`
 /// memanggil `f` untuk setiap entity yang cocok.
-pub trait QueryData {
+///
+/// # Tertutup (sealed)
+///
+/// Trait ini **tertutup** (RFC-0026): hanya `arke` yang mengimplementasikannya.
+/// Percobaan impl di crate lain gagal dikompilasi.
+///
+/// ```compile_fail
+/// struct MyQuery;
+/// impl arke::QueryData for MyQuery {
+///     type Item<'w> = ();
+///     fn access() -> arke::Access {
+///         arke::Access::new()
+///     }
+///     fn each_cached<F: arke::QueryFilter>(
+///         _world: &arke::World,
+///         _state: &mut arke::QueryState,
+///         _f: impl FnMut(()),
+///     ) {
+///     }
+/// }
+/// ```
+pub trait QueryData: crate::sealed::QueryDataSealed {
     /// Item yang dihasilkan per entity yang cocok, meminjam dari `World`.
     type Item<'w>;
 
@@ -139,6 +160,7 @@ pub trait QueryData {
     }
 }
 
+impl<T: Component> crate::sealed::QueryDataSealed for &T {}
 impl<T: Component> QueryData for &T {
     type Item<'w> = &'w T;
 
@@ -172,6 +194,7 @@ impl<T: Component> QueryData for &T {
     }
 }
 
+impl<T: Component> crate::sealed::QueryDataSealed for &mut T {}
 impl<T: Component> QueryData for &mut T {
     type Item<'w> = &'w mut T;
 
@@ -209,6 +232,7 @@ impl<T: Component> QueryData for &mut T {
     }
 }
 
+impl crate::sealed::QueryDataSealed for Entity {}
 impl QueryData for Entity {
     type Item<'w> = Entity;
 
@@ -265,7 +289,7 @@ enum Requirement {
 /// sebagai *bound* oleh impl `QueryData` tuple).
 #[doc(hidden)]
 #[allow(private_interfaces)]
-pub trait QueryTerm {
+pub trait QueryTerm: crate::sealed::QueryTermSealed {
     /// Item yang dihasilkan per baris.
     type Item<'w>;
     /// Keadaan fetch per-archetype (slice kolom / entity) — diakses **per-indeks**
@@ -282,6 +306,7 @@ pub trait QueryTerm {
     fn get<'a>(fetch: &'a mut Self::Fetch<'_>, i: usize) -> Self::Item<'a>;
 }
 
+impl<T: Component> crate::sealed::QueryTermSealed for &T {}
 #[allow(private_interfaces)]
 impl<T: Component> QueryTerm for &T {
     type Item<'w> = &'w T;
@@ -309,6 +334,7 @@ impl<T: Component> QueryTerm for &T {
     }
 }
 
+impl<T: Component> crate::sealed::QueryTermSealed for &mut T {}
 #[allow(private_interfaces)]
 impl<T: Component> QueryTerm for &mut T {
     type Item<'w> = &'w mut T;
@@ -338,6 +364,7 @@ impl<T: Component> QueryTerm for &mut T {
     }
 }
 
+impl crate::sealed::QueryTermSealed for Entity {}
 #[allow(private_interfaces)]
 impl QueryTerm for Entity {
     type Item<'w> = Entity;
@@ -383,12 +410,31 @@ pub struct With<T>(PhantomData<T>);
 pub struct Without<T>(PhantomData<T>);
 
 /// Batasan pencocokan query yang tidak mengambil data (RFC-0014).
-pub trait QueryFilter {
+///
+/// # Tertutup (sealed)
+///
+/// Trait ini **tertutup** (RFC-0026): hanya `arke` (`With`/`Without`/tuple) yang
+/// mengimplementasikannya. Percobaan impl di crate lain gagal dikompilasi.
+///
+/// ```compile_fail
+/// struct MyFilter;
+/// impl arke::QueryFilter for MyFilter {
+///     fn resolve(
+///         _world: &arke::World,
+///         _with: &mut Vec<arke::ComponentId>,
+///         _without: &mut Vec<arke::ComponentId>,
+///     ) -> bool {
+///         true
+///     }
+/// }
+/// ```
+pub trait QueryFilter: crate::sealed::QueryFilterSealed {
     /// Kumpulkan komponen yang harus **hadir** (`with`) dan **absen** (`without`).
     /// `false` bila sebuah `With` komponennya tak terdaftar (→ tak ada yang cocok).
     fn resolve(world: &World, with: &mut Vec<ComponentId>, without: &mut Vec<ComponentId>) -> bool;
 }
 
+impl<T: Component> crate::sealed::QueryFilterSealed for With<T> {}
 impl<T: Component> QueryFilter for With<T> {
     fn resolve(
         world: &World,
@@ -405,6 +451,7 @@ impl<T: Component> QueryFilter for With<T> {
     }
 }
 
+impl<T: Component> crate::sealed::QueryFilterSealed for Without<T> {}
 impl<T: Component> QueryFilter for Without<T> {
     fn resolve(
         world: &World,
@@ -418,6 +465,7 @@ impl<T: Component> QueryFilter for Without<T> {
     }
 }
 
+impl crate::sealed::QueryFilterSealed for () {}
 impl QueryFilter for () {
     fn resolve(_: &World, _: &mut Vec<ComponentId>, _: &mut Vec<ComponentId>) -> bool {
         true
@@ -426,6 +474,7 @@ impl QueryFilter for () {
 
 macro_rules! impl_filter_tuple {
     ($($F:ident),+) => {
+        impl<$($F: QueryFilter),+> crate::sealed::QueryFilterSealed for ($($F,)+) {}
         impl<$($F: QueryFilter),+> QueryFilter for ($($F,)+) {
             fn resolve(
                 world: &World,
@@ -464,6 +513,7 @@ fn filter_matches(archetype: &Archetype, with: &[ComponentId], without: &[Compon
 /// term komponen mengakses kolom **distinct** (RFC-0013/0016/0020).
 macro_rules! impl_query_tuple {
     ($($T:ident $req:ident $var:ident),+) => {
+        impl<$($T: QueryTerm),+> crate::sealed::QueryDataSealed for ($($T,)+) {}
         impl<$($T: QueryTerm),+> QueryData for ($($T,)+) {
             type Item<'w> = ($($T::Item<'w>,)+);
 

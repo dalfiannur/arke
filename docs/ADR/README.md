@@ -49,3 +49,4 @@ ADR bersifat **immutable** setelah Accepted: jangan menulis ulang isinya. Jika k
 | [ADR-0023](ADR-0023-columnar-query-iteration.md) | Iterasi query berbasis-indeks (kolom) | Accepted |
 | [ADR-0024](ADR-0024-fast-component-resolution.md) | Resolusi komponen cepat (hasher TypeId + threading cid) | Accepted |
 | [ADR-0025](ADR-0025-unchecked-column-downcast-get.md) | Downcast kolom tak-tercek pada `World::get` (unsafe terkurung) | Accepted |
+| [ADR-0026](ADR-0026-seal-extension-traits.md) | Seal trait ekstensi via supertrait penanda privat | Accepted |

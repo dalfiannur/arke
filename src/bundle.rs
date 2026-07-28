@@ -15,7 +15,7 @@ use crate::component::{Component, ComponentId, ComponentRegistry};
 /// Detail implementasi; pengguna tak perlu menyentuhnya langsung (bound untuk
 /// `spawn_bundle`/`insert_bundle`).
 #[allow(private_interfaces)]
-pub trait Bundle {
+pub trait Bundle: crate::sealed::BundleSealed {
     /// Registrasikan tipe komponen bundle; kembalikan id-nya (urut tuple).
     #[doc(hidden)]
     fn ids(registry: &mut ComponentRegistry) -> Vec<ComponentId>;
@@ -27,6 +27,7 @@ pub trait Bundle {
 
 macro_rules! impl_bundle {
     ($($T:ident $idx:tt),+) => {
+        impl<$($T: Component),+> crate::sealed::BundleSealed for ($($T,)+) {}
         #[allow(private_interfaces)]
         impl<$($T: Component),+> Bundle for ($($T,)+) {
             fn ids(registry: &mut ComponentRegistry) -> Vec<ComponentId> {

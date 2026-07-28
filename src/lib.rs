@@ -78,6 +78,21 @@ pub mod world;
 mod archetype;
 mod storage;
 
+/// Penanda *sealed* untuk trait ekstensi (RFC-0026). Modul ini privat-crate,
+/// jadi crate lain tak dapat menamai — apalagi mengimplementasikan — penanda di
+/// dalamnya. Trait publik yang memakainya sebagai supertrait karenanya hanya
+/// dapat diimpl oleh `arke`.
+pub(crate) mod sealed {
+    /// Penanda: hanya `arke` yang mengimpl [`crate::Bundle`].
+    pub trait BundleSealed {}
+    /// Penanda: hanya `arke` yang mengimpl [`crate::QueryData`].
+    pub trait QueryDataSealed {}
+    /// Penanda: hanya `arke` yang mengimpl [`crate::query::QueryTerm`].
+    pub trait QueryTermSealed {}
+    /// Penanda: hanya `arke` yang mengimpl [`crate::QueryFilter`].
+    pub trait QueryFilterSealed {}
+}
+
 pub use bundle::Bundle;
 pub use command::{CommandBuffer, EntityCommands};
 pub use component::{Component, ComponentId};
