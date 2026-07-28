@@ -51,7 +51,7 @@ Dua pendirian yang membedakannya:
 [dependencies]
 arke = "0.6"
 # Opsional — persistensi PostgreSQL (Postgres sebagai sumber kebenaran):
-arke-postgres = "0.7"
+arke-postgres = "0.8"
 ```
 
 Atau lewat Cargo:
@@ -134,7 +134,7 @@ Integrasi eksternal hidup di **crate adapter terpisah** agar core `arke` tetap
 
 | Crate | Versi | Isi |
 | --- | --- | --- |
-| [`arke-postgres`](arke-postgres/) | [![crates.io](https://img.shields.io/crates/v/arke-postgres.svg)](https://crates.io/crates/arke-postgres) [![docs.rs](https://img.shields.io/docsrs/arke-postgres)](https://docs.rs/arke-postgres) | Persistensi PostgreSQL — Postgres sebagai **sumber kebenaran** relasional berkolom-tipe. Tulis: `save` / `save_incremental` (diff) / `update_entity` (optimistic-lock). Baca: `load` / `load_where::<T>` (query-scoped) / **query builder typed** `query::<T>().filter(T::field().lt(x)).order_by(..).limit(..).load()` (RFC-0030) / **relasi entity + join** `query::<T>().join(T::rel(), R::f().lt(x))` ([RFC-0031](docs/RFC/RFC-0031-persistent-entity-relations-join.md)). Anti-injeksi. Skema: `migrate` (reconciling) + `#[pg(index/unique/check)]`. Tipe: skalar / `Option` / `JSONB` / `NUMERIC`. Lihat [RFC-0021](docs/RFC/RFC-0021-arke-postgres-adapter.md). |
+| [`arke-postgres`](arke-postgres/) | [![crates.io](https://img.shields.io/crates/v/arke-postgres.svg)](https://crates.io/crates/arke-postgres) [![docs.rs](https://img.shields.io/docsrs/arke-postgres)](https://docs.rs/arke-postgres) | Persistensi PostgreSQL — Postgres sebagai **sumber kebenaran** relasional berkolom-tipe. Tulis: `save` / `save_incremental` (diff) / `update_entity` (optimistic-lock). Baca: `load` / `load_where::<T>` (query-scoped) / **query builder typed** `query::<T>().filter(T::field().lt(x)).order_by(..).limit(..).load()` (RFC-0030) / **relasi entity + join** `query::<T>().join(T::rel(), R::f().lt(x))` ([RFC-0031](docs/RFC/RFC-0031-persistent-entity-relations-join.md)) — bersarang 3–4 deep via `matches` ([RFC-0032](docs/RFC/RFC-0032-nested-relations-recursive.md)). Anti-injeksi. Skema: `migrate` (reconciling) + `#[pg(index/unique/check)]`. Tipe: skalar / `Option` / `JSONB` / `NUMERIC`. Lihat [RFC-0021](docs/RFC/RFC-0021-arke-postgres-adapter.md). |
 
 ## Dokumentasi & tata-kelola
 
