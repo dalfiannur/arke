@@ -52,3 +52,4 @@ ADR bersifat **immutable** setelah Accepted: jangan menulis ulang isinya. Jika k
 | [ADR-0026](ADR-0026-seal-extension-traits.md) | Seal trait ekstensi via supertrait penanda privat | Accepted |
 | [ADR-0027](ADR-0027-deprecate-query-pair.md) | Deprecate `query_pair`/`query_pair_ref`, konvergen ke `QueryData` | Accepted |
 | [ADR-0028](ADR-0028-changelog-msrv-semver-policy.md) | CHANGELOG + kebijakan MSRV, semver & stabilitas snapshot | Accepted |
+| [ADR-0029](ADR-0029-archetype-resolution-index-edges.md) | Index lookup + edge transisi untuk resolusi archetype | **Rejected** |
