@@ -42,3 +42,4 @@ ADR bersifat **immutable** setelah Accepted: jangan menulis ulang isinya. Jika k
 | [ADR-0016](ADR-0016-parallel-executor.md) | Eksekutor paralel tingkat-sistem | Accepted |
 | [ADR-0017](ADR-0017-query-cache.md) | Query Cache sebagai first-class citizen | Accepted |
 | [ADR-0018](ADR-0018-dependency-graph-executor.md) | Eksekutor graf-ketergantungan | Accepted |
+| [ADR-0019](ADR-0019-command-buffer.md) | Command buffer (mutasi struktural tertunda) | Accepted |
