@@ -17,7 +17,7 @@ use crate::entity::Entity;
 use crate::error::EcsError;
 use crate::serialize::Serialize;
 use crate::snapshot::{EntitySnapshot, SCHEMA_VERSION, SerdeRegistry, Snapshot};
-use crate::storage::TypedColumn;
+use crate::storage::{Column, TypedColumn};
 
 /// Lokasi sebuah entity di dalam penyimpanan archetype.
 #[derive(Clone, Copy)]
@@ -384,6 +384,7 @@ impl World {
     }
 
     /// Mengembalikan referensi ke komponen `T` milik `entity`, bila ada.
+    #[allow(unsafe_code)]
     pub fn get<T: Component>(&self, entity: Entity) -> Option<&T> {
         // Satu lookup entity (cek hidup + generasi + lokasi sekaligus).
         let meta = self.entities.get(entity.index() as usize)?;
@@ -394,12 +395,15 @@ impl World {
         let cid = self.registry.get::<T>()?;
         let archetype = &self.archetypes[location.archetype];
         let col = archetype.column_index(cid)?;
-        archetype
-            .column(col)
-            .as_any()
-            .downcast_ref::<TypedColumn<T>>()?
-            .data()
-            .get(location.row)
+        let column: &dyn Column = archetype.column(col);
+        // SAFETY: `col` diperoleh dari `column_index(cid)` dengan `cid` =
+        // ComponentId tipe `T`; kolom pada posisi itu **selalu** `TypedColumn<T>`
+        // (invarian penyimpanan M-1 — kolom dibuat per-ComponentId). Cast
+        // erased→konkret melewati cek `TypeId` `downcast_ref` (yang pasti lolos),
+        // menghapus panggilan virtual `as_any` + perbandingan `TypeId` pada jalur
+        // akses-acak `get`. Diverifikasi miri.
+        let typed = unsafe { &*(column as *const dyn Column as *const TypedColumn<T>) };
+        typed.data().get(location.row)
     }
 
     /// Menyisipkan (atau menimpa) resource global bertipe `T` (RFC-0010).

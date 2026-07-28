@@ -48,3 +48,4 @@ ADR bersifat **immutable** setelah Accepted: jangan menulis ulang isinya. Jika k
 | [ADR-0022](ADR-0022-component-bundles.md) | Bundle komponen (spawn/insert tuple) | Accepted |
 | [ADR-0023](ADR-0023-columnar-query-iteration.md) | Iterasi query berbasis-indeks (kolom) | Accepted |
 | [ADR-0024](ADR-0024-fast-component-resolution.md) | Resolusi komponen cepat (hasher TypeId + threading cid) | Accepted |
+| [ADR-0025](ADR-0025-unchecked-column-downcast-get.md) | Downcast kolom tak-tercek pada `World::get` (unsafe terkurung) | Accepted |
