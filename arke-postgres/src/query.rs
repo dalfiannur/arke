@@ -36,7 +36,7 @@
 
 use std::marker::PhantomData;
 
-use arke::World;
+use arke::{Entity, World};
 
 use crate::{PgComponent, PgStore, PgType, PgValue};
 
@@ -481,6 +481,31 @@ impl<'a, T: PgComponent> Query<'a, T> {
             _pd: PhantomData,
         }
     }
+
+    /// **Turunan transitif** dari `root` mengikuti relasi **self-ref** `rel` (RFC-0032):
+    /// mis. `manager` menunjuk atasan → descendants = semua bawahan (rekursif). Wajib
+    /// `.max_depth(n)` sebelum `.load(...)`.
+    pub fn descendants_of(self, root: Entity, rel: Field<T, RelRef<T>>) -> Recursive<'a> {
+        Recursive {
+            store: self.store,
+            table: T::TABLE,
+            rel_column: rel.column,
+            root,
+            dir: RecurDir::Descendants,
+        }
+    }
+
+    /// **Leluhur transitif** dari `start` mengikuti relasi self-ref `rel` (rantai
+    /// `rel` ke atas). Wajib `.max_depth(n)`.
+    pub fn ancestors_of(self, start: Entity, rel: Field<T, RelRef<T>>) -> Recursive<'a> {
+        Recursive {
+            store: self.store,
+            table: T::TABLE,
+            rel_column: rel.column,
+            root: start,
+            dir: RecurDir::Ancestors,
+        }
+    }
 }
 
 /// Satu hop path relasi (RFC-0032): dari `from_table` lewat `rel_column` ke `to_table`.
@@ -582,6 +607,77 @@ impl<'a> PathLoad<'a> {
                 .await?;
         }
         Ok(n)
+    }
+}
+
+/// Arah traversal rekursif self-ref (RFC-0032).
+enum RecurDir {
+    Descendants,
+    Ancestors,
+}
+
+/// Query rekursif self-ref (RFC-0032) sedang dibangun. **Wajib** `.max_depth(n)`
+/// sebelum memuat (guard siklus dienforce di tingkat tipe: tanpa `max_depth`, tak
+/// ada `load`).
+pub struct Recursive<'a> {
+    store: &'a mut PgStore,
+    table: &'static str,
+    rel_column: &'static str,
+    root: Entity,
+    dir: RecurDir,
+}
+
+impl<'a> Recursive<'a> {
+    /// Batas kedalaman rekursi (WAJIB) → siap `.load(...)`. Mencegah hang dari
+    /// siklus (relasi tanpa FK bisa menyimpang).
+    pub fn max_depth(self, depth: u32) -> RecursiveLoad<'a> {
+        RecursiveLoad {
+            store: self.store,
+            sql: renumber(&recursive_sql(self.table, self.rel_column, self.dir)),
+            params: vec![
+                (PgType::BigInt, PgValue::Int(i64::from(self.root.index()))),
+                (PgType::BigInt, PgValue::Int(i64::from(depth))),
+            ],
+        }
+    }
+}
+
+/// Query rekursif siap dimuat (RFC-0032).
+pub struct RecursiveLoad<'a> {
+    store: &'a mut PgStore,
+    sql: String,
+    params: Vec<(PgType, PgValue)>,
+}
+
+impl<'a> RecursiveLoad<'a> {
+    /// Jalankan CTE `WITH RECURSIVE` & materialisasi entity hasil ke `world`.
+    /// Mengembalikan jumlah entity dimuat.
+    pub async fn load(self, world: &mut World) -> Result<usize, sqlx::Error> {
+        self.store.load_by_query(self.sql, self.params, world).await
+    }
+}
+
+/// SQL `WITH RECURSIVE` untuk descendants/ancestors. Placeholder `?`: root id, max_depth.
+fn recursive_sql(table: &str, rel: &str, dir: RecurDir) -> String {
+    match dir {
+        RecurDir::Descendants => format!(
+            "WITH RECURSIVE rec AS (\
+               SELECT entity_id, 0 AS depth FROM {table} WHERE {rel} = ? \
+               UNION ALL \
+               SELECT t.entity_id, rec.depth + 1 FROM {table} t \
+               JOIN rec ON t.{rel} = rec.entity_id WHERE rec.depth < ?) \
+             SELECT DISTINCT entity_id FROM rec"
+        ),
+        RecurDir::Ancestors => format!(
+            "WITH RECURSIVE rec AS (\
+               SELECT {rel} AS entity_id, 0 AS depth FROM {table} \
+               WHERE entity_id = ? AND {rel} IS NOT NULL \
+               UNION ALL \
+               SELECT t.{rel}, rec.depth + 1 FROM {table} t \
+               JOIN rec ON t.entity_id = rec.entity_id \
+               WHERE t.{rel} IS NOT NULL AND rec.depth < ?) \
+             SELECT DISTINCT entity_id FROM rec"
+        ),
     }
 }
 
@@ -799,5 +895,24 @@ mod tests {
              (SELECT entity_id FROM cmp_health WHERE hp < $1)) ORDER BY entity_id"
         );
         assert_eq!(params, vec![(PgType::Integer, PgValue::Int(20))]);
+    }
+
+    #[test]
+    fn recursive_sql_descendants_dan_ancestors() {
+        let d = renumber(&recursive_sql(
+            "cmp_emp",
+            "manager_id",
+            RecurDir::Descendants,
+        ));
+        assert_eq!(
+            d,
+            "WITH RECURSIVE rec AS (SELECT entity_id, 0 AS depth FROM cmp_emp \
+             WHERE manager_id = $1 UNION ALL SELECT t.entity_id, rec.depth + 1 \
+             FROM cmp_emp t JOIN rec ON t.manager_id = rec.entity_id WHERE rec.depth < $2) \
+             SELECT DISTINCT entity_id FROM rec"
+        );
+        let a = renumber(&recursive_sql("cmp_emp", "manager_id", RecurDir::Ancestors));
+        assert!(a.contains("SELECT manager_id AS entity_id"));
+        assert!(a.contains("t.manager_id IS NOT NULL AND rec.depth < $2"));
     }
 }

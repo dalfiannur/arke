@@ -75,7 +75,10 @@ mod store;
 pub use store::{PgStore, SyncStats, UpdateError};
 
 pub mod query;
-pub use query::{Dir, EntityRef, Field, Filter, IntoPgValue, PathLoad, PathQuery, Query, RelRef};
+pub use query::{
+    Dir, EntityRef, Field, Filter, IntoPgValue, PathLoad, PathQuery, Query, Recursive,
+    RecursiveLoad, RelRef,
+};
 
 /// Tipe kolom SQL yang dipetakan dari tipe field Rust (RFC-0021 §2/§3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
