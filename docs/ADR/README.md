@@ -44,3 +44,4 @@ ADR bersifat **immutable** setelah Accepted: jangan menulis ulang isinya. Jika k
 | [ADR-0018](ADR-0018-dependency-graph-executor.md) | Eksekutor graf-ketergantungan | Accepted |
 | [ADR-0019](ADR-0019-command-buffer.md) | Command buffer (mutasi struktural tertunda) | Accepted |
 | [ADR-0020](ADR-0020-entity-query-term.md) | `Entity` sebagai term query | Accepted |
+| [ADR-0021](ADR-0021-arke-postgres-adapter.md) | `arke-postgres` — adapter Postgres sebagai sumber kebenaran | Accepted |

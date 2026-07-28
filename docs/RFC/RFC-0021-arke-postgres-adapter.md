@@ -1,9 +1,9 @@
 # RFC-0021: `arke-postgres` — adapter Postgres sebagai sumber kebenaran
 
-- **Status:** Draft <!-- Draft | Discussion | Accepted | Rejected | Superseded by RFC-XXXX -->
+- **Status:** Accepted <!-- Draft | Discussion | Accepted | Rejected | Superseded by RFC-XXXX -->
 - **Tanggal:** 2026-07-28
-- **Milestone:** M-20 (Postgres Adapter) — *diusulkan*
-- **ADR terkait:** ADR-0021 (*ditulis saat RFC ini diterima*)
+- **Milestone:** M-20 (Postgres Adapter)
+- **ADR terkait:** [ADR-0021](../ADR/ADR-0021-arke-postgres-adapter.md)
 
 ## Ringkasan
 
@@ -175,4 +175,4 @@ Eksekusi ECS tetap **deterministik** atas working-set yang dimuat; Postgres adal
 
 ## Keputusan
 
-*Belum diputuskan.* RFC ini **Draft** untuk ditinjau. Bila diterima: tulis ADR-0021, buka M-20 (fase v1), lalu TDD — mulai dari derive `PgComponent` + pemetaan tipe (dapat diuji **tanpa** DB), lalu `migrate`/`load`/`save` + optimistic-lock dengan Postgres uji (via `sqlx::test` atau kontainer) di CI.
+**Diterima.** Lihat [ADR-0021](../ADR/ADR-0021-arke-postgres-adapter.md). M-20 (fase v1) dibuka; TDD mulai dari derive `PgComponent` + pemetaan tipe (dapat diuji **tanpa** DB), lalu `migrate`/`load`/`save` + optimistic-lock dengan Postgres uji (via `sqlx::test` atau kontainer) di CI.
