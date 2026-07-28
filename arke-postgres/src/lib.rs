@@ -76,8 +76,10 @@ pub enum PgValue {
     Float(f64),
     /// Boolean.
     Bool(bool),
-    /// Teks (TEXT) atau JSON (JSONB).
+    /// Teks (TEXT).
     Text(String),
+    /// JSON (JSONB) — teks JSON dari `arke::Serialize` (fallback field non-skalar).
+    Json(String),
     /// `NULL`.
     Null,
 }

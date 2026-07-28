@@ -27,13 +27,27 @@ struct Target {
     note: Option<String>,
 }
 
+#[derive(arke::Serialize, PartialEq, Debug, Clone)]
+struct Waypoint {
+    x: i32,
+    y: i32,
+}
+
+#[derive(PgComponent, PartialEq, Debug)]
+struct Path {
+    kind: String,
+    home: Waypoint,         // non-skalar → JSONB
+    next: Option<Waypoint>, // Option non-skalar → JSONB nullable
+}
+
 async fn connect() -> Option<PgStore> {
     let url = std::env::var("DATABASE_URL").ok()?;
     let mut store = PgStore::connect(&url).await.expect("connect Postgres");
     store
         .register::<Position>()
         .register::<Label>()
-        .register::<Target>();
+        .register::<Target>()
+        .register::<Path>();
     Some(store)
 }
 
@@ -71,6 +85,14 @@ async fn pgstore_save_load_round_trip_dan_overwrite() {
             note: Some("locked".to_string()),
         },
     );
+    world.insert(
+        e1,
+        Path {
+            kind: "patrol".to_string(),
+            home: Waypoint { x: 1, y: 1 },
+            next: Some(Waypoint { x: 2, y: 3 }),
+        },
+    );
     let e2 = world.spawn();
     world.insert(e2, Position { x: -5.0, y: 0.5 }); // tanpa Label
     world.insert(
@@ -80,6 +102,14 @@ async fn pgstore_save_load_round_trip_dan_overwrite() {
             note: None,
         },
     ); // kolom NULL
+    world.insert(
+        e2,
+        Path {
+            kind: "idle".to_string(),
+            home: Waypoint { x: 0, y: 0 },
+            next: None, // JSONB NULL
+        },
+    );
 
     store.save(&world).await.unwrap();
 
@@ -120,6 +150,23 @@ async fn pgstore_save_load_round_trip_dan_overwrite() {
         Some(&Target {
             id: None,
             note: None
+        })
+    );
+    // JSONB: nested struct round-trip + Option nested (Some & None → NULL).
+    assert_eq!(
+        loaded.get::<Path>(e1),
+        Some(&Path {
+            kind: "patrol".to_string(),
+            home: Waypoint { x: 1, y: 1 },
+            next: Some(Waypoint { x: 2, y: 3 }),
+        })
+    );
+    assert_eq!(
+        loaded.get::<Path>(e2),
+        Some(&Path {
+            kind: "idle".to_string(),
+            home: Waypoint { x: 0, y: 0 },
+            next: None,
         })
     );
 

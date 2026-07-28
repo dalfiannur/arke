@@ -2,8 +2,9 @@
 //!
 //! Fase v1: `connect`/`register`/`migrate`/`save`/`load` penuh, transaksional.
 //! `World` adalah *working set*; Postgres sumber kebenaran. Determinisme muat
-//! dijaga dengan `ORDER BY entity_id` (STD-0005). Tipe kolom yang didukung v1:
-//! INTEGER/BIGINT/REAL/DOUBLE PRECISION/BOOLEAN/TEXT (NUMERIC/JSONB menyusul).
+//! dijaga dengan `ORDER BY entity_id` (STD-0005). Tipe kolom yang didukung:
+//! INTEGER/BIGINT/REAL/DOUBLE PRECISION/BOOLEAN/TEXT + `Option<T>` nullable +
+//! `JSONB` (field non-skalar via `arke::Serialize`). `NUMERIC` (u64) menyusul.
 
 use std::collections::HashMap;
 
@@ -164,14 +165,21 @@ impl PgStore {
     }
 }
 
-/// `INSERT INTO cmp_x (entity_id, c1, c2, …) VALUES ($1, $2, $3, …)`.
+/// `INSERT INTO cmp_x (entity_id, c1, c2, …) VALUES ($1, $2, $3::jsonb, …)`.
+///
+/// Kolom `JSONB` memakai `$n::jsonb` (Postgres tak meng-cast text→jsonb implisit).
 fn insert_sql(r: &Registered) -> String {
     let mut cols = String::from("entity_id");
     let mut placeholders = String::from("$1");
     for (i, col) in r.columns.iter().enumerate() {
         cols.push_str(", ");
         cols.push_str(col.name);
-        placeholders.push_str(&format!(", ${}", i + 2));
+        let cast = if col.ty == PgType::Jsonb {
+            "::jsonb"
+        } else {
+            ""
+        };
+        placeholders.push_str(&format!(", ${}{}", i + 2, cast));
     }
     format!(
         "INSERT INTO {} ({}) VALUES ({})",
@@ -179,12 +187,18 @@ fn insert_sql(r: &Registered) -> String {
     )
 }
 
-/// `SELECT entity_id, c1, c2, … FROM cmp_x ORDER BY entity_id`.
+/// `SELECT entity_id, c1, c2::text AS c2, … FROM cmp_x ORDER BY entity_id`.
+///
+/// Kolom `JSONB` dibaca sebagai teks (`::text`) agar tak butuh dependensi serde.
 fn select_sql(r: &Registered) -> String {
     let mut cols = String::from("entity_id");
     for col in r.columns {
         cols.push_str(", ");
-        cols.push_str(col.name);
+        if col.ty == PgType::Jsonb {
+            cols.push_str(&format!("{name}::text AS {name}", name = col.name));
+        } else {
+            cols.push_str(col.name);
+        }
     }
     format!("SELECT {} FROM {} ORDER BY entity_id", cols, r.table)
 }
@@ -200,6 +214,8 @@ fn bind_value<'q>(
         PgValue::Float(f) => q.bind(*f),
         PgValue::Bool(b) => q.bind(*b),
         PgValue::Text(s) => q.bind(s.clone()),
+        // JSON di-bind sebagai teks; placeholder `$n::jsonb` meng-cast-nya.
+        PgValue::Json(s) => q.bind(s.clone()),
         PgValue::Numeric(_) => {
             return Err(unsupported("NUMERIC (u64/usize)"));
         }
@@ -210,9 +226,10 @@ fn bind_value<'q>(
             PgType::Real => q.bind(Option::<f32>::None),
             PgType::DoublePrecision => q.bind(Option::<f64>::None),
             PgType::Boolean => q.bind(Option::<bool>::None),
-            PgType::Text => q.bind(Option::<String>::None),
-            PgType::Numeric | PgType::Jsonb => {
-                return Err(unsupported("NULL untuk NUMERIC/JSONB"));
+            // JSONB NULL di-bind sebagai teks NULL; `$n::jsonb` meng-cast.
+            PgType::Text | PgType::Jsonb => q.bind(Option::<String>::None),
+            PgType::Numeric => {
+                return Err(unsupported("NULL untuk NUMERIC"));
             }
         },
     })
@@ -245,8 +262,13 @@ fn read_value(row: &sqlx::postgres::PgRow, col: &ColumnDef) -> Result<PgValue, s
             Some(v) => PgValue::Text(v),
             None => PgValue::Null,
         },
-        PgType::Numeric | PgType::Jsonb => {
-            return Err(unsupported("NUMERIC/JSONB (load)"));
+        // Dibaca lewat `col::text` (lihat `select_sql`) → String JSON.
+        PgType::Jsonb => match row.try_get::<Option<String>, _>(col.name)? {
+            Some(v) => PgValue::Json(v),
+            None => PgValue::Null,
+        },
+        PgType::Numeric => {
+            return Err(unsupported("NUMERIC (load)"));
         }
     })
 }

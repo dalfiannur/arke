@@ -184,6 +184,74 @@ fn option_round_trip_some_dan_none() {
     assert_eq!(Optional::from_params(&empty.to_params()).unwrap(), empty);
 }
 
+#[derive(arke::Serialize, PartialEq, Debug, Clone)]
+struct Inner {
+    tags: i32,
+    label: String,
+}
+
+#[derive(PgComponent, PartialEq, Debug)]
+struct Blob {
+    flat: i32,
+    meta: Inner,          // non-skalar → JSONB
+    maybe: Option<Inner>, // Option non-skalar → JSONB nullable
+}
+
+#[test]
+fn jsonb_fallback_untuk_field_non_skalar() {
+    assert_eq!(
+        Blob::COLUMNS.to_vec(),
+        vec![
+            ColumnDef {
+                name: "flat",
+                ty: PgType::Integer,
+                nullable: false
+            },
+            ColumnDef {
+                name: "meta",
+                ty: PgType::Jsonb,
+                nullable: false
+            },
+            ColumnDef {
+                name: "maybe",
+                ty: PgType::Jsonb,
+                nullable: true
+            },
+        ]
+    );
+
+    let b = Blob {
+        flat: 5,
+        meta: Inner {
+            tags: 3,
+            label: "hero".to_string(),
+        },
+        maybe: Some(Inner {
+            tags: 9,
+            label: "z".to_string(),
+        }),
+    };
+    let params = b.to_params();
+    // meta & maybe adalah JSON.
+    match &params[1] {
+        PgValue::Json(s) => assert!(s.contains("label") && s.contains("hero")),
+        other => panic!("bukan Json: {other:?}"),
+    }
+    assert_eq!(Blob::from_params(&params).unwrap(), b);
+
+    // maybe = None → Null.
+    let n = Blob {
+        flat: 1,
+        meta: Inner {
+            tags: 0,
+            label: String::new(),
+        },
+        maybe: None,
+    };
+    assert_eq!(n.to_params()[2], PgValue::Null);
+    assert_eq!(Blob::from_params(&n.to_params()).unwrap(), n);
+}
+
 #[test]
 fn create_table_sql_benar() {
     assert_eq!(

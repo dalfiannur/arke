@@ -31,7 +31,7 @@ Menjadikan Postgres sumber kebenaran durable bagi keadaan ECS lewat crate adapte
 ## Kriteria selesai (Definition of Done)
 
 - [x] `#[derive(PgComponent)]` meng-emit `TABLE` + `COLUMNS` benar untuk struct skalar — teruji tanpa DB (`table_dan_kolom_untuk_struct_skalar`).
-- [x] Pemetaan tipe Rust → SQL benar (i8..i64/isize, u8..u64/usize, f32/f64/bool/String) + **`Option<T>` → kolom nullable** (None ↔ NULL) — teruji derive (`option_jadi_kolom_nullable`, `option_round_trip_some_dan_none`) & Postgres (round-trip Some/None). *(JSONB fallback field non-skalar: menyusul.)*
+- [x] Pemetaan tipe Rust → SQL benar (i8..i64/isize, u8..u64/usize, f32/f64/bool/String) + **`Option<T>` → kolom nullable** (None ↔ NULL) + **JSONB fallback** field non-skalar (via `arke::Serialize`) — teruji derive DB-less (`option_*`, `jsonb_fallback_untuk_field_non_skalar`) & Postgres (round-trip Some/None + nested JSONB + Option nested).
 - [x] `to_params`/`from_params` round-trip setia — teruji (`to_params_from_params_round_trip`, `from_params_menolak_bentuk_salah`).
 - [x] `create_table_sql` (pembangun `migrate`) benar — teruji (`create_table_sql_benar`).
 - [ ] Tipe tak-terpetakan → `compile_error!` (jalur ada; uji trybuild menyusul).

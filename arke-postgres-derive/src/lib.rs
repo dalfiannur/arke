@@ -2,7 +2,9 @@
 //!
 //! Ditulis tangan memakai **hanya `proc_macro` bawaan** — nol dependensi
 //! crates.io (pola `arke-derive`). Menurunkan skema kolom-tipe dari sebuah
-//! struct field-bernama skalar: `TABLE`, `COLUMNS`, `to_params`, `from_params`.
+//! struct field-bernama: `TABLE`, `COLUMNS`, `to_params`, `from_params`. Field
+//! skalar → kolom ber-tipe; `Option<T>` → nullable; non-skalar → `JSONB`
+//! (via `arke::Serialize`).
 
 use proc_macro::{Delimiter, TokenStream, TokenTree};
 
@@ -189,35 +191,68 @@ struct FieldSql {
     from_field: String,
 }
 
-/// Hasilkan fragmen untuk satu field (skalar atau `Option<skalar>`).
+/// `ColumnDef` sebagai teks kode.
+fn column_def(name: &str, pg_type: &str, nullable: bool) -> String {
+    format!(
+        "::arke_postgres::ColumnDef {{ name: {name:?}, ty: ::arke_postgres::PgType::{pg_type}, nullable: {nullable} }}, "
+    )
+}
+
+/// Hasilkan fragmen untuk satu field: skalar, `Option<skalar>`, atau — untuk
+/// tipe non-skalar — kolom `JSONB` via `arke::Serialize` (fallback, RFC-0021 §2).
 fn field_sql(f: &Field, idx: usize) -> Result<FieldSql, String> {
     let name = &f.name;
+
     // `Option<INNER>` → kolom nullable; None ↔ NULL.
-    if let Some(inner_ty) =
+    if let Some(inner) =
         f.ty.strip_prefix("Option<")
             .and_then(|r| r.strip_suffix('>'))
     {
-        let Some(s) = inner_scalar(inner_ty) else {
-            return Err(format!(
-                "derive(PgComponent): `Option<{inner_ty}>` (field `{name}`) belum didukung"
-            ));
-        };
+        return Ok(match inner_scalar(inner) {
+            Some(s) => FieldSql {
+                column: column_def(name, s.pg_type, true),
+                to_param: format!(
+                    "match &self.{name} {{ \
+                        ::core::option::Option::Some(v) => ::arke_postgres::PgValue::{}({}), \
+                        ::core::option::Option::None => ::arke_postgres::PgValue::Null, \
+                     }}, ",
+                    s.value, s.to_ref
+                ),
+                from_field: format!(
+                    "{name}: match values.get({idx}) {{ \
+                        ::core::option::Option::Some(::arke_postgres::PgValue::Null) => ::core::option::Option::None, \
+                        ::core::option::Option::Some(::arke_postgres::PgValue::{val}(v)) => ::core::option::Option::Some({from}), \
+                        _ => return ::core::option::Option::None, \
+                     }}, ",
+                    val = s.value,
+                    from = s.from_expr,
+                ),
+            },
+            // Non-skalar → JSONB nullable via Serialize.
+            None => FieldSql {
+                column: column_def(name, "Jsonb", true),
+                to_param: format!(
+                    "match &self.{name} {{ \
+                        ::core::option::Option::Some(v) => ::arke_postgres::PgValue::Json(::arke::Serialize::to_value(v).to_json()), \
+                        ::core::option::Option::None => ::arke_postgres::PgValue::Null, \
+                     }}, "
+                ),
+                from_field: from_jsonb(name, idx, inner, true),
+            },
+        });
+    }
+
+    // Skalar biasa (non-null).
+    if let Some(s) = inner_scalar(&f.ty) {
         return Ok(FieldSql {
-            column: format!(
-                "::arke_postgres::ColumnDef {{ name: {name:?}, ty: ::arke_postgres::PgType::{}, nullable: true }}, ",
-                s.pg_type
-            ),
+            column: column_def(name, s.pg_type, false),
             to_param: format!(
-                "match &self.{name} {{ \
-                    ::core::option::Option::Some(v) => ::arke_postgres::PgValue::{}({}), \
-                    ::core::option::Option::None => ::arke_postgres::PgValue::Null, \
-                 }}, ",
+                "::arke_postgres::PgValue::{}({{ let v = &self.{name}; {} }}), ",
                 s.value, s.to_ref
             ),
             from_field: format!(
                 "{name}: match values.get({idx}) {{ \
-                    ::core::option::Option::Some(::arke_postgres::PgValue::Null) => ::core::option::Option::None, \
-                    ::core::option::Option::Some(::arke_postgres::PgValue::{val}(v)) => ::core::option::Option::Some({from}), \
+                    ::core::option::Option::Some(::arke_postgres::PgValue::{val}(v)) => {from}, \
                     _ => return ::core::option::Option::None, \
                  }}, ",
                 val = s.value,
@@ -226,31 +261,44 @@ fn field_sql(f: &Field, idx: usize) -> Result<FieldSql, String> {
         });
     }
 
-    // Skalar biasa (non-null).
-    let Some(s) = inner_scalar(&f.ty) else {
-        return Err(format!(
-            "derive(PgComponent): tipe field `{name}: {}` belum didukung (skalar/`Option<skalar>`)",
-            f.ty
-        ));
-    };
+    // Fallback non-skalar → JSONB via Serialize.
     Ok(FieldSql {
-        column: format!(
-            "::arke_postgres::ColumnDef {{ name: {name:?}, ty: ::arke_postgres::PgType::{}, nullable: false }}, ",
-            s.pg_type
-        ),
+        column: column_def(name, "Jsonb", false),
         to_param: format!(
-            "::arke_postgres::PgValue::{}({{ let v = &self.{name}; {} }}), ",
-            s.value, s.to_ref
+            "::arke_postgres::PgValue::Json(::arke::Serialize::to_value(&self.{name}).to_json()), "
         ),
-        from_field: format!(
-            "{name}: match values.get({idx}) {{ \
-                ::core::option::Option::Some(::arke_postgres::PgValue::{val}(v)) => {from}, \
-                _ => return ::core::option::Option::None, \
-             }}, ",
-            val = s.value,
-            from = s.from_expr,
-        ),
+        from_field: from_jsonb(name, idx, &f.ty, false),
     })
+}
+
+/// Fragmen `from_params` untuk kolom JSONB (parse teks → `Value` → `from_value`).
+fn from_jsonb(name: &str, idx: usize, ty: &str, optional: bool) -> String {
+    // Ekspresi rekonstruksi `x: ty` dari teks JSON `s`.
+    let decode = format!(
+        "match ::arke::Value::from_json(s) {{ \
+            ::core::option::Option::Some(val) => match <{ty} as ::arke::Serialize>::from_value(&val) {{ \
+                ::core::option::Option::Some(x) => x, \
+                ::core::option::Option::None => return ::core::option::Option::None, \
+            }}, \
+            ::core::option::Option::None => return ::core::option::Option::None, \
+        }}"
+    );
+    if optional {
+        format!(
+            "{name}: match values.get({idx}) {{ \
+                ::core::option::Option::Some(::arke_postgres::PgValue::Null) => ::core::option::Option::None, \
+                ::core::option::Option::Some(::arke_postgres::PgValue::Json(s)) => ::core::option::Option::Some({decode}), \
+                _ => return ::core::option::Option::None, \
+             }}, "
+        )
+    } else {
+        format!(
+            "{name}: match values.get({idx}) {{ \
+                ::core::option::Option::Some(::arke_postgres::PgValue::Json(s)) => {decode}, \
+                _ => return ::core::option::Option::None, \
+             }}, "
+        )
+    }
 }
 
 fn gen_impl(name: &str, fields: &[Field]) -> Result<String, String> {
