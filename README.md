@@ -12,16 +12,19 @@ Dua pendirian yang membedakannya:
 - **Jalur ergonomis adalah jalur cepat.** API aman ter-*compile* ke jalur panas optimal — kamu tidak perlu `unsafe` untuk mendapat performa.
 - **Determinisme by construction.** Hasil yang sama setiap kali, apa pun jumlah thread atau penjadwalan.
 
-> Status: **0.4.0** — fondasi inti (M-1…M-13): entity/komponen archetype, query
+> Status: **0.5.0** — fondasi inti (M-1…M-13): entity/komponen archetype, query
 > tuple generik (arity & mutabilitas campuran) + filter `With`/`Without`,
 > scheduler deterministik, iterasi data-parallel, sistem berbasis-tipe,
 > **resources**, snapshot/serialisasi berversi + `#[derive(Serialize)]` (enum,
-> `skip`/`rename`/`rename_all`), dan error berkonteks. **Baru di 0.4.0** (M-16…M-19):
+> `skip`/`rename`/`rename_all`), dan error berkonteks. **M-16…M-19**:
 > **query cache** inkremental ([M-16](docs/MILESTONE_16.md)), **eksekutor
 > graf-ketergantungan** ([M-17](docs/MILESTONE_17.md)) menggantikan barrier stage,
 > **command buffer** untuk mutasi struktural tertunda ([M-18](docs/MILESTONE_18.md)),
 > dan **`Entity` sebagai term query** ([M-19](docs/MILESTONE_19.md)) — memungkinkan
-> pola *despawn-self*. **0 `unsafe`, 0 dependensi eksternal** (bahkan derive-nya).
+> pola *despawn-self*. **Baru di 0.5.0**: **bundle komponen**
+> ([M-21](docs/MILESTONE_21.md)) — `spawn_bundle`/`insert_bundle` menyisipkan tuple
+> komponen dalam satu pindah archetype (*ergonomis = cepat*). **0 `unsafe`, 0
+> dependensi eksternal** (bahkan derive-nya).
 > **Jalur pengguna bebas `unsafe`** (STD-0004); `unsafe` internal **terkurung &
 > diverifikasi miri** di CI (menopang paralelisme tingkat-sistem, hasil identik
 > serial). Persistensi Postgres tersedia sebagai adapter terpisah
