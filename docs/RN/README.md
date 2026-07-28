@@ -29,3 +29,4 @@ Ketika sebuah RN cukup matang, ia **graduate** menjadi RFC. RN tetap disimpan de
 | [RN-0001](RN-0001-unsafecell-column-storage.md) | Penyimpanan kolom berbasis `UnsafeCell` untuk akses interior yang sound | Graduated → RFC-0015 |
 | [RN-0002](RN-0002-hybrid-sparse-set-storage.md) | Apakah penyimpanan hybrid sparse-set layak menyertai archetype? | Investigating |
 | [RN-0003](RN-0003-competitive-benchmark.md) | Benchmark kompetitif — apakah "ergonomis = cepat" tervalidasi? | Investigating |
+| [RN-0004](RN-0004-jalan-menuju-1.0.md) | Jalan menuju 1.0 — apa yang harus dibekukan, apa yang boleh menyusul? | Investigating |
