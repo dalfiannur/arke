@@ -70,6 +70,18 @@ pub struct StagedSave {
     next_state: HashMap<i64, EntityState>,
 }
 
+/// Diff **owned** (sync) dari sebuah `World` vs rekam sinkron internal, siap
+/// di-[`commit_incremental`](PgStore::commit_incremental) secara async — hasil
+/// [`PgStore::stage_incremental`]. Tak memegang `&World`.
+pub struct StagedIncremental {
+    /// entity yang hilang (ada di rekam, tak ada di world) → DELETE.
+    deletes: Vec<i64>,
+    /// entity baru/berubah → UPSERT: `(entity_id, (generation, params per-komponen))`.
+    upserts: Vec<(i64, EntityState)>,
+    /// Rekam sinkron baru setelah commit.
+    next_state: HashMap<i64, EntityState>,
+}
+
 /// Penyimpan Postgres untuk keadaan ECS (RFC-0021).
 ///
 /// Daftarkan tiap tipe komponen via [`Self::register`], `migrate`, lalu
@@ -565,7 +577,40 @@ impl PgStore {
     /// Catatan: diff berbasis-nilai (arke tak melacak perubahan otomatis), jadi
     /// `PgStore` menyimpan salinan keadaan terakhir (biaya memori per entity).
     pub async fn save_incremental(&mut self, world: &World) -> Result<SyncStats, sqlx::Error> {
+        let staged = self.stage_incremental(world);
+        self.commit_incremental(staged).await
+    }
+
+    /// **Fase 1 (sync)** incremental dua-fase: diff `world` vs rekam sinkron internal
+    /// → [`StagedIncremental`] owned (tanpa await, tak menahan `&World`). Membuat
+    /// `commit_incremental` `Send` tanpa `World: Sync` (ramah handler async).
+    pub fn stage_incremental(&self, world: &World) -> StagedIncremental {
         let current = self.dump_state(world);
+        let deletes: Vec<i64> = self
+            .last
+            .keys()
+            .copied()
+            .filter(|id| !current.contains_key(id))
+            .collect();
+        let upserts: Vec<(i64, EntityState)> = current
+            .iter()
+            .filter(|&(id, state)| self.last.get(id) != Some(state))
+            .map(|(id, state)| (*id, state.clone()))
+            .collect();
+        StagedIncremental {
+            deletes,
+            upserts,
+            next_state: current,
+        }
+    }
+
+    /// **Fase 2 (async)** incremental dua-fase: terapkan diff (UPSERT versi-naik +
+    /// DELETE hilang) dalam 1 transaksi, perbarui rekam sinkron + invalidate cache.
+    /// **Tidak menyentuh `World`.**
+    pub async fn commit_incremental(
+        &mut self,
+        staged: StagedIncremental,
+    ) -> Result<SyncStats, sqlx::Error> {
         let mut tx = self.pool.begin().await?;
         let mut stats = SyncStats {
             written: 0,
@@ -574,23 +619,18 @@ impl PgStore {
         // Entity yang tersentuh (dihapus/berubah) → invalidate cache (RFC-0033).
         let mut affected: Vec<i64> = Vec::new();
 
-        // Hilang: ada di rekam, tak ada di `current`.
-        for id in self.last.keys() {
-            if !current.contains_key(id) {
-                sqlx::query("DELETE FROM arke_entities WHERE entity_id = $1")
-                    .bind(id)
-                    .execute(&mut *tx)
-                    .await?;
-                affected.push(*id);
-                stats.deleted += 1;
-            }
+        // Hilang → DELETE (cascade ke tabel komponen).
+        for id in &staged.deletes {
+            sqlx::query("DELETE FROM arke_entities WHERE entity_id = $1")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+            affected.push(*id);
+            stats.deleted += 1;
         }
 
-        // Baru atau berubah.
-        for (id, state) in &current {
-            if self.last.get(id) == Some(state) {
-                continue; // tak berubah → lewati
-            }
+        // Baru/berubah → UPSERT (versi naik) + ganti baris komponen.
+        for (id, state) in &staged.upserts {
             sqlx::query(
                 "INSERT INTO arke_entities (entity_id, generation, version) VALUES ($1, $2, 0) \
                  ON CONFLICT (entity_id) \
@@ -600,7 +640,6 @@ impl PgStore {
             .bind(state.0)
             .execute(&mut *tx)
             .await?;
-            // Ganti baris komponen entity ini.
             for (ci, r) in self.registered.iter().enumerate() {
                 sqlx::query(&format!("DELETE FROM {} WHERE entity_id = $1", r.table))
                     .bind(id)
@@ -627,7 +666,7 @@ impl PgStore {
                 c.invalidate(r.table, &affected).await;
             }
         }
-        self.last = current;
+        self.last = staged.next_state;
         Ok(stats)
     }
 }

@@ -72,7 +72,7 @@ impl<T> From<arke::Entity> for Ref<T> {
 }
 
 mod store;
-pub use store::{PgStore, StagedSave, SyncStats, UpdateError};
+pub use store::{PgStore, StagedIncremental, StagedSave, SyncStats, UpdateError};
 
 pub mod cache;
 pub use cache::ComponentCache;
