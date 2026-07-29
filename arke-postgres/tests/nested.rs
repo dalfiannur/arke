@@ -12,6 +12,7 @@ struct Link {
 }
 
 #[tokio::test]
+#[ignore = "relasi menanti desain ulang berbasis pid (RFC-0034 Amandemen 2 / opsi 1); kolom _id/_gen masih menyimpan indeks World ephemeral, tak kompatibel dengan skema pid 0.12.0"]
 async fn matches_bersarang_3_deep_menyaring_benar() {
     let Ok(url) = std::env::var("DATABASE_URL") else {
         eprintln!("skip: DATABASE_URL tak diset");

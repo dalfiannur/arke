@@ -27,41 +27,43 @@ async fn load_where_memuat_subset_beserta_semua_komponen() {
 
     // 4 entity: hp 5,15,25,35 + Position.
     let mut world = World::new();
-    let mut ids = Vec::new();
     for i in 0..4 {
         let e = world.spawn();
         world.insert(e, Health { hp: 5 + i * 10 });
         world.insert(e, Position { x: (i * 10) as f32 });
-        ids.push(e);
     }
     store.save(&world).await.unwrap();
 
-    // Muat hanya yang "sekarat" (hp < 20) → e0(hp5), e1(hp15).
+    // RFC-0034: indeks World ephemeral → handle sisi-simpan tak lestari lintas
+    // `load_where`; verifikasi subset + kelengkapan komponen lewat isi world muat.
+    let sorted_i32 = |w: &mut World| {
+        let mut v: Vec<i32> = w.query::<Health>().map(|h| h.hp).collect();
+        v.sort();
+        v
+    };
+    let sorted_f32 = |w: &mut World| {
+        let mut v: Vec<i32> = w.query::<Position>().map(|p| p.x as i32).collect();
+        v.sort();
+        v
+    };
+
+    // Muat hanya yang "sekarat" (hp < 20) → hp 5 & 15; tiap match membawa Position.
     let mut hurt = World::new();
     let n = store
         .load_where::<Health>(&mut hurt, "hp < 20")
         .await
         .unwrap();
     assert_eq!(n, 2);
+    assert_eq!(sorted_i32(&mut hurt), vec![5, 15]);
+    assert_eq!(sorted_f32(&mut hurt), vec![0, 10]);
 
-    // Yang cocok: seluruh komponennya dimuat (Health + Position).
-    assert_eq!(hurt.get::<Health>(ids[0]), Some(&Health { hp: 5 }));
-    assert_eq!(hurt.get::<Position>(ids[0]), Some(&Position { x: 0.0 }));
-    assert_eq!(hurt.get::<Health>(ids[1]), Some(&Health { hp: 15 }));
-    assert_eq!(hurt.get::<Position>(ids[1]), Some(&Position { x: 10.0 }));
-
-    // Yang tak cocok: tak dimuat.
-    assert!(!hurt.contains(ids[2]));
-    assert!(!hurt.contains(ids[3]));
-
-    // Predikat atas komponen lain (Position) juga bisa.
+    // Predikat atas komponen lain (Position) juga bisa → x 20 & 30 (+ Health).
     let mut far = World::new();
     let n = store
         .load_where::<Position>(&mut far, "x >= 20")
         .await
         .unwrap();
-    assert_eq!(n, 2); // e2(x20), e3(x30)
-    assert!(far.contains(ids[2]));
-    assert!(far.contains(ids[3]));
-    assert!(!far.contains(ids[0]));
+    assert_eq!(n, 2);
+    assert_eq!(sorted_f32(&mut far), vec![20, 30]);
+    assert_eq!(sorted_i32(&mut far), vec![25, 35]);
 }

@@ -36,6 +36,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     store.register::<Position>().register::<Score>();
     store.migrate().await?;
 
+    // RFC-0034: indeks World bersifat *ephemeral* — identitas persisten adalah
+    // `pid` yang dialokasikan DB, dijembatani `PgStore` (index↔pid) untuk World
+    // yang sedang aktif. Jembatan itu selaras dengan **satu** World pada satu
+    // waktu; jadi kita tuntaskan tulis (save → incremental → optimistic) pada
+    // `world` dulu, baru muat-ulang ke World segar terpisah di langkah akhir.
+
     // --- 1) ECS → Postgres (overwrite penuh) ---
     let mut world = World::new();
     let hero = world.spawn();
@@ -46,16 +52,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     store.save(&world).await?;
     println!("save: 2 entity ditulis");
 
-    // --- 2) Postgres → ECS (handle identik) ---
-    let mut loaded = World::new();
-    store.load(&mut loaded).await?;
-    println!(
-        "load: hero.contains={}, hero.score={:?}",
-        loaded.contains(hero),
-        loaded.get::<Score>(hero),
-    );
-
-    // --- 3) Tulis-balik inkremental: hanya yang berubah ditulis ---
+    // --- 2) Tulis-balik inkremental: hanya yang berubah ditulis ---
     for s in world.query_mut::<Score>() {
         s.value += 1; // hero: 10 → 11 (mob tak punya Score)
     }
@@ -65,7 +62,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         stats.written, stats.deleted
     );
 
-    // --- 4) Optimistic-lock: konflik multi-writer ---
+    // --- 3) Optimistic-lock: konflik multi-writer ---
     let v = store.entity_version(hero).await?.expect("hero ada");
     let new_v = store.update_entity(&world, hero, v).await?;
     println!("update_entity: sukses, versi {v} → {new_v}");
@@ -78,6 +75,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Ok(_) => println!("(tak terduga: mestinya konflik)"),
         Err(e) => return Err(e.into()),
     }
+
+    // --- 4) Postgres → ECS: entity di-materialize sebagai handle World BARU ---
+    //     `load` **tidak** melestarikan handle lama (`hero`/`mob`); verifikasi
+    //     round-trip dengan mengiterasi world yang dimuat.
+    let mut loaded = World::new();
+    store.load(&mut loaded).await?;
+    let positions = loaded.query::<Position>().count();
+    let scores: Vec<i32> = loaded.query::<Score>().map(|s| s.value).collect();
+    println!("load: {positions} entity ber-Position, skor={scores:?} (hero 10→11)");
 
     println!("selesai.");
     Ok(())

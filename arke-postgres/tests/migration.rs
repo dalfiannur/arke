@@ -19,31 +19,35 @@ async fn migrate_merekonsiliasi_skema_lama() {
     };
     let pool = PgPool::connect(&url).await.expect("pool");
 
-    // Slate bersih + skema LAMA cmp_thing (old_field, tanpa new_field).
+    // Slate bersih + skema identitas `pid` (RFC-0034) dengan cmp_thing versi LAMA
+    // (`old_field`, tanpa `new_field`). Uji ini menyoal **evolusi field komponen**,
+    // bukan migrasi kolom identitas — jadi identitas sudah berbasis `pid`.
     sqlx::query("DROP TABLE IF EXISTS cmp_thing, arke_entities CASCADE")
         .execute(&pool)
         .await
         .unwrap();
     sqlx::query(
         "CREATE TABLE arke_entities \
-         (entity_id BIGINT PRIMARY KEY, generation BIGINT NOT NULL, version BIGINT NOT NULL DEFAULT 0)",
+         (pid BIGSERIAL PRIMARY KEY, version BIGINT NOT NULL DEFAULT 0)",
     )
     .execute(&pool)
     .await
     .unwrap();
     sqlx::query(
         "CREATE TABLE cmp_thing \
-         (entity_id BIGINT PRIMARY KEY REFERENCES arke_entities(entity_id) ON DELETE CASCADE, \
+         (pid BIGINT PRIMARY KEY REFERENCES arke_entities(pid) ON DELETE CASCADE, \
           old_field INTEGER NOT NULL)",
     )
     .execute(&pool)
     .await
     .unwrap();
-    sqlx::query("INSERT INTO arke_entities (entity_id, generation, version) VALUES (0, 0, 0)")
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO cmp_thing (entity_id, old_field) VALUES (0, 7)")
+    let seed_pid: i64 =
+        sqlx::query_scalar("INSERT INTO arke_entities (version) VALUES (0) RETURNING pid")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    sqlx::query("INSERT INTO cmp_thing (pid, old_field) VALUES ($1, 7)")
+        .bind(seed_pid)
         .execute(&pool)
         .await
         .unwrap();
@@ -73,14 +77,16 @@ async fn migrate_merekonsiliasi_skema_lama() {
     assert_eq!(old_nullable, "YES", "old_field harusnya jadi nullable");
 
     // Data lama selamat (non-destruktif); new_field di-backfill 0.
-    let row = sqlx::query("SELECT old_field, new_field FROM cmp_thing WHERE entity_id = 0")
+    let row = sqlx::query("SELECT old_field, new_field FROM cmp_thing WHERE pid = $1")
+        .bind(seed_pid)
         .fetch_one(&pool)
         .await
         .unwrap();
     assert_eq!(row.try_get::<i32, _>("old_field").unwrap(), 7);
     assert_eq!(row.try_get::<i32, _>("new_field").unwrap(), 0);
 
-    // INSERT baru (tanpa old_field) kini valid → save/load bekerja.
+    // INSERT baru (tanpa old_field) kini valid → save/load bekerja. Indeks World
+    // ephemeral (RFC-0034): verifikasi via iterasi world yang dimuat, bukan handle.
     let mut world = World::new();
     let e = world.spawn();
     world.insert(e, Thing { new_field: 42 });
@@ -88,5 +94,9 @@ async fn migrate_merekonsiliasi_skema_lama() {
 
     let mut loaded = World::new();
     store.load(&mut loaded).await.unwrap();
-    assert_eq!(loaded.get::<Thing>(e), Some(&Thing { new_field: 42 }));
+    let things: Vec<i32> = loaded.query::<Thing>().map(|t| t.new_field).collect();
+    assert!(
+        things.contains(&42),
+        "Thing{{new_field:42}} harus termuat, got {things:?}"
+    );
 }

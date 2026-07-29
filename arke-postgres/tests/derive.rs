@@ -248,7 +248,7 @@ fn create_table_sql_benar() {
     assert_eq!(
         create_table_sql::<Position>(),
         "CREATE TABLE IF NOT EXISTS cmp_position \
-         (entity_id BIGINT PRIMARY KEY REFERENCES arke_entities(entity_id) ON DELETE CASCADE, \
+         (pid BIGINT PRIMARY KEY REFERENCES arke_entities(pid) ON DELETE CASCADE, \
          x REAL NOT NULL, y REAL NOT NULL, z REAL NOT NULL)"
     );
 }

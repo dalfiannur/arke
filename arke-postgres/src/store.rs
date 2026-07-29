@@ -62,9 +62,9 @@ fn apply_of<T: PgComponent + Component>(world: &mut World, entity: Entity, value
 /// `World` di balik mutex — snapshot diambil (sinkron) di bawah lock, lock dilepas,
 /// lalu `commit` dijalankan tanpa menahan `World`.
 pub struct StagedSave {
-    /// `(entity_id, generation)` tiap entity yang punya ≥1 komponen.
-    entities: Vec<(i64, i64)>,
-    /// Baris komponen, sejajar urutan `registered` saat `stage` dipanggil.
+    /// **Indeks World** tiap entity yang punya ≥1 komponen (pid dialokasikan saat commit).
+    entities: Vec<i64>,
+    /// Baris komponen (keyed by indeks), sejajar urutan `registered` saat `stage`.
     components: Vec<Vec<ComponentRow>>,
     /// Rekam sinkron baru (untuk `save_incremental` berikutnya).
     next_state: HashMap<i64, EntityState>,
@@ -101,8 +101,15 @@ pub struct StagedUpdate {
 pub struct PgStore {
     pool: PgPool,
     registered: Vec<Registered>,
-    /// Rekam keadaan sinkron terakhir (per entity) untuk `save_incremental`.
+    /// Rekam keadaan sinkron terakhir (per **indeks World**) untuk `save_incremental`.
+    /// Indeks stabil dalam satu sesi working-set (RFC-0034: indeks ephemeral, `pid`
+    /// persisten — jembatan `pid_of`/`entity_of` di bawah).
     last: HashMap<i64, EntityState>,
+    /// Jembatan **indeks World → `pid`** (RFC-0034). Diisi saat load/materialize &
+    /// save; dipakai oleh jalur tulis untuk menulis di bawah `pid` persisten.
+    pid_of: HashMap<u32, i64>,
+    /// Jembatan **`pid` → Entity** (handle lokal working-set).
+    entity_of: HashMap<i64, Entity>,
     /// Cache read-through opsional (RFC-0033); `None` → langsung Postgres.
     cache: Option<Arc<dyn ComponentCache>>,
 }
@@ -120,6 +127,8 @@ impl PgStore {
             pool,
             registered: Vec::new(),
             last: HashMap::new(),
+            pid_of: HashMap::new(),
+            entity_of: HashMap::new(),
             cache: None,
         }
     }
@@ -395,9 +404,9 @@ impl PgStore {
     /// [`commit`](Self::commit) — membuat future `commit` `Send` tanpa `World: Sync`
     /// (ramah handler async multi-thread; RFC-0021 §4).
     pub fn stage(&self, world: &World) -> StagedSave {
-        let mut entities: Vec<(i64, i64)> = Vec::new();
+        let mut entities: Vec<i64> = Vec::new();
         <Entity>::each_filtered_shared::<()>(world, |e| {
-            entities.push((i64::from(e.index()), i64::from(e.generation())));
+            entities.push(i64::from(e.index()));
         });
         let components: Vec<Vec<ComponentRow>> =
             self.registered.iter().map(|r| (r.dump)(world)).collect();
@@ -423,22 +432,23 @@ impl PgStore {
             .execute(&mut *tx)
             .await?;
 
-        // Entity (baseline versi 0).
-        for (entity_id, generation) in &staged.entities {
-            sqlx::query(
-                "INSERT INTO arke_entities (entity_id, generation, version) VALUES ($1, $2, 0)",
-            )
-            .bind(*entity_id)
-            .bind(*generation)
-            .execute(&mut *tx)
-            .await?;
+        // Alokasi `pid` (BIGSERIAL) tiap entity; catat jembatan indeks→pid (RFC-0034).
+        self.pid_of.clear();
+        self.entity_of.clear();
+        for index in &staged.entities {
+            let pid: i64 =
+                sqlx::query_scalar("INSERT INTO arke_entities (version) VALUES (0) RETURNING pid")
+                    .fetch_one(&mut *tx)
+                    .await?;
+            self.pid_of.insert(*index as u32, pid);
         }
 
-        // Komponen (referensi FK ke arke_entities).
+        // Komponen ditulis di bawah `pid`.
         for (r, rows) in self.registered.iter().zip(&staged.components) {
             let insert = insert_sql(r);
-            for (entity_id, params) in rows {
-                let mut q = sqlx::query(&insert).bind(*entity_id);
+            for (index, params) in rows {
+                let pid = self.pid_of[&(*index as u32)];
+                let mut q = sqlx::query(&insert).bind(pid);
                 for (value, col) in params.iter().zip(r.columns) {
                     q = bind_value(q, col.ty, value);
                 }
@@ -472,13 +482,12 @@ impl PgStore {
     /// Menyelaraskan rekam sinkron internal → `save_incremental` berikutnya hanya
     /// menulis perubahan setelah muat ini.
     pub async fn load(&mut self, world: &mut World) -> Result<(), sqlx::Error> {
-        let rows =
-            sqlx::query("SELECT entity_id, generation FROM arke_entities ORDER BY entity_id")
-                .fetch_all(&self.pool)
-                .await?;
+        let rows = sqlx::query("SELECT pid FROM arke_entities ORDER BY pid")
+            .fetch_all(&self.pool)
+            .await?;
         let ids: Vec<i64> = rows
             .iter()
-            .map(|r| r.try_get("entity_id"))
+            .map(|r| r.try_get("pid"))
             .collect::<Result<_, _>>()?;
         self.materialize(world, &ids).await?;
         self.last = self.dump_state(world);
@@ -501,14 +510,14 @@ impl PgStore {
         predicate: &str,
     ) -> Result<usize, sqlx::Error> {
         let sql = format!(
-            "SELECT entity_id FROM {} WHERE {} ORDER BY entity_id",
+            "SELECT pid FROM {} WHERE {} ORDER BY pid",
             T::TABLE,
             predicate
         );
         let rows = sqlx::query(&sql).fetch_all(&self.pool).await?;
         let ids: Vec<i64> = rows
             .iter()
-            .map(|r| r.try_get("entity_id"))
+            .map(|r| r.try_get("pid"))
             .collect::<Result<_, _>>()?;
         self.materialize(world, &ids).await?;
         self.last = self.dump_state(world);
@@ -537,7 +546,7 @@ impl PgStore {
             .fetch_all(&self.pool)
             .await?
             .iter()
-            .map(|r| r.try_get("entity_id"))
+            .map(|r| r.try_get("pid"))
             .collect::<Result<_, _>>()?;
         self.materialize(world, &ids).await?;
         self.last = self.dump_state(world);
@@ -545,25 +554,29 @@ impl PgStore {
     }
 
     /// Rekonstruksi entity `ids` + seluruh komponennya ke `world`.
-    async fn materialize(&self, world: &mut World, ids: &[i64]) -> Result<Vec<Entity>, sqlx::Error> {
+    async fn materialize(
+        &mut self,
+        world: &mut World,
+        ids: &[i64],
+    ) -> Result<Vec<Entity>, sqlx::Error> {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
-        let rows = sqlx::query(
-            "SELECT entity_id, generation FROM arke_entities \
-             WHERE entity_id = ANY($1) ORDER BY entity_id",
-        )
-        .bind(ids)
-        .fetch_all(&self.pool)
-        .await?;
+        // `ids` = `pid`s. Spawn entity lokal baru (indeks ephemeral, RFC-0034) +
+        // catat jembatan indeks↔pid.
+        let rows = sqlx::query("SELECT pid FROM arke_entities WHERE pid = ANY($1) ORDER BY pid")
+            .bind(ids)
+            .fetch_all(&self.pool)
+            .await?;
         let mut by_id: HashMap<i64, Entity> = HashMap::with_capacity(rows.len());
         let mut entities: Vec<Entity> = Vec::with_capacity(rows.len());
         for row in rows {
-            let id: i64 = row.try_get("entity_id")?;
-            let generation: i64 = row.try_get("generation")?;
-            let entity = world.spawn_at(id as u32, generation as u32);
-            by_id.insert(id, entity);
+            let pid: i64 = row.try_get("pid")?;
+            let entity = world.spawn();
+            by_id.insert(pid, entity);
             entities.push(entity);
+            self.pid_of.insert(entity.index(), pid);
+            self.entity_of.insert(pid, entity);
         }
 
         for r in &self.registered {
@@ -591,13 +604,13 @@ impl PgStore {
             if miss_ids.is_empty() {
                 continue;
             }
-            let rows = sqlx::query(&select_sql(r, Some("entity_id = ANY($1)")))
+            let rows = sqlx::query(&select_sql(r, Some("pid = ANY($1)")))
                 .bind(&miss_ids)
                 .fetch_all(&self.pool)
                 .await?;
             let mut to_cache: Vec<(i64, Vec<u8>)> = Vec::new();
             for row in rows {
-                let id: i64 = row.try_get("entity_id")?;
+                let id: i64 = row.try_get("pid")?;
                 let mut values = Vec::with_capacity(r.columns.len());
                 for col in r.columns {
                     values.push(read_value(&row, col)?);
@@ -631,16 +644,17 @@ impl PgStore {
         Ok(entities)
     }
 
-    /// Versi optimistic-lock `entity` di DB, atau `None` bila entity tak ada
-    /// (identitas dicek lewat `generation`, STD-0007).
+    /// Versi optimistic-lock `entity` di DB, atau `None` bila entity tak ada.
+    /// Identitas ke-`pid` diselesaikan via jembatan `pid_of` (RFC-0034); indeks
+    /// World bersifat ephemeral sehingga identitas persisten = `pid`.
     pub async fn entity_version(&self, entity: Entity) -> Result<Option<i64>, sqlx::Error> {
-        let row = sqlx::query(
-            "SELECT version FROM arke_entities WHERE entity_id = $1 AND generation = $2",
-        )
-        .bind(i64::from(entity.index()))
-        .bind(i64::from(entity.generation()))
-        .fetch_optional(&self.pool)
-        .await?;
+        let Some(&pid) = self.pid_of.get(&entity.index()) else {
+            return Ok(None);
+        };
+        let row = sqlx::query("SELECT version FROM arke_entities WHERE pid = $1")
+            .bind(pid)
+            .fetch_optional(&self.pool)
+            .await?;
         match row {
             Some(row) => Ok(Some(row.try_get("version")?)),
             None => Ok(None),
@@ -649,10 +663,11 @@ impl PgStore {
 
     /// **Tulis-balik ber-optimistic-lock**: memperbarui baris `entity` (versi
     /// naik) beserta komponennya dari `world`, **hanya bila** versi DB masih
-    /// `expected_version` dan identitas (`generation`) cocok (RFC-0021 §5).
+    /// `expected_version` (RFC-0021 §5). Identitas ke-`pid` via `pid_of`
+    /// (RFC-0034): indeks World ephemeral → gerbang cukup pada versi.
     ///
     /// Mengembalikan versi baru bila sukses, atau [`UpdateError::Conflict`] bila
-    /// writer lain telah mengubah entity ini (versi/identitas tak cocok).
+    /// writer lain telah mengubah entity ini (versi tak cocok / entity tak ada).
     /// Transaksional: pada konflik, tak ada perubahan.
     pub async fn update_entity(
         &self,
@@ -660,17 +675,18 @@ impl PgStore {
         entity: Entity,
         expected_version: i64,
     ) -> Result<i64, UpdateError> {
-        let id = i64::from(entity.index());
+        let Some(&pid) = self.pid_of.get(&entity.index()) else {
+            return Err(UpdateError::Conflict);
+        };
         let mut tx = self.pool.begin().await.map_err(UpdateError::Db)?;
 
-        // Gerbang: naikkan versi hanya bila versi & identitas cocok.
+        // Gerbang: naikkan versi hanya bila versi cocok.
         let new_version: Option<i64> = sqlx::query_scalar(
             "UPDATE arke_entities SET version = version + 1 \
-             WHERE entity_id = $1 AND generation = $2 AND version = $3 \
+             WHERE pid = $1 AND version = $2 \
              RETURNING version",
         )
-        .bind(id)
-        .bind(i64::from(entity.generation()))
+        .bind(pid)
         .bind(expected_version)
         .fetch_optional(&mut *tx)
         .await
@@ -683,14 +699,14 @@ impl PgStore {
 
         // Ganti komponen entity ini dengan keadaan `world` saat ini.
         for r in &self.registered {
-            sqlx::query(&format!("DELETE FROM {} WHERE entity_id = $1", r.table))
-                .bind(id)
+            sqlx::query(&format!("DELETE FROM {} WHERE pid = $1", r.table))
+                .bind(pid)
                 .execute(&mut *tx)
                 .await
                 .map_err(UpdateError::Db)?;
             if let Some(params) = (r.dump_one)(world, entity) {
                 let insert = insert_sql(r);
-                let mut q = sqlx::query(&insert).bind(id);
+                let mut q = sqlx::query(&insert).bind(pid);
                 for (value, col) in params.iter().zip(r.columns) {
                     q = bind_value(q, col.ty, value);
                 }
@@ -702,7 +718,7 @@ impl PgStore {
         // Invalidate cache untuk entity ini di tiap tabel (RFC-0033).
         if let Some(c) = &self.cache {
             for r in &self.registered {
-                c.invalidate(r.table, &[id]).await;
+                c.invalidate(r.table, &[pid]).await;
             }
         }
         Ok(new_version)
@@ -779,44 +795,59 @@ impl PgStore {
             deleted: 0,
         };
         // Entity yang tersentuh (dihapus/berubah) → invalidate cache (RFC-0033).
+        // Kunci diff internal = **indeks** World (ephemeral, stabil dalam-sesi);
+        // identitas DB = `pid` diselesaikan via `pid_of` (RFC-0034).
         let mut affected: Vec<i64> = Vec::new();
 
         // Hilang → DELETE (cascade ke tabel komponen).
-        for id in &staged.deletes {
-            sqlx::query("DELETE FROM arke_entities WHERE entity_id = $1")
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
-            affected.push(*id);
-            stats.deleted += 1;
+        for index in &staged.deletes {
+            if let Some(pid) = self.pid_of.remove(&(*index as u32)) {
+                sqlx::query("DELETE FROM arke_entities WHERE pid = $1")
+                    .bind(pid)
+                    .execute(&mut *tx)
+                    .await?;
+                self.entity_of.remove(&pid);
+                affected.push(pid);
+                stats.deleted += 1;
+            }
         }
 
-        // Baru/berubah → UPSERT (versi naik) + ganti baris komponen.
-        for (id, state) in &staged.upserts {
-            sqlx::query(
-                "INSERT INTO arke_entities (entity_id, generation, version) VALUES ($1, $2, 0) \
-                 ON CONFLICT (entity_id) \
-                 DO UPDATE SET generation = EXCLUDED.generation, version = arke_entities.version + 1",
-            )
-            .bind(*id)
-            .bind(state.0)
-            .execute(&mut *tx)
-            .await?;
+        // Baru/berubah → alokasi `pid` untuk entity baru, UPSERT (versi naik) +
+        // ganti baris komponen.
+        for (index, state) in &staged.upserts {
+            let pid = match self.pid_of.get(&(*index as u32)) {
+                Some(&pid) => {
+                    sqlx::query("UPDATE arke_entities SET version = version + 1 WHERE pid = $1")
+                        .bind(pid)
+                        .execute(&mut *tx)
+                        .await?;
+                    pid
+                }
+                None => {
+                    let pid: i64 = sqlx::query_scalar(
+                        "INSERT INTO arke_entities (version) VALUES (0) RETURNING pid",
+                    )
+                    .fetch_one(&mut *tx)
+                    .await?;
+                    self.pid_of.insert(*index as u32, pid);
+                    pid
+                }
+            };
             for (ci, r) in self.registered.iter().enumerate() {
-                sqlx::query(&format!("DELETE FROM {} WHERE entity_id = $1", r.table))
-                    .bind(id)
+                sqlx::query(&format!("DELETE FROM {} WHERE pid = $1", r.table))
+                    .bind(pid)
                     .execute(&mut *tx)
                     .await?;
                 if let Some(params) = &state.1[ci] {
                     let insert = insert_sql(r);
-                    let mut q = sqlx::query(&insert).bind(*id);
+                    let mut q = sqlx::query(&insert).bind(pid);
                     for (value, col) in params.iter().zip(r.columns) {
                         q = bind_value(q, col.ty, value);
                     }
                     q.execute(&mut *tx).await?;
                 }
             }
-            affected.push(*id);
+            affected.push(pid);
             stats.written += 1;
         }
 
@@ -892,7 +923,7 @@ fn read_as_text(ty: PgType) -> bool {
     matches!(ty, PgType::Jsonb | PgType::Numeric)
 }
 
-/// `INSERT INTO cmp_x (entity_id, c1, c2::jsonb, …) VALUES ($1, $2, $3::jsonb, …)`.
+/// `INSERT INTO cmp_x (pid, c1, c2::jsonb, …) VALUES ($1, $2, $3::jsonb, …)`.
 fn insert_sql(r: &Registered) -> String {
     let mut cols = String::from("pid");
     let mut placeholders = String::from("$1");
@@ -907,7 +938,7 @@ fn insert_sql(r: &Registered) -> String {
     )
 }
 
-/// `SELECT entity_id, c1, c2::text AS c2, … FROM cmp_x [WHERE <filter>] ORDER BY entity_id`.
+/// `SELECT pid, c1, c2::text AS c2, … FROM cmp_x [WHERE <filter>] ORDER BY pid`.
 ///
 /// Kolom `JSONB`/`NUMERIC` dibaca sebagai teks (`::text`).
 fn select_sql(r: &Registered, filter: Option<&str>) -> String {

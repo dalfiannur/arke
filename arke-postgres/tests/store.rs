@@ -113,18 +113,31 @@ async fn pgstore_save_load_round_trip_dan_overwrite() {
 
     store.save(&world).await.unwrap();
 
-    // Muat ke World segar → handle identik + komponen setia.
+    // Muat ke World segar. RFC-0034: indeks World ephemeral → handle sisi-simpan
+    // (e1/e2) TAK lestari lintas `load`; kumpulkan handle world MUAT lalu
+    // identifikasi tiap entity lewat komponennya (e1 ber-Label, e2 tidak).
+    let _ = (e1, e2);
     let mut loaded = World::new();
     store.load(&mut loaded).await.unwrap();
+    assert_eq!(entity_count(&mut loaded), 2);
 
-    assert!(loaded.contains(e1));
-    assert!(loaded.contains(e2));
+    let mut handles = Vec::new();
+    <Entity>::each(&mut loaded, |e| handles.push(e));
+    let hero = *handles
+        .iter()
+        .find(|&&e| loaded.get::<Label>(e).is_some())
+        .expect("entity ber-Label (eks-e1)");
+    let other = *handles
+        .iter()
+        .find(|&&e| loaded.get::<Label>(e).is_none())
+        .expect("entity tanpa Label (eks-e2)");
+
     assert_eq!(
-        loaded.get::<Position>(e1),
+        loaded.get::<Position>(hero),
         Some(&Position { x: 1.0, y: 2.0 })
     );
     assert_eq!(
-        loaded.get::<Label>(e1),
+        loaded.get::<Label>(hero),
         Some(&Label {
             name: "hero".to_string(),
             level: 3,
@@ -133,20 +146,20 @@ async fn pgstore_save_load_round_trip_dan_overwrite() {
         })
     );
     assert_eq!(
-        loaded.get::<Position>(e2),
+        loaded.get::<Position>(other),
         Some(&Position { x: -5.0, y: 0.5 })
     );
-    assert_eq!(loaded.get::<Label>(e2), None);
+    assert_eq!(loaded.get::<Label>(other), None);
     // Option: Some round-trip, None → NULL → None.
     assert_eq!(
-        loaded.get::<Target>(e1),
+        loaded.get::<Target>(hero),
         Some(&Target {
             id: Some(7),
             note: Some("locked".to_string()),
         })
     );
     assert_eq!(
-        loaded.get::<Target>(e2),
+        loaded.get::<Target>(other),
         Some(&Target {
             id: None,
             note: None
@@ -154,7 +167,7 @@ async fn pgstore_save_load_round_trip_dan_overwrite() {
     );
     // JSONB: nested struct round-trip + Option nested (Some & None → NULL).
     assert_eq!(
-        loaded.get::<Path>(e1),
+        loaded.get::<Path>(hero),
         Some(&Path {
             kind: "patrol".to_string(),
             home: Waypoint { x: 1, y: 1 },
@@ -162,7 +175,7 @@ async fn pgstore_save_load_round_trip_dan_overwrite() {
         })
     );
     assert_eq!(
-        loaded.get::<Path>(e2),
+        loaded.get::<Path>(other),
         Some(&Path {
             kind: "idle".to_string(),
             home: Waypoint { x: 0, y: 0 },
@@ -179,8 +192,10 @@ async fn pgstore_save_load_round_trip_dan_overwrite() {
     let mut reloaded = World::new();
     store.load(&mut reloaded).await.unwrap();
     assert_eq!(entity_count(&mut reloaded), 1);
+    let mut rh = Vec::new();
+    <Entity>::each(&mut reloaded, |e| rh.push(e));
     assert_eq!(
-        reloaded.get::<Position>(only),
+        reloaded.get::<Position>(rh[0]),
         Some(&Position { x: 99.0, y: 99.0 })
     );
 }

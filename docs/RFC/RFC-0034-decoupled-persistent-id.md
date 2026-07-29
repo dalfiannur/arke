@@ -144,6 +144,29 @@ di-resolve store) dan `query.rs` (predikat relasi by `pid`). Tes `relations.rs`/
 `query_builder.rs`/`constraints.rs` harus hijau. Ini pekerjaan terfokus tersendiri;
 jalur per-op (nilai inti RFC) sudah terimplementasi & terverifikasi.
 
+## Amandemen 2 — Relasi ditunda dari 0.12.0 (2026-07-29, ditemukan saat implementasi)
+
+Temuan lebih dalam dari Amandemen 1: resolusi kolom relasi **saat-save** (index→`pid`)
+belum cukup. Model relasi RFC-0031/0032 juga bergantung pada **preservasi handle lintas
+`load`** — `load` lama memakai `spawn_at(index, generation)` sehingga handle yang
+disimpan sebelum `load` (mis. `b_weak`) tetap valid setelahnya, dan handle basi ditolak
+lewat gerbang `generation`. Di bawah `pid`, `load` `spawn()` entity dengan indeks
+**baru** (ephemeral) dan `generation` persisten dihapus → kedua andalan itu runtuh.
+Kolom `_id`/`_gen` hasil derive pun masih menyimpan indeks World + generation.
+
+**Keputusan:** **tunda relasi** dari rilis 0.12.0. Rekey `pid` **non-relasi** dituntaskan
+dan dikapalkan (whole-world `save`/`load`/`save_incremental`/`materialize`/`update_entity`
++ query builder non-relasi + constraints, semua hijau vs Postgres). Tes yang bergantung
+relasi/preservasi-handle (`relations`, `nested`, `recursive`, `typed_relations`, unit
+`matches_bersarang_3_deep`) ditandai `#[ignore]` dengan alasan terdokumentasi; contoh
+`persist.rs` ditulis-ulang agar tak mengandalkan preservasi handle (verifikasi via isi
+world muat). `arke-postgres-derive` & `query.rs` (jalur relasi) **belum** diubah.
+
+**Tindak lanjut (opsi 1, sesi berikutnya):** desain ulang relasi **berbasis `pid`** —
+kolom `EntityRef` menyimpan `pid` yang dirujuk (bukan indeks/generation), join by `pid`,
+`PgValue::Ref`, perubahan derive + `query.rs`, penulisan-ulang tes relasi. Akan menjadi
+RFC tersendiri atau Amandemen 3.
+
 ## Keputusan
 
 **Diterima (Accepted), 2026-07-29.** Memisahkan `pid` (persisten, dialokasikan DB via `BIGSERIAL`) dari indeks `World` (ephemeral). `arke-postgres` memelihara peta `pid ↔ Entity` per working-set; seluruh API persist di-rekey ke `pid`; `generation` persisten dihapus; cache (RFC-0033) di-key oleh `pid`. Breaking → `arke-postgres 0.12.0`. Mengamandemen kontrak RFC-0021 (kunci persisten `entity_id` → `pid`) tanpa membuang model working-set. Implementasi mengikuti pola dua-fase (`stage`/`commit`) yang sudah ada, di-rekey ke `pid`.

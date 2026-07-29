@@ -80,11 +80,12 @@ async fn save_incremental_hanya_menulis_yang_berubah() {
         }
     );
 
-    // Muat: 2 entity tersisa, nilai ids[1] termutasi.
+    // Muat: 2 entity tersisa; mutasi (x=1→99) bertahan, yang di-despawn (x=2)
+    // hilang. RFC-0034: handle sisi-simpan tak lestari → verifikasi lewat isi.
     let mut loaded = World::new();
     store.load(&mut loaded).await.unwrap();
     assert_eq!(entity_count(&mut loaded), 2);
-    assert_eq!(loaded.get::<Pos>(ids[0]), Some(&Pos { x: 0 }));
-    assert_eq!(loaded.get::<Pos>(ids[1]), Some(&Pos { x: 99 }));
-    assert!(!loaded.contains(ids[2]));
+    let mut xs: Vec<i32> = loaded.query::<Pos>().map(|p| p.x).collect();
+    xs.sort();
+    assert_eq!(xs, vec![0, 99]);
 }

@@ -47,20 +47,14 @@ async fn numeric_round_trip_termasuk_di_atas_i64_max() {
     let mut loaded = World::new();
     store.load(&mut loaded).await.unwrap();
 
-    assert_eq!(
-        loaded.get::<Wallet>(e1),
-        Some(&Wallet {
-            coins: big,
-            slot: 42,
-            debt: Some(1_000),
-        })
-    );
-    assert_eq!(
-        loaded.get::<Wallet>(e2),
-        Some(&Wallet {
-            coins: 0,
-            slot: 0,
-            debt: None,
-        })
-    );
+    // RFC-0034: indeks World ephemeral → handle sisi-simpan (e1/e2) tak lestari;
+    // verifikasi round-trip NUMERIC lewat himpunan isi world muat.
+    let mut got: Vec<(u64, usize, Option<u64>)> = loaded
+        .query::<Wallet>()
+        .map(|w| (w.coins, w.slot, w.debt))
+        .collect();
+    got.sort();
+    let mut want = vec![(big, 42usize, Some(1_000u64)), (0, 0, None)];
+    want.sort();
+    assert_eq!(got, want);
 }
