@@ -1,8 +1,8 @@
 # RFC-0034: `arke-postgres` — identitas persisten (`pid`) yang decoupled dari indeks World
 
-- **Status:** Draft <!-- Draft | Discussion | Accepted | Rejected | Superseded by RFC-XXXX -->
+- **Status:** Accepted <!-- Draft | Discussion | Accepted | Rejected | Superseded by RFC-XXXX -->
 - **Tanggal:** 2026-07-29
-- **Milestone:** M-? (Per-op stateless store untuk web/async)
+- **Milestone:** M-34 (Identitas persisten decoupled — per-op stateless store untuk web/async)
 - **RFC terkait:** [RFC-0021](./RFC-0021-arke-postgres-adapter.md) (adapter Postgres), [RFC-0002](./RFC-0002-core-storage-architecture.md) (storage inti), [RFC-0033](./RFC-0033-component-cache.md) (cache)
 
 ## Ringkasan
@@ -107,14 +107,14 @@ Model global World (RFC-0021) **tetap** didukung: `load` memuat semua entity ke 
 - **Konsumen (mis. backend-rs):** `Store` jadi thin wrapper per-op (`create`/`get`/`query`/`update`/`delete` by `pid`), stateless & multi-replica-safe. Menghapus kebutuhan World global.
 - **`stage`/`commit` & `stage_incremental`/`commit_incremental`** yang sudah ada di-*rework* ke keying `pid`.
 
-## Pertanyaan terbuka
+## Pertanyaan terbuka (terjawab saat penerimaan)
 
-1. **Pertahankan API berbasis-indeks lama** (deprecated) vs hapus bersih di rilis mayor?
-2. **Bentuk `query_pids`** — kembalikan `(pid, Entity)` vs sisipkan `pid` sbg komponen internal agar mapper pengguna bisa membacanya.
-3. **`generation`** — masih perlu? (identitas = `pid`; generation mungkin usang).
-4. **Strategi migrasi data lama** (in-place `entity_id`→`pid` vs tabel baru).
-5. **Keying cache** by `pid` — perubahan di RFC-0033.
+1. **API berbasis-indeks lama.** → **Rekey bersih.** `save`/`load`/`save_incremental` di-*rekey* internal ke `pid` (indeks World ephemeral di mana-mana); **tanpa** API-indeks lama paralel. Pre-1.0 + konsumen tunggal (co-dev) → boleh breaking. Bump **`0.12.0`**.
+2. **Bentuk `query_pids`.** → **Kembalikan `(pid, Entity)`** (eksplisit, tak mengotori ruang komponen). `PgStore` juga mengekspos `pid` untuk Entity yang dimuat (via peta).
+3. **`generation`.** → **Dihapus dari skema persisten.** Identitas = `pid` (`BIGSERIAL`, tak pernah dipakai-ulang); `version` untuk optimistic-lock. Generation in-memory `arke` core **tak berubah**.
+4. **Migrasi data lama.** → **Greenfield sekarang** (belum ada data produksi → drop/recreate). Jalur migrasi in-place didokumentasikan: `entity_id` → `pid` (nilai identik), `setval` sequence di atas `MAX(entity_id)` — untuk data nyata kelak.
+5. **Keying cache.** → **Cache di-key oleh `pid`** (mengamandemen RFC-0033).
 
 ## Keputusan
 
-*(menunggu review — Draft.)*
+**Diterima (Accepted), 2026-07-29.** Memisahkan `pid` (persisten, dialokasikan DB via `BIGSERIAL`) dari indeks `World` (ephemeral). `arke-postgres` memelihara peta `pid ↔ Entity` per working-set; seluruh API persist di-rekey ke `pid`; `generation` persisten dihapus; cache (RFC-0033) di-key oleh `pid`. Breaking → `arke-postgres 0.12.0`. Mengamandemen kontrak RFC-0021 (kunci persisten `entity_id` → `pid`) tanpa membuang model working-set. Implementasi mengikuti pola dua-fase (`stage`/`commit`) yang sudah ada, di-rekey ke `pid`.
