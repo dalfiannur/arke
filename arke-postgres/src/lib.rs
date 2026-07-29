@@ -72,7 +72,9 @@ impl<T> From<arke::Entity> for Ref<T> {
 }
 
 mod store;
-pub use store::{PgStore, StagedIncremental, StagedSave, SyncStats, UpdateError};
+pub use store::{
+    PgStore, StagedIncremental, StagedInsert, StagedSave, StagedUpdate, SyncStats, UpdateError,
+};
 
 pub mod cache;
 pub use cache::ComponentCache;
@@ -209,7 +211,7 @@ pub fn create_table_sql<T: PgComponent>() -> String {
 /// mis. oleh `PgStore` yang menyimpan skema type-erased).
 pub fn create_table_sql_from(table: &str, columns: &[ColumnDef]) -> String {
     let mut cols = String::from(
-        "entity_id BIGINT PRIMARY KEY REFERENCES arke_entities(entity_id) ON DELETE CASCADE",
+        "pid BIGINT PRIMARY KEY REFERENCES arke_entities(pid) ON DELETE CASCADE",
     );
     for col in columns {
         cols.push_str(", ");

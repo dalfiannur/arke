@@ -82,6 +82,18 @@ pub struct StagedIncremental {
     next_state: HashMap<i64, EntityState>,
 }
 
+/// Komponen owned satu entity, siap di-`commit_insert` (RFC-0034). Tak memegang
+/// `&World` → future commit `Send` tanpa `World: Sync`.
+pub struct StagedInsert {
+    rows: Vec<(usize, Vec<PgValue>)>, // (index registered, params)
+}
+
+/// Komponen owned satu entity untuk `commit_update` (RFC-0034). `None` = komponen
+/// tak ada pada entity (baris komponen itu dihapus).
+pub struct StagedUpdate {
+    rows: Vec<(usize, Option<Vec<PgValue>>)>,
+}
+
 /// Penyimpan Postgres untuk keadaan ECS (RFC-0021).
 ///
 /// Daftarkan tiap tipe komponen via [`Self::register`], `migrate`, lalu
@@ -143,16 +155,11 @@ impl PgStore {
     ///   — **non-destruktif**: data lama tetap, `INSERT` baru yang tak mengisinya
     ///   jadi valid. (Drop kolom sepenuhnya diserahkan ke migrasi manual.)
     pub async fn migrate(&self) -> Result<(), sqlx::Error> {
+        // RFC-0034: `pid` (BIGSERIAL, dialokasikan DB) = identitas persisten;
+        // indeks World ephemeral (tak disimpan). `generation` dihapus dari skema.
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS arke_entities \
-             (entity_id BIGINT PRIMARY KEY, generation BIGINT NOT NULL, \
-              version BIGINT NOT NULL DEFAULT 0)",
-        )
-        .execute(&self.pool)
-        .await?;
-        // Tabel lama tanpa kolom `version` → tambahkan (optimistic-lock).
-        sqlx::query(
-            "ALTER TABLE arke_entities ADD COLUMN IF NOT EXISTS version BIGINT NOT NULL DEFAULT 0",
+             (pid BIGSERIAL PRIMARY KEY, version BIGINT NOT NULL DEFAULT 0)",
         )
         .execute(&self.pool)
         .await?;
@@ -160,6 +167,146 @@ impl PgStore {
             self.reconcile_table(r).await?;
         }
         Ok(())
+    }
+
+    // ── API per-operasi berbasis `pid` (RFC-0034) ──────────────────────────────
+    // `pid` (BIGSERIAL) = identitas persisten; indeks World ephemeral & lokal.
+    // Write reads the entity's components sync (dump_one) before any `.await`, so
+    // `&World` is not held across await → future `Send` tanpa `World: Sync`.
+
+    /// **Fase 1 (sync)**: kumpulkan komponen `entity` jadi owned [`StagedInsert`]
+    /// (tanpa await, tak menahan `&World`).
+    pub fn stage_insert(&self, world: &World, entity: Entity) -> StagedInsert {
+        let rows = self
+            .registered
+            .iter()
+            .enumerate()
+            .filter_map(|(ci, r)| (r.dump_one)(world, entity).map(|p| (ci, p)))
+            .collect();
+        StagedInsert { rows }
+    }
+
+    /// **Fase 2 (async)**: alokasi `pid` + tulis [`StagedInsert`]. Tak menyentuh World.
+    pub async fn commit_insert(&self, staged: StagedInsert) -> Result<i64, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        let pid: i64 =
+            sqlx::query_scalar("INSERT INTO arke_entities (version) VALUES (0) RETURNING pid")
+                .fetch_one(&mut *tx)
+                .await?;
+        for (ci, params) in &staged.rows {
+            let r = &self.registered[*ci];
+            let insert = insert_sql(r);
+            let mut q = sqlx::query(&insert).bind(pid);
+            for (v, col) in params.iter().zip(r.columns) {
+                q = bind_value(q, col.ty, v);
+            }
+            q.execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        Ok(pid)
+    }
+
+    /// Muat komponen `pid` ke `world` sebagai entity lokal baru; kembalikan handle
+    /// (atau `None` bila `pid` tak ada).
+    pub async fn fetch(
+        &self,
+        world: &mut World,
+        pid: i64,
+    ) -> Result<Option<Entity>, sqlx::Error> {
+        let exists: Option<i64> =
+            sqlx::query_scalar("SELECT pid FROM arke_entities WHERE pid = $1")
+                .bind(pid)
+                .fetch_optional(&self.pool)
+                .await?;
+        if exists.is_none() {
+            return Ok(None);
+        }
+        let entity = world.spawn();
+        for r in &self.registered {
+            let row = sqlx::query(&select_sql(r, Some("pid = $1")))
+                .bind(pid)
+                .fetch_optional(&self.pool)
+                .await?;
+            if let Some(row) = row {
+                let mut values = Vec::with_capacity(r.columns.len());
+                for col in r.columns {
+                    values.push(read_value(&row, col)?);
+                }
+                (r.apply)(world, entity, &values);
+            }
+        }
+        Ok(Some(entity))
+    }
+
+    /// **Fase 1 (sync)**: kumpulkan komponen `entity` jadi owned [`StagedUpdate`].
+    pub fn stage_update(&self, world: &World, entity: Entity) -> StagedUpdate {
+        let rows = self
+            .registered
+            .iter()
+            .enumerate()
+            .map(|(ci, r)| (ci, (r.dump_one)(world, entity)))
+            .collect();
+        StagedUpdate { rows }
+    }
+
+    /// **Fase 2 (async)**: tulis-ulang komponen `pid` (versi naik) dari [`StagedUpdate`].
+    pub async fn commit_update(&self, pid: i64, staged: StagedUpdate) -> Result<(), sqlx::Error> {
+        let rows = &staged.rows;
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("UPDATE arke_entities SET version = version + 1 WHERE pid = $1")
+            .bind(pid)
+            .execute(&mut *tx)
+            .await?;
+        for (ci, params) in rows {
+            let r = &self.registered[*ci];
+            sqlx::query(&format!("DELETE FROM {} WHERE pid = $1", r.table))
+                .bind(pid)
+                .execute(&mut *tx)
+                .await?;
+            if let Some(params) = params {
+                let insert = insert_sql(r);
+                let mut q = sqlx::query(&insert).bind(pid);
+                for (v, col) in params.iter().zip(r.columns) {
+                    q = bind_value(q, col.ty, v);
+                }
+                q.execute(&mut *tx).await?;
+            }
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Hapus `pid` (cascade ke tabel komponen).
+    pub async fn remove(&self, pid: i64) -> Result<(), sqlx::Error> {
+        sqlx::query("DELETE FROM arke_entities WHERE pid = $1")
+            .bind(pid)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Muat entity yang cocok `predicate` (fragmen `WHERE` atas tabel `T`) ke
+    /// `world`; kembalikan pasangan `(pid, Entity)`. `predicate` = SQL tepercaya.
+    pub async fn query_pids<T: PgComponent>(
+        &self,
+        world: &mut World,
+        predicate: Option<&str>,
+    ) -> Result<Vec<(i64, Entity)>, sqlx::Error> {
+        let where_c = predicate.map(|p| format!(" WHERE {p}")).unwrap_or_default();
+        let sql = format!("SELECT pid FROM {}{} ORDER BY pid", T::TABLE, where_c);
+        let pids: Vec<i64> = sqlx::query(&sql)
+            .fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(|r| r.try_get("pid"))
+            .collect::<Result<_, _>>()?;
+        let mut out = Vec::with_capacity(pids.len());
+        for pid in pids {
+            if let Some(e) = self.fetch(world, pid).await? {
+                out.push((pid, e));
+            }
+        }
+        Ok(out)
     }
 
     /// Membuat tabel komponen bila belum ada, lalu menyelaraskan kolomnya dengan
@@ -192,7 +339,7 @@ impl PgStore {
         let existing = sqlx::query(
             "SELECT column_name FROM information_schema.columns \
              WHERE table_schema = current_schema() AND table_name = $1 \
-             AND column_name <> 'entity_id'",
+             AND column_name <> 'pid'",
         )
         .bind(r.table)
         .fetch_all(&self.pool)
@@ -747,7 +894,7 @@ fn read_as_text(ty: PgType) -> bool {
 
 /// `INSERT INTO cmp_x (entity_id, c1, c2::jsonb, …) VALUES ($1, $2, $3::jsonb, …)`.
 fn insert_sql(r: &Registered) -> String {
-    let mut cols = String::from("entity_id");
+    let mut cols = String::from("pid");
     let mut placeholders = String::from("$1");
     for (i, col) in r.columns.iter().enumerate() {
         cols.push_str(", ");
@@ -764,7 +911,7 @@ fn insert_sql(r: &Registered) -> String {
 ///
 /// Kolom `JSONB`/`NUMERIC` dibaca sebagai teks (`::text`).
 fn select_sql(r: &Registered, filter: Option<&str>) -> String {
-    let mut cols = String::from("entity_id");
+    let mut cols = String::from("pid");
     for col in r.columns {
         cols.push_str(", ");
         if read_as_text(col.ty) {
@@ -778,7 +925,7 @@ fn select_sql(r: &Registered, filter: Option<&str>) -> String {
         None => String::new(),
     };
     format!(
-        "SELECT {} FROM {}{} ORDER BY entity_id",
+        "SELECT {} FROM {}{} ORDER BY pid",
         cols, r.table, where_clause
     )
 }
