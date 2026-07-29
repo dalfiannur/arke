@@ -297,37 +297,39 @@ fn column_def(name: &str, pg_type: &str, nullable: bool) -> String {
     )
 }
 
+/// `ColumnDef` kolom **relasi entity** (RFC-0034 Am.3): `BIGINT` menyimpan `pid`
+/// yang dirujuk, `entity_ref: true`, tanpa FK.
+fn column_def_ref(name: &str, nullable: bool) -> String {
+    format!(
+        "::arke_postgres::ColumnDef {{ name: {name:?}, ty: ::arke_postgres::PgType::BigInt, nullable: {nullable}, references: ::core::option::Option::None, entity_ref: true }}, "
+    )
+}
+
 /// Hasilkan fragmen untuk satu field: skalar, `Option<skalar>`, atau — untuk
 /// tipe non-skalar — kolom `JSONB` via `arke::Serialize` (fallback, RFC-0021 §2).
 fn field_sql(f: &Field, idx: usize) -> Result<FieldSql, String> {
     let name = &f.name;
 
-    // Relasi `Entity`/`Ref<T>` (+ `Option<…>`) → dua kolom `<name>_id` + `<name>_gen`
-    // (RFC-0031/0032). Simpan (index, generation); handle basi ditolak saat dipakai
-    // (`World::get`, STD-0007). `Ref<T>` = relasi bertipe (token `RelRef<T>`).
+    // Relasi `Entity`/`Ref<T>` (+ `Option<…>`) → SATU kolom `<name>_id` menyimpan
+    // **pid** entity yang dirujuk (RFC-0034 Am.3; kolom `_gen` dihapus). TANPA FK
+    // (marker `entity_ref`): integritas by-construction; ref menggantung → NULL saat
+    // baca. `PgValue::Ref(index)` di-map store: index↔pid di batas DB. `from_params`
+    // murni — world hasil-muat selalu segar (`generation == 0`). `Ref<T>` = relasi
+    // bertipe (token `RelRef<T>`).
     if is_entity_ty(&f.ty) || ref_target(&f.ty).is_some() {
         let nullable = f.ty.starts_with("Option<");
         let is_ref = ref_target(&f.ty).is_some();
-        // Kolom relasi = BIGINT polos (TANPA FK). Blocking-FK tak kompatibel dgn
-        // reconcile-clear (`DELETE FROM arke_entities`); cascade/set-null salah
-        // semantik ECS. Integritas by-construction (save tulis arke_entities dulu)
-        // + keamanan-basi lewat generation saat baca (RFC-0031).
-        let column = format!(
-            "{}{}",
-            column_def(&format!("{name}_id"), "BigInt", nullable),
-            column_def(&format!("{name}_gen"), "BigInt", nullable),
-        );
-        let idg = idx + 1;
+        let column = column_def_ref(&format!("{name}_id"), nullable);
         // Akses `Entity` dari nilai terikat `e` (`&Ref<T>` → `.entity()`; `&Entity` apa
-        // adanya) & dari field `self.name`. Rekonstruksi: `Entity` mentah → bungkus
-        // `Ref::new` bila relasi bertipe (RFC-0032).
+        // adanya) & dari field `self.name`. Rekonstruksi: `Entity` lokal (gen 0) →
+        // bungkus `Ref::new` bila relasi bertipe (RFC-0032).
         let acc_e = if is_ref { "e.entity()" } else { "e" };
         let acc_self = if is_ref {
             format!("self.{name}.entity()")
         } else {
             format!("self.{name}")
         };
-        let ent = "::arke::Entity::from_raw(*i as u32, *g as u32)";
+        let ent = "::arke::Entity::from_raw(*i as u32, 0)";
         let mk = if is_ref {
             format!("::arke_postgres::Ref::new({ent})")
         } else {
@@ -336,24 +338,21 @@ fn field_sql(f: &Field, idx: usize) -> Result<FieldSql, String> {
         let (to_param, from_field) = if nullable {
             (
                 format!(
-                    "match &self.{name} {{ ::core::option::Option::Some(e) => ::arke_postgres::PgValue::Int({acc_e}.index() as i64), ::core::option::Option::None => ::arke_postgres::PgValue::Null }}, \
-                     match &self.{name} {{ ::core::option::Option::Some(e) => ::arke_postgres::PgValue::Int({acc_e}.generation() as i64), ::core::option::Option::None => ::arke_postgres::PgValue::Null }}, "
+                    "match &self.{name} {{ ::core::option::Option::Some(e) => ::arke_postgres::PgValue::Ref({acc_e}.index() as i64), ::core::option::Option::None => ::arke_postgres::PgValue::Null }}, "
                 ),
                 format!(
-                    "{name}: match (values.get({idx}), values.get({idg})) {{ \
-                        (::core::option::Option::Some(::arke_postgres::PgValue::Null), _) => ::core::option::Option::None, \
-                        (::core::option::Option::Some(::arke_postgres::PgValue::Int(i)), ::core::option::Option::Some(::arke_postgres::PgValue::Int(g))) => ::core::option::Option::Some({mk}), \
+                    "{name}: match values.get({idx}) {{ \
+                        ::core::option::Option::Some(::arke_postgres::PgValue::Null) => ::core::option::Option::None, \
+                        ::core::option::Option::Some(::arke_postgres::PgValue::Ref(i)) => ::core::option::Option::Some({mk}), \
                         _ => return ::core::option::Option::None }}, "
                 ),
             )
         } else {
             (
+                format!("::arke_postgres::PgValue::Ref({acc_self}.index() as i64), "),
                 format!(
-                    "::arke_postgres::PgValue::Int({acc_self}.index() as i64), ::arke_postgres::PgValue::Int({acc_self}.generation() as i64), "
-                ),
-                format!(
-                    "{name}: match (values.get({idx}), values.get({idg})) {{ \
-                        (::core::option::Option::Some(::arke_postgres::PgValue::Int(i)), ::core::option::Option::Some(::arke_postgres::PgValue::Int(g))) => {mk}, \
+                    "{name}: match values.get({idx}) {{ \
+                        ::core::option::Option::Some(::arke_postgres::PgValue::Ref(i)) => {mk}, \
                         _ => return ::core::option::Option::None }}, "
                 ),
             )
@@ -362,7 +361,7 @@ fn field_sql(f: &Field, idx: usize) -> Result<FieldSql, String> {
             column,
             to_param,
             from_field,
-            slots: 2,
+            slots: 1,
         });
     }
 
@@ -476,7 +475,8 @@ fn gen_impl(name: &str, fields: &[Field], checks: &[String]) -> Result<String, S
     let mut from_fields = String::new();
     let mut indexes = String::new();
 
-    // Indeks nilai/kolom **berjalan** (relasi Entity mengonsumsi 2 slot, RFC-0031).
+    // Indeks nilai/kolom **berjalan** (tiap field = 1 slot; relasi Entity kini
+    // 1 kolom `<name>_id` berisi pid, RFC-0034 Am.3).
     let mut val_idx = 0usize;
     for f in fields {
         let frag = field_sql(f, val_idx)?;

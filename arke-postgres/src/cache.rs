@@ -58,6 +58,12 @@ pub(crate) fn encode_row(row: &[PgValue]) -> Vec<u8> {
                 push_str(&mut out, s);
             }
             PgValue::Null => out.push(6),
+            // Relasi (RFC-0034 Am.3): cache menyimpan pid mentah (`Int`), jadi `Ref`
+            // umumnya tak sampai sini; tetap di-encode demi ekshaustif.
+            PgValue::Ref(i) => {
+                out.push(7);
+                out.extend_from_slice(&i.to_le_bytes());
+            }
         }
     }
     out
@@ -88,6 +94,7 @@ pub(crate) fn decode_row(bytes: &[u8]) -> Option<Vec<PgValue>> {
             4 => PgValue::Json(read_str(bytes, &mut p)?),
             5 => PgValue::Numeric(read_str(bytes, &mut p)?),
             6 => PgValue::Null,
+            7 => PgValue::Ref(i64::from_le_bytes(read_arr::<8>(bytes, &mut p)?)),
             _ => return None,
         });
     }

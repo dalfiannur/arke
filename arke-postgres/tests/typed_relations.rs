@@ -1,7 +1,7 @@
 //! Uji integrasi relasi BERTIPE `Ref<T>` + path builder `.through().load_all()`
 //! (RFC-0032 fase 2). Dilewati bila `DATABASE_URL` tak diset. Tabel unik.
 
-use arke::World;
+use arke::{Entity, QueryData, World};
 use arke_postgres::{PgComponent, PgStore, Ref};
 
 #[derive(PgComponent, PartialEq, Debug)]
@@ -17,8 +17,29 @@ struct Squad {
     leader: Ref<Unit>,
 }
 
+/// Untuk tiap Squad di `world`, telusuri rantai bertipe
+/// `Squad.leader(Unit) → Unit.weapon(Weapon).power` (resolusi **intra-world**,
+/// RFC-0034 Am.3). Terurut; rantai yang tak lengkap termuat dilewati.
+fn squad_powers(w: &mut World) -> Vec<i32> {
+    let mut hs = Vec::new();
+    <Entity>::each(w, |e| hs.push(e));
+    let squads: Vec<Entity> = hs
+        .into_iter()
+        .filter(|&e| w.get::<Squad>(e).is_some())
+        .collect();
+    let mut powers: Vec<i32> = squads
+        .iter()
+        .filter_map(|&s| {
+            let leader = w.get::<Squad>(s)?.leader.entity();
+            let weapon = w.get::<Unit>(leader)?.weapon.entity();
+            w.get::<Weapon>(weapon).map(|x| x.power)
+        })
+        .collect();
+    powers.sort();
+    powers
+}
+
 #[tokio::test]
-#[ignore = "relasi menanti desain ulang berbasis pid (RFC-0034 Amandemen 2 / opsi 1); kolom _id/_gen masih menyimpan indeks World ephemeral, tak kompatibel dengan skema pid 0.12.0"]
 async fn path_bertipe_3_deep_load_all() {
     let Ok(url) = std::env::var("DATABASE_URL") else {
         eprintln!("skip: DATABASE_URL tak diset");
@@ -68,13 +89,15 @@ async fn path_bertipe_3_deep_load_all() {
     );
     store.save(&world).await.unwrap();
 
-    // Round-trip Ref: leader bertahan.
+    // Round-trip: muat penuh → tiap rantai Squad→Unit→Weapon me-resolve intra-world.
+    // 2 squad → power {30, 90}.
     let mut w0 = World::new();
     store.load(&mut w0).await.unwrap();
-    assert_eq!(w0.get::<Squad>(s2).map(|s| s.leader), Some(Ref::new(u2)));
+    assert_eq!(squad_powers(&mut w0), vec![30, 90]);
 
     // Path type-safe: Squad→leader(Unit)→weapon(Weapon).power > 50 → hanya s2.
-    // load_all memuat Squad + Unit + Weapon sepanjang path cocok.
+    // load_all memuat Squad + Unit + Weapon sepanjang path cocok (terdalam-dulu →
+    // rantai me-resolve).
     let mut w = World::new();
     let n = store
         .query::<Squad>()
@@ -85,10 +108,11 @@ async fn path_bertipe_3_deep_load_all() {
         .await
         .unwrap();
     assert_eq!(n, 1);
-    assert!(w.contains(s2) && !w.contains(s1));
-    // Entity sepanjang path dimuat:
-    assert_eq!(w.get::<Unit>(u2).map(|u| u.weapon), Some(Ref::new(w2)));
-    assert_eq!(w.get::<Weapon>(w2).map(|x| x.power), Some(90));
-    // Di luar path tak dimuat:
-    assert!(w.get::<Unit>(u1).is_none() && w.get::<Weapon>(w1).is_none());
+    assert_eq!(w.query::<Squad>().count(), 1);
+    // Hanya rantai s2 termuat: 1 Unit, Weapon power {90}; s1/u1/w1 (power 30) tidak.
+    assert_eq!(w.query::<Unit>().count(), 1);
+    let weapons: Vec<i32> = w.query::<Weapon>().map(|x| x.power).collect();
+    assert_eq!(weapons, vec![90]);
+    // Rantai s2 me-resolve penuh ke power 90.
+    assert_eq!(squad_powers(&mut w), vec![90]);
 }

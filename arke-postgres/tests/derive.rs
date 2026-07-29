@@ -253,7 +253,8 @@ fn create_table_sql_benar() {
     );
 }
 
-// RFC-0032: field Ref<T> → 2 kolom (_id/_gen) + token relasi BERTIPE RelRef<T>.
+// RFC-0034 Am.3: field Ref<T> → SATU kolom `<name>_id` (pid, `entity_ref`) + token
+// relasi BERTIPE RelRef<T>. `_gen` dihapus; generasi tak lagi disimpan.
 #[derive(PgComponent, PartialEq, Debug)]
 struct RefTarget {
     hp: i32,
@@ -267,36 +268,30 @@ struct RefHolder {
 #[test]
 fn ref_bertipe_kolom_token_dan_round_trip() {
     use arke_postgres::{Field, RelRef};
-    // Ref<T> → 2 kolom BIGINT (_id/_gen); Option ikut nullable.
+    // Ref<T> → 1 kolom BIGINT `<name>_id` ber-`entity_ref`; Option ikut nullable.
+    let ref_col = |name: &'static str, nullable: bool| ColumnDef {
+        name,
+        ty: PgType::BigInt,
+        nullable,
+        references: None,
+        entity_ref: true,
+    };
     assert_eq!(
         RefHolder::COLUMNS.to_vec(),
-        vec![
-            ColumnDef::scalar("a_id", PgType::BigInt, false),
-            ColumnDef::scalar("a_gen", PgType::BigInt, false),
-            ColumnDef::scalar("b_id", PgType::BigInt, true),
-            ColumnDef::scalar("b_gen", PgType::BigInt, true),
-        ]
+        vec![ref_col("a_id", false), ref_col("b_id", true)]
     );
     // Token relasi bertipe (compile-level).
     let _: Field<RefHolder, RelRef<RefTarget>> = RefHolder::a();
     let _: Field<RefHolder, RelRef<RefTarget>> = RefHolder::b();
 
-    // Round-trip tanpa DB.
+    // Round-trip tanpa DB: `Ref` menyimpan **indeks** (5); generasi hilang → gen 0.
     let e = arke::Entity::from_raw(5, 2);
     let h = RefHolder {
         a: arke_postgres::Ref::new(e),
         b: None,
     };
-    assert_eq!(
-        h.to_params(),
-        vec![
-            PgValue::Int(5),
-            PgValue::Int(2),
-            PgValue::Null,
-            PgValue::Null
-        ]
-    );
+    assert_eq!(h.to_params(), vec![PgValue::Ref(5), PgValue::Null]);
     let back = RefHolder::from_params(&h.to_params()).unwrap();
-    assert_eq!(back.a.entity(), e);
+    assert_eq!(back.a.entity(), arke::Entity::from_raw(5, 0));
     assert_eq!(back.b, None);
 }

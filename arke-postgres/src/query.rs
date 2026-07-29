@@ -440,7 +440,7 @@ impl<'a, T: PgComponent> Query<'a, T> {
         let (where_opt, params) = self.where_clause();
         let where_sql = where_opt.unwrap_or_else(|| "TRUE".to_string());
         let sql = format!(
-            "SELECT DISTINCT {rel} AS entity_id FROM {tbl} WHERE ({where_sql}) AND {rel} IS NOT NULL",
+            "SELECT DISTINCT {rel} AS pid FROM {tbl} WHERE ({where_sql}) AND {rel} IS NOT NULL",
             rel = rel_column,
             tbl = T::TABLE,
         );
@@ -461,10 +461,14 @@ impl<'a, T: PgComponent> Query<'a, T> {
             .collect();
 
         let store = self.store;
-        let n = store.load_by_query(main_sql, main_params, world).await?;
+        store.reset_world_bridge();
+        // Target dulu (RFC-0034 Am.3): entity utama me-resolve relasinya ke target
+        // yang sudah ter-materialize di `entity_of`. Filter-saja (tanpa target) →
+        // relasi utama menggantung (handle sentinel), entity tetap termuat.
         for (sql, params) in targets {
             store.load_by_query(sql, params, world).await?;
         }
+        let n = store.load_by_query(main_sql, main_params, world).await?;
         Ok(n)
     }
 
@@ -581,15 +585,15 @@ impl<'a> PathLoad<'a> {
 
         // Susun semua SQL (pinjam-baca) sebelum menyentuh store.
         let root_sql = renumber(&format!(
-            "SELECT entity_id FROM {root_table} WHERE {root_filter} ORDER BY entity_id"
+            "SELECT pid FROM {root_table} WHERE {root_filter} ORDER BY pid"
         ));
         // Query id entity yang cocok di level sebelumnya (level 0 = root).
-        let mut matched_prev = format!("SELECT entity_id FROM {root_table} WHERE {root_filter}");
+        let mut matched_prev = format!("SELECT pid FROM {root_table} WHERE {root_filter}");
         let mut level_loads: Vec<String> = Vec::new();
         for hop in &self.hops {
             let targets = format!(
-                "SELECT DISTINCT {rel} AS entity_id FROM {from} \
-                 WHERE entity_id IN ({matched_prev}) AND {rel} IS NOT NULL",
+                "SELECT DISTINCT {rel} AS pid FROM {from} \
+                 WHERE pid IN ({matched_prev}) AND {rel} IS NOT NULL",
                 rel = hop.rel_column,
                 from = hop.from_table,
             );
@@ -598,14 +602,18 @@ impl<'a> PathLoad<'a> {
         }
 
         let store = self.store;
-        let n = store
-            .load_by_query(root_sql, self.leaf_params.clone(), world)
-            .await?;
-        for sql in level_loads {
+        store.reset_world_bridge();
+        // Muat **terdalam-dulu** (RFC-0034 Am.3): tiap entity me-resolve relasi ke
+        // hop berikutnya yang sudah ter-materialize di `entity_of`; root dimuat
+        // terakhir agar `leader`/dst me-resolve. `n` = jumlah entity **root**.
+        for sql in level_loads.into_iter().rev() {
             store
                 .load_by_query(sql, self.leaf_params.clone(), world)
                 .await?;
         }
+        let n = store
+            .load_by_query(root_sql, self.leaf_params.clone(), world)
+            .await?;
         Ok(n)
     }
 }
@@ -631,11 +639,15 @@ impl<'a> Recursive<'a> {
     /// Batas kedalaman rekursi (WAJIB) → siap `.load(...)`. Mencegah hang dari
     /// siklus (relasi tanpa FK bisa menyimpang).
     pub fn max_depth(self, depth: u32) -> RecursiveLoad<'a> {
+        // Seed = `pid` root (RFC-0034 Am.3); root harus ada di working-set. Hitung
+        // sebelum memindah `self.store` ke struct.
+        let root_pid = self.store.pid_for_index(self.root.index()).unwrap_or(0);
+        let sql = renumber(&recursive_sql(self.table, self.rel_column, self.dir));
         RecursiveLoad {
             store: self.store,
-            sql: renumber(&recursive_sql(self.table, self.rel_column, self.dir)),
+            sql,
             params: vec![
-                (PgType::BigInt, PgValue::Int(i64::from(self.root.index()))),
+                (PgType::BigInt, PgValue::Int(root_pid)),
                 (PgType::BigInt, PgValue::Int(i64::from(depth))),
             ],
         }
@@ -653,6 +665,7 @@ impl<'a> RecursiveLoad<'a> {
     /// Jalankan CTE `WITH RECURSIVE` & materialisasi entity hasil ke `world`.
     /// Mengembalikan jumlah entity dimuat.
     pub async fn load(self, world: &mut World) -> Result<usize, sqlx::Error> {
+        self.store.reset_world_bridge();
         self.store.load_by_query(self.sql, self.params, world).await
     }
 }
@@ -662,21 +675,21 @@ fn recursive_sql(table: &str, rel: &str, dir: RecurDir) -> String {
     match dir {
         RecurDir::Descendants => format!(
             "WITH RECURSIVE rec AS (\
-               SELECT entity_id, 0 AS depth FROM {table} WHERE {rel} = ? \
+               SELECT pid, 0 AS depth FROM {table} WHERE {rel} = ? \
                UNION ALL \
-               SELECT t.entity_id, rec.depth + 1 FROM {table} t \
-               JOIN rec ON t.{rel} = rec.entity_id WHERE rec.depth < ?) \
-             SELECT DISTINCT entity_id FROM rec"
+               SELECT t.pid, rec.depth + 1 FROM {table} t \
+               JOIN rec ON t.{rel} = rec.pid WHERE rec.depth < ?) \
+             SELECT DISTINCT pid FROM rec"
         ),
         RecurDir::Ancestors => format!(
             "WITH RECURSIVE rec AS (\
-               SELECT {rel} AS entity_id, 0 AS depth FROM {table} \
-               WHERE entity_id = ? AND {rel} IS NOT NULL \
+               SELECT {rel} AS pid, 0 AS depth FROM {table} \
+               WHERE pid = ? AND {rel} IS NOT NULL \
                UNION ALL \
                SELECT t.{rel}, rec.depth + 1 FROM {table} t \
-               JOIN rec ON t.entity_id = rec.entity_id \
+               JOIN rec ON t.pid = rec.pid \
                WHERE t.{rel} IS NOT NULL AND rec.depth < ?) \
-             SELECT DISTINCT entity_id FROM rec"
+             SELECT DISTINCT pid FROM rec"
         ),
     }
 }
@@ -684,7 +697,7 @@ fn recursive_sql(table: &str, rel: &str, dir: RecurDir) -> String {
 /// Kondisi join antar-entity (RFC-0031) sebagai sub-query (menghindari alias):
 /// `<rel> IN (SELECT entity_id FROM <tbl> WHERE <filter>)`.
 fn join_cond(rel_column: &str, related_table: &str, filter_sql: &str) -> String {
-    format!("{rel_column} IN (SELECT entity_id FROM {related_table} WHERE {filter_sql})")
+    format!("{rel_column} IN (SELECT pid FROM {related_table} WHERE {filter_sql})")
 }
 
 /// Ubah placeholder `?` berurutan menjadi `$1..$n` (dialek Postgres).
@@ -872,19 +885,16 @@ mod tests {
         let jc = join_cond("of_id", "cmp_health", &Health::hp().lt(20).sql);
         let where_sql = format!("{} AND {}", base.sql, jc);
         let sql = renumber(&format!(
-            "SELECT entity_id FROM cmp_owner WHERE {where_sql} ORDER BY entity_id"
+            "SELECT pid FROM cmp_owner WHERE {where_sql} ORDER BY pid"
         ));
         assert_eq!(
             sql,
-            "SELECT entity_id FROM cmp_owner WHERE hp >= $1 AND of_id IN \
-             (SELECT entity_id FROM cmp_health WHERE hp < $2) ORDER BY entity_id"
+            "SELECT pid FROM cmp_owner WHERE hp >= $1 AND of_id IN \
+             (SELECT pid FROM cmp_health WHERE hp < $2) ORDER BY pid"
         );
     }
 
     #[test]
-    #[ignore = "relasi (RelRef/matches) menanti desain ulang berbasis pid \
-                (RFC-0034 Amandemen 2 / opsi 1); kolom relasi masih menyimpan \
-                indeks World ephemeral, tak kompatibel dengan skema pid 0.12.0"]
     fn matches_bersarang_3_deep() {
         // boss → boss → hp (rantai relasi 3-deep, RFC-0032). Sub-query bersarang,
         // placeholder global.
@@ -893,9 +903,9 @@ mod tests {
         let (sql, params) = built(Some(f), vec![], None, None);
         assert_eq!(
             sql,
-            "SELECT entity_id FROM cmp_health WHERE boss_id IN \
-             (SELECT entity_id FROM cmp_health WHERE boss_id IN \
-             (SELECT entity_id FROM cmp_health WHERE hp < $1)) ORDER BY entity_id"
+            "SELECT pid FROM cmp_health WHERE boss_id IN \
+             (SELECT pid FROM cmp_health WHERE boss_id IN \
+             (SELECT pid FROM cmp_health WHERE hp < $1)) ORDER BY pid"
         );
         assert_eq!(params, vec![(PgType::Integer, PgValue::Int(20))]);
     }
@@ -909,13 +919,13 @@ mod tests {
         ));
         assert_eq!(
             d,
-            "WITH RECURSIVE rec AS (SELECT entity_id, 0 AS depth FROM cmp_emp \
-             WHERE manager_id = $1 UNION ALL SELECT t.entity_id, rec.depth + 1 \
-             FROM cmp_emp t JOIN rec ON t.manager_id = rec.entity_id WHERE rec.depth < $2) \
-             SELECT DISTINCT entity_id FROM rec"
+            "WITH RECURSIVE rec AS (SELECT pid, 0 AS depth FROM cmp_emp \
+             WHERE manager_id = $1 UNION ALL SELECT t.pid, rec.depth + 1 \
+             FROM cmp_emp t JOIN rec ON t.manager_id = rec.pid WHERE rec.depth < $2) \
+             SELECT DISTINCT pid FROM rec"
         );
         let a = renumber(&recursive_sql("cmp_emp", "manager_id", RecurDir::Ancestors));
-        assert!(a.contains("SELECT manager_id AS entity_id"));
+        assert!(a.contains("SELECT manager_id AS pid"));
         assert!(a.contains("t.manager_id IS NOT NULL AND rec.depth < $2"));
     }
 }

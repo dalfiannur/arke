@@ -19,6 +19,12 @@ use crate::{ColumnDef, IndexDef, PgComponent, PgType, PgValue, create_table_sql_
 /// Satu baris komponen yang di-dump: `(entity_id, nilai-kolom)`.
 type ComponentRow = (i64, Vec<PgValue>);
 
+/// Indeks sentinel untuk relasi **menggantung** (target tak ikut ter-muat, RFC-0034
+/// Am.3): handle `Entity::from_raw(DANGLING_INDEX, 0)` tak akan me-resolve di World
+/// mana pun (butuh ~4 miliar entity untuk bertabrakan). Membedakan "relasi ada tapi
+/// target tak dimuat" dari "field None" (NULL).
+const DANGLING_INDEX: i64 = u32::MAX as i64;
+
 /// Keadaan tersimpan satu entity untuk diff inkremental: `generation` + nilai
 /// tiap komponen terdaftar (`None` bila entity tak punya komponen itu).
 type EntityState = (i64, Vec<Option<Vec<PgValue>>>);
@@ -205,6 +211,9 @@ impl PgStore {
         for (ci, params) in &staged.rows {
             let r = &self.registered[*ci];
             let insert = insert_sql(r);
+            // Per-op: `pid_of` kosong → relasi lintas-op menggantung → NULL (RFC-0034
+            // Am.3); konsumen per-op memakai id-string, bukan `EntityRef`.
+            let params = self.resolve_refs(params);
             let mut q = sqlx::query(&insert).bind(pid);
             for (v, col) in params.iter().zip(r.columns) {
                 q = bind_value(q, col.ty, v);
@@ -241,6 +250,9 @@ impl PgStore {
                 for col in r.columns {
                     values.push(read_value(&row, col)?);
                 }
+                // Per-op: hanya entity ini termuat → relasi keluar-set menggantung
+                // (NULL, RFC-0034 Am.3).
+                self.translate_refs(r, &mut values);
                 (r.apply)(world, entity, &values);
             }
         }
@@ -274,6 +286,7 @@ impl PgStore {
                 .await?;
             if let Some(params) = params {
                 let insert = insert_sql(r);
+                let params = self.resolve_refs(params);
                 let mut q = sqlx::query(&insert).bind(pid);
                 for (v, col) in params.iter().zip(r.columns) {
                     q = bind_value(q, col.ty, v);
@@ -443,11 +456,13 @@ impl PgStore {
             self.pid_of.insert(*index as u32, pid);
         }
 
-        // Komponen ditulis di bawah `pid`.
+        // Komponen ditulis di bawah `pid`. Semua pid working-set kini teralokasi →
+        // resolusi `Ref(index)`→`pid` valid (RFC-0034 Am.3).
         for (r, rows) in self.registered.iter().zip(&staged.components) {
             let insert = insert_sql(r);
             for (index, params) in rows {
                 let pid = self.pid_of[&(*index as u32)];
+                let params = self.resolve_refs(params);
                 let mut q = sqlx::query(&insert).bind(pid);
                 for (value, col) in params.iter().zip(r.columns) {
                     q = bind_value(q, col.ty, value);
@@ -482,6 +497,7 @@ impl PgStore {
     /// Menyelaraskan rekam sinkron internal → `save_incremental` berikutnya hanya
     /// menulis perubahan setelah muat ini.
     pub async fn load(&mut self, world: &mut World) -> Result<(), sqlx::Error> {
+        self.reset_world_bridge();
         let rows = sqlx::query("SELECT pid FROM arke_entities ORDER BY pid")
             .fetch_all(&self.pool)
             .await?;
@@ -509,6 +525,7 @@ impl PgStore {
         world: &mut World,
         predicate: &str,
     ) -> Result<usize, sqlx::Error> {
+        self.reset_world_bridge();
         let sql = format!(
             "SELECT pid FROM {} WHERE {} ORDER BY pid",
             T::TABLE,
@@ -532,6 +549,21 @@ impl PgStore {
 
     /// Eksekutor query builder (RFC-0030): SQL **ter-parameterisasi** + nilai
     /// bind → materialisasi entity yang cocok ke `world`. Dipakai `Query::load`.
+    /// `pid` untuk indeks World `index` di working-set aktif, atau `None`
+    /// (RFC-0034 Am.3 — dipakai query rekursif untuk seed `pid` root).
+    pub(crate) fn pid_for_index(&self, index: u32) -> Option<i64> {
+        self.pid_of.get(&index).copied()
+    }
+
+    /// Reset jembatan `index↔pid` sebelum memuat ke **World baru** (RFC-0034 Am.3):
+    /// mencegah kontaminasi lintas-World (resolusi relasi memakai `entity_of` World
+    /// lama). Dipanggil di awal tiap muat top-level; sub-query satu muat (mis.
+    /// `join_load` main+target) berbagi jembatan yang sama tanpa reset di antaranya.
+    pub(crate) fn reset_world_bridge(&mut self) {
+        self.pid_of.clear();
+        self.entity_of.clear();
+    }
+
     pub(crate) async fn load_by_query(
         &mut self,
         sql: String,
@@ -593,7 +625,10 @@ impl PgStore {
                     .and_then(|b| b.as_deref())
                     .and_then(decode_row)
                 {
-                    Some(values) => {
+                    Some(mut values) => {
+                        // Cache menyimpan pid mentah → terjemahkan pid→Ref di sini
+                        // (RFC-0034 Am.3), setelah decode, sebelum apply.
+                        self.translate_refs(r, &mut values);
                         if let Some(&entity) = by_id.get(&id) {
                             (r.apply)(world, entity, &values);
                         }
@@ -615,9 +650,12 @@ impl PgStore {
                 for col in r.columns {
                     values.push(read_value(&row, col)?);
                 }
+                // Cache disimpan dengan pid mentah (sebelum terjemahan) agar valid
+                // lintas-World; terjemahkan pid→Ref hanya untuk apply (RFC-0034 Am.3).
                 if self.cache.is_some() {
                     to_cache.push((id, encode_row(&values)));
                 }
+                self.translate_refs(r, &mut values);
                 if let Some(&entity) = by_id.get(&id) {
                     (r.apply)(world, entity, &values);
                 }
@@ -706,6 +744,7 @@ impl PgStore {
                 .map_err(UpdateError::Db)?;
             if let Some(params) = (r.dump_one)(world, entity) {
                 let insert = insert_sql(r);
+                let params = self.resolve_refs(&params);
                 let mut q = sqlx::query(&insert).bind(pid);
                 for (value, col) in params.iter().zip(r.columns) {
                     q = bind_value(q, col.ty, value);
@@ -722,6 +761,42 @@ impl PgStore {
             }
         }
         Ok(new_version)
+    }
+
+    /// **Tulis (RFC-0034 Am.3):** ganti `PgValue::Ref(index)` → `Int(pid)` via
+    /// `pid_of`. Ref menggantung (indeks tak ter-map, mis. relasi lintas-op) → `Null`.
+    /// Nilai lain apa adanya. Panggil **setelah** semua pid working-set teralokasi.
+    fn resolve_refs(&self, params: &[PgValue]) -> Vec<PgValue> {
+        params
+            .iter()
+            .map(|v| match v {
+                PgValue::Ref(idx) => match self.pid_of.get(&(*idx as u32)) {
+                    Some(pid) => PgValue::Int(*pid),
+                    None => PgValue::Null,
+                },
+                other => other.clone(),
+            })
+            .collect()
+    }
+
+    /// **Baca (RFC-0034 Am.3):** untuk kolom `entity_ref`, `Int(pid)` → `Ref(indeks
+    /// lokal)` via `entity_of`. Pid ada di DB tapi target **tak ikut ter-muat**
+    /// (mis. `join` filter-saja) → `Ref(DANGLING_INDEX)`: relasi **tetap ada** (bukan
+    /// NULL) tetapi handle tak me-resolve ke entity mana pun (bukan target yang salah).
+    /// `NULL` DB (field `None`) tetap `Null`. Dipanggil sebelum `apply`, setelah
+    /// `entity_of` terisi penuh untuk World ini.
+    fn translate_refs(&self, r: &Registered, values: &mut [PgValue]) {
+        for (v, col) in values.iter_mut().zip(r.columns) {
+            if col.entity_ref {
+                *v = match v {
+                    PgValue::Int(pid) => match self.entity_of.get(pid) {
+                        Some(e) => PgValue::Ref(i64::from(e.index())),
+                        None => PgValue::Ref(DANGLING_INDEX),
+                    },
+                    _ => PgValue::Null,
+                };
+            }
+        }
     }
 
     /// Kumpulkan keadaan seluruh entity + komponen `world` (untuk diff).
@@ -840,6 +915,10 @@ impl PgStore {
                     .await?;
                 if let Some(params) = &state.1[ci] {
                     let insert = insert_sql(r);
+                    // Ref→pid (RFC-0034 Am.3): resolve terhadap `pid_of` yang sudah
+                    // ada. Caveat: ref ke entity **baru se-batch** yang belum ter-upsert
+                    // di iterasi ini → menggantung (NULL); relasi koheren via `save` penuh.
+                    let params = self.resolve_refs(params);
                     let mut q = sqlx::query(&insert).bind(pid);
                     for (value, col) in params.iter().zip(r.columns) {
                         q = bind_value(q, col.ty, value);
@@ -975,6 +1054,9 @@ fn bind_value<'q>(
         // JSON/NUMERIC di-bind sebagai teks; placeholder `$n::jsonb`/`::numeric` meng-cast.
         PgValue::Json(s) => q.bind(s.clone()),
         PgValue::Numeric(s) => q.bind(s.clone()),
+        // Relasi (RFC-0034 Am.3): mestinya sudah di-resolve `Ref(index)`→`Int(pid)`
+        // sebelum bind; jaga ekshaustif dengan mem-bind nilai mentah.
+        PgValue::Ref(i) => q.bind(*i),
         // `NULL` di-bind dengan tipe kolom yang benar (protokol Postgres).
         PgValue::Null => match col_ty {
             PgType::Integer => q.bind(Option::<i32>::None),

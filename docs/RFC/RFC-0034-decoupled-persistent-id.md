@@ -167,6 +167,71 @@ kolom `EntityRef` menyimpan `pid` yang dirujuk (bukan indeks/generation), join b
 `PgValue::Ref`, perubahan derive + `query.rs`, penulisan-ulang tes relasi. Akan menjadi
 RFC tersendiri atau Amandemen 3.
 
+## Amandemen 3 — Relasi berbasis `pid` (2026-07-29, desain opsi 1)
+
+Melanjutkan Amandemen 2: relasi didesain-ulang agar native `pid`. **Satu kolom**
+`<rel>_id` per field relasi menyimpan **`pid`** entity yang dirujuk (kolom `_gen`
+**dihapus** — `generation` persisten sudah tiada). **Tanpa FK** (marker saja): FK
+memblokir model per-op (target bisa ditulis di operasi/tabel lain) & merumitkan
+reconcile-clear; integritas tetap *by-construction*.
+
+### Encoding nilai: `PgValue::Ref(i64)`
+
+Varian baru `PgValue::Ref(i64)` membawa **indeks World** entity yang dirujuk
+(bukan pid) di ruang-memori; pemetaan ke `pid` terjadi di batas DB:
+
+- **Dump/`to_params`** (derive): field relasi → `PgValue::Ref(referenced.index())`
+  (Some), atau `PgValue::Null` (None/Option kosong).
+- **Commit (tulis)**: store memetakan `Ref(index)` → `pid` entity yang dirujuk via
+  `pid_of`, lalu **bind `pid`** (BIGINT) ke kolom. Deteksi kolom relasi = mencocokkan
+  varian `Ref` (self-describing; tak perlu konsultasi `ColumnDef` di jalur tulis).
+- **Read (baca, `materialize`)**: store membaca `pid` kolom, memetakan `pid` →
+  **Entity lokal** via `entity_of`, lalu menghasilkan `PgValue::Ref(local.index())`.
+
+### `from_params` tetap murni (kunci desain)
+
+`from_params` tak punya konteks store, jadi **tak bisa** mengubah `pid` → handle
+`Entity` hidup. Solusinya berlapis:
+
+1. `materialize` meng-`spawn()` **seluruh** entity (mengisi `entity_of`) **sebelum**
+   menerapkan komponen apa pun → saat komponen relasi dibaca, semua target sudah
+    termap.
+2. Jalur baca store menerjemahkan `pid` kolom → **indeks lokal** (`entity_of[pid]`)
+   dan menyodorkan `PgValue::Ref(local_index)` ke `from_params`.
+3. World hasil-muat selalu **segar** (`spawn()` berurutan pada `World::new()` →
+   `generation == 0` untuk semua), sehingga `from_params` merekonstruksi handle
+   secara murni: `Entity::from_raw(index, 0)` (dan `Ref::new(...)` untuk relasi
+   bertipe RFC-0032).
+
+**Ref menggantung (target tak ikut ter-muat, mis. subset `load_where`):** `pid`
+kolom tak ada di `entity_of` → store menghasilkan `PgValue::Null`. Field `Option`
+→ `None`; field wajib → komponen **tak** dimuat untuk entity itu (didokumentasikan).
+Ini menggantikan deteksi-basi berbasis `generation` yang lama.
+
+### Marker kolom + skema
+
+`ColumnDef` memperoleh flag `entity_ref: bool` (helper `scalar()` = `false`;
+derive menyetel `true` untuk `<rel>_id`). Jalur **baca/select** memakai flag ini
+untuk tahu kapan menerjemahkan `pid` → `Ref(local_index)`. Jalur **tulis** memakai
+varian `PgValue::Ref`. `references` tetap `None` (tanpa FK).
+
+### `query.rs` (join & rekursi) → `pid`
+
+- `join_cond`: `<rel>_id IN (SELECT pid FROM <tbl> WHERE <filter>)`.
+- `matches`/nested: subquery pilih `pid`; kolom join tetap `<rel>_id` (kini berisi
+  pid).
+- Rekursi (`descendants`/`ancestors`): seed = `pid` root (`store.pid_of[root.index()]`),
+  join `t.<rel>_id = rec.pid`, `SELECT pid`.
+- Path bertipe (`PathQuery`/`PathLoad`): filter bersarang pilih `pid`.
+
+### Cakupan & asumsi
+
+Relasi koheren pada **muat World-penuh** & **rekursi berjangkar-root** (yang dipakai
+semua tes relasi). Subset dengan ref keluar-set → menggantung (di atas). `arke-postgres-derive`,
+`PgValue`, `ColumnDef`, `store.rs` (bind/read/commit resolusi), `query.rs` berubah;
+tes `relations`/`nested`/`recursive`/`typed_relations` + unit `matches_bersarang_3_deep`
+di-un-`#[ignore]` & ditulis-ulang ke semantik pid. Sasaran rilis: **arke-postgres 0.13.0**.
+
 ## Keputusan
 
 **Diterima (Accepted), 2026-07-29.** Memisahkan `pid` (persisten, dialokasikan DB via `BIGSERIAL`) dari indeks `World` (ephemeral). `arke-postgres` memelihara peta `pid ↔ Entity` per working-set; seluruh API persist di-rekey ke `pid`; `generation` persisten dihapus; cache (RFC-0033) di-key oleh `pid`. Breaking → `arke-postgres 0.12.0`. Mengamandemen kontrak RFC-0021 (kunci persisten `entity_id` → `pid`) tanpa membuang model working-set. Implementasi mengikuti pola dua-fase (`stage`/`commit`) yang sudah ada, di-rekey ke `pid`.

@@ -131,19 +131,23 @@ pub struct ColumnDef {
     pub ty: PgType,
     /// Apakah `NULL` diizinkan (dari `Option<T>`).
     pub nullable: bool,
-    /// Referensi FK (`REFERENCES <target>`), atau `None`. Diisi untuk kolom `_id`
-    /// relasi entity → `Some("arke_entities(entity_id)")` (RFC-0031).
+    /// Referensi FK (`REFERENCES <target>`), atau `None`. Tak dipakai relasi entity
+    /// (RFC-0034 Am.3: tanpa FK); disediakan untuk FK skalar eksplisit bila perlu.
     pub references: Option<&'static str>,
+    /// Kolom relasi entity (RFC-0034 Amandemen 3): nilainya = `pid` entity yang
+    /// dirujuk; jalur baca/select menerjemahkan `pid`↔`Ref(indeks lokal)`.
+    pub entity_ref: bool,
 }
 
 impl ColumnDef {
-    /// Kolom skalar biasa (tanpa FK) — pembantu ringkas untuk mengurangi churn.
+    /// Kolom skalar biasa (tanpa FK, bukan relasi) — pembantu ringkas.
     pub const fn scalar(name: &'static str, ty: PgType, nullable: bool) -> Self {
         Self {
             name,
             ty,
             nullable,
             references: None,
+            entity_ref: false,
         }
     }
 }
@@ -174,6 +178,10 @@ pub enum PgValue {
     Text(String),
     /// JSON (JSONB) — teks JSON dari `arke::Serialize` (fallback field non-skalar).
     Json(String),
+    /// Referensi entity (RFC-0034 Amandemen 3): membawa **indeks** World entity
+    /// yang dirujuk saat dump; store memetakan `Ref(index)`→`pid` saat tulis dan
+    /// `pid`→`Ref(indeks lokal)` saat baca (via `pid_of`/`entity_of`).
+    Ref(i64),
     /// `NULL`.
     Null,
 }

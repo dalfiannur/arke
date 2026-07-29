@@ -1,7 +1,7 @@
 //! Uji integrasi relasi entity persisten + join (RFC-0031). Dilewati bila
 //! `DATABASE_URL` tak diset. Komponen unik ke berkas ini (cmp_beast/cmp_keeper).
 
-use arke::{Entity, World};
+use arke::{Entity, QueryData, World};
 use arke_postgres::{PgComponent, PgStore};
 
 #[derive(PgComponent, PartialEq, Debug)]
@@ -9,14 +9,37 @@ struct Beast {
     hp: i32,
 }
 
-/// Relasi: `pet` → FK ke arke_entities (kolom `pet_id` + `pet_gen`).
+/// Relasi: `pet` → satu kolom `pet_id` menyimpan **pid** Beast (RFC-0034 Am.3).
 #[derive(PgComponent, PartialEq, Debug)]
 struct Keeper {
     pet: Entity,
 }
 
+/// Handle semua entity di `world`.
+fn handles(w: &mut World) -> Vec<Entity> {
+    let mut v = Vec::new();
+    <Entity>::each(w, |e| v.push(e));
+    v
+}
+
+/// Untuk tiap Keeper di `world`, ikuti `.pet` → hp Beast yang ditunjuk
+/// (resolusi **intra-world**, RFC-0034 Am.3: handle sisi-simpan tak lestari).
+/// Terurut. Pet yang tak ikut termuat dilewati.
+fn pet_hps(w: &mut World) -> Vec<i32> {
+    let keepers: Vec<Entity> = handles(w)
+        .into_iter()
+        .filter(|&e| w.get::<Keeper>(e).is_some())
+        .collect();
+    let mut hps: Vec<i32> = keepers
+        .iter()
+        .filter_map(|&k| w.get::<Keeper>(k).map(|kp| kp.pet))
+        .filter_map(|pet| w.get::<Beast>(pet).map(|b| b.hp))
+        .collect();
+    hps.sort();
+    hps
+}
+
 #[tokio::test]
-#[ignore = "relasi menanti desain ulang berbasis pid (RFC-0034 Amandemen 2 / opsi 1); kolom _id/_gen masih menyimpan indeks World ephemeral, tak kompatibel dengan skema pid 0.12.0"]
 async fn relasi_entity_persist_join_dan_join_load() {
     let Ok(url) = std::env::var("DATABASE_URL") else {
         eprintln!("skip: DATABASE_URL tak diset");
@@ -43,19 +66,14 @@ async fn relasi_entity_persist_join_dan_join_load() {
     world.insert(k3, Keeper { pet: b_strong });
     store.save(&world).await.unwrap();
 
-    // 1) Round-trip: relasi `Keeper.pet` bertahan save→load (rekonstruksi via
-    //    Entity::from_raw dari kolom pet_id/pet_gen).
+    // 1) Round-trip: tiap `Keeper.pet` me-resolve ke Beast yang benar DALAM world
+    //    muat penuh (pid pet_id → handle lokal via entity_of). 3 keeper → hp
+    //    {10,50,90}.
     let mut w1 = World::new();
     store.load(&mut w1).await.unwrap();
-    assert_eq!(w1.get::<Keeper>(k1).map(|k| k.pet), Some(b_weak));
-    assert_eq!(w1.get::<Keeper>(k3).map(|k| k.pet), Some(b_strong));
+    assert_eq!(pet_hps(&mut w1), vec![10, 50, 90]);
 
-    // 1b) Keamanan-basi (STD-0007 terbawa ke relasi): handle ber-generation salah
-    //     → get = None.
-    let stale = Entity::from_raw(b_weak.index(), b_weak.generation().wrapping_add(1));
-    assert!(w1.get::<Beast>(stale).is_none());
-
-    // 2) join (filter-saja): keeper yang pet-nya ber-hp < 60 → k1, k2. Target
+    // 2) join (filter-saja): keeper yang pet-nya ber-hp < 60 → 2 keeper. Target
     //    Beast TIDAK dimuat.
     let mut w2 = World::new();
     let n = store
@@ -65,10 +83,10 @@ async fn relasi_entity_persist_join_dan_join_load() {
         .await
         .unwrap();
     assert_eq!(n, 2);
-    assert!(w2.contains(k1) && w2.contains(k2) && !w2.contains(k3));
-    assert!(w2.get::<Beast>(b_weak).is_none(), "join tak memuat target");
+    assert_eq!(w2.query::<Keeper>().count(), 2);
+    assert_eq!(w2.query::<Beast>().count(), 0, "join tak memuat target");
 
-    // 3) join_load: memuat pula Beast target → traversal handle langsung jalan.
+    // 3) join_load: memuat pula Beast target → traversal handle intra-world jalan.
     let mut w3 = World::new();
     let n = store
         .query::<Keeper>()
@@ -77,8 +95,10 @@ async fn relasi_entity_persist_join_dan_join_load() {
         .await
         .unwrap();
     assert_eq!(n, 2);
-    let pet = w3.get::<Keeper>(k1).unwrap().pet;
-    assert_eq!(w3.get::<Beast>(pet).map(|b| b.hp), Some(10));
-    // Target di luar filter (b_strong) tak dimuat.
-    assert!(w3.get::<Beast>(b_strong).is_none());
+    // Beast yang termuat = pet ber-hp < 60 → {10,50}; b_strong (90) tak dimuat.
+    let mut beast_hps: Vec<i32> = w3.query::<Beast>().map(|b| b.hp).collect();
+    beast_hps.sort();
+    assert_eq!(beast_hps, vec![10, 50]);
+    // Tiap keeper me-resolve pet-nya ke Beast termuat.
+    assert_eq!(pet_hps(&mut w3), vec![10, 50]);
 }
