@@ -398,9 +398,9 @@ impl PgStore {
     }
 
     /// Rekonstruksi entity `ids` + seluruh komponennya ke `world`.
-    async fn materialize(&self, world: &mut World, ids: &[i64]) -> Result<(), sqlx::Error> {
+    async fn materialize(&self, world: &mut World, ids: &[i64]) -> Result<Vec<Entity>, sqlx::Error> {
         if ids.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let rows = sqlx::query(
             "SELECT entity_id, generation FROM arke_entities \
@@ -410,11 +410,13 @@ impl PgStore {
         .fetch_all(&self.pool)
         .await?;
         let mut by_id: HashMap<i64, Entity> = HashMap::with_capacity(rows.len());
+        let mut entities: Vec<Entity> = Vec::with_capacity(rows.len());
         for row in rows {
             let id: i64 = row.try_get("entity_id")?;
             let generation: i64 = row.try_get("generation")?;
             let entity = world.spawn_at(id as u32, generation as u32);
             by_id.insert(id, entity);
+            entities.push(entity);
         }
 
         for r in &self.registered {
@@ -466,7 +468,20 @@ impl PgStore {
                 c.put_many(r.table, &to_cache).await;
             }
         }
-        Ok(())
+        Ok(entities)
+    }
+
+    /// Memuat entity **spesifik by id** (beserta seluruh komponennya) ke `world`,
+    /// mengembalikan handle-nya (urut sesuai `entity_id`). Menyelaraskan rekam
+    /// sinkron untuk working-set → aman dikombinasi dengan `save_incremental`.
+    pub async fn load_ids(
+        &mut self,
+        world: &mut World,
+        ids: &[i64],
+    ) -> Result<Vec<Entity>, sqlx::Error> {
+        let entities = self.materialize(world, ids).await?;
+        self.last = self.dump_state(world);
+        Ok(entities)
     }
 
     /// Versi optimistic-lock `entity` di DB, atau `None` bila entity tak ada
