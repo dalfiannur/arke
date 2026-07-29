@@ -115,6 +115,35 @@ Model global World (RFC-0021) **tetap** didukung: `load` memuat semua entity ke 
 4. **Migrasi data lama.** → **Greenfield sekarang** (belum ada data produksi → drop/recreate). Jalur migrasi in-place didokumentasikan: `entity_id` → `pid` (nilai identik), `setval` sequence di atas `MAX(entity_id)` — untuk data nyata kelak.
 5. **Keying cache.** → **Cache di-key oleh `pid`** (mengamandemen RFC-0033).
 
+## Amandemen 1 — Resolusi kolom relasi entity (2026-07-29, ditemukan saat implementasi)
+
+Temuan: `arke-postgres-derive` menghasilkan `to_params` yang menulis kolom **relasi
+entity** (RFC-0031, field `EntityRef`) sebagai **indeks World entity yang dirujuk**
+(`e.index() as i64` + generation), dan predikat relasi di `query.rs` juga memakai
+`index`. Di bawah `pid`, kolom relasi harus menyimpan **`pid`** entity yang dirujuk —
+tapi derive tak punya konteks `pid`.
+
+**Keputusan:** **resolusi saat-save** memanfaatkan `ColumnDef.references` (sudah
+menandai kolom relasi `_id` → `Some("arke_entities(pid)")`). Alur `save`/`save_incremental`:
+1. **Pass 1:** pastikan setiap entity working-set punya `pid` (`pid_of`; alokasi untuk
+   yang baru).
+2. **Pass 2:** untuk tiap kolom ber-`references`, ganti `PgValue::Int(index)` → `pid`
+   entity yang dirujuk (via `entity_of`/`pid_of`). Load: kolom relasi = `pid` →
+   rekonstruksi handle via `entity_of` (entity yang dirujuk **harus** ikut ter-load,
+   atau ref di-resolve lazily).
+
+**Batasan:** relasi entity hanya koheren di **mode World-global** (semua entity
+ter-map). Konsumen per-op yang butuh referensi antar-entity memakai **id string**
+(mis. `owner_id: String`) — bukan `EntityRef` arke — sehingga tak terkena batasan ini.
+`generation` pada kolom relasi (dulu untuk deteksi handle basi) dihapus; identitas ref
+= `pid`.
+
+**Dampak implementasi:** whole-world rekey (`save`/`load`/`save_incremental`/`materialize`
++ `dump→Entity` + map) plus perubahan `arke-postgres-derive` (kolom ref emit penanda,
+di-resolve store) dan `query.rs` (predikat relasi by `pid`). Tes `relations.rs`/
+`query_builder.rs`/`constraints.rs` harus hijau. Ini pekerjaan terfokus tersendiri;
+jalur per-op (nilai inti RFC) sudah terimplementasi & terverifikasi.
+
 ## Keputusan
 
 **Diterima (Accepted), 2026-07-29.** Memisahkan `pid` (persisten, dialokasikan DB via `BIGSERIAL`) dari indeks `World` (ephemeral). `arke-postgres` memelihara peta `pid ↔ Entity` per working-set; seluruh API persist di-rekey ke `pid`; `generation` persisten dihapus; cache (RFC-0033) di-key oleh `pid`. Breaking → `arke-postgres 0.12.0`. Mengamandemen kontrak RFC-0021 (kunci persisten `entity_id` → `pid`) tanpa membuang model working-set. Implementasi mengikuti pola dua-fase (`stage`/`commit`) yang sudah ada, di-rekey ke `pid`.
