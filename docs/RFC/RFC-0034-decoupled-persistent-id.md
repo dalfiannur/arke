@@ -1,0 +1,120 @@
+# RFC-0034: `arke-postgres` — identitas persisten (`pid`) yang decoupled dari indeks World
+
+- **Status:** Draft <!-- Draft | Discussion | Accepted | Rejected | Superseded by RFC-XXXX -->
+- **Tanggal:** 2026-07-29
+- **Milestone:** M-? (Per-op stateless store untuk web/async)
+- **RFC terkait:** [RFC-0021](./RFC-0021-arke-postgres-adapter.md) (adapter Postgres), [RFC-0002](./RFC-0002-core-storage-architecture.md) (storage inti), [RFC-0033](./RFC-0033-component-cache.md) (cache)
+
+## Ringkasan
+
+Memisahkan **identitas persisten** sebuah entity (`pid`, dialokasikan DB) dari **indeks World arke** (posisi array dense yang *ephemeral*, milik free-list in-memory). Saat ini `arke-postgres` (RFC-0021) menyamakan `entity_id = World index`. RFC ini menjadikan **indeks World selalu ephemeral** (tak pernah dipersist) dan **`pid` sebagai kunci persisten tunggal**, dengan `arke-postgres` memelihara pemetaan `pid ↔ Entity` untuk working-set aktif.
+
+Tujuannya: memungkinkan **store per-operasi yang stateless** (World kecil per-request, dibuang setelahnya) yang aman untuk **multi-replica** (Postgres satu-satunya sumber kebenaran) — tanpa meninggalkan model working-set RFC-0021, dan tanpa `unsafe`.
+
+## Motivasi
+
+RFC-0021 memodelkan `World` sebagai working-set yang di-*materialize* via `spawn_at(entity_id, generation)`, dengan `entity_id` = indeks World. Ini bekerja untuk model **World global panjang-umur** (muat semua → indeks dense 0..N → checkpoint).
+
+Untuk **web server async** dengan World **per-operasi** (buat World kecil, muat subset, mutasi, persist, buang), model itu **pecah**:
+
+1. **Indeks World bersifat lokal & mulai dari 0.** `World::new()` lalu `spawn()` selalu memberi indeks 0. Dua `create` per-op → dua entity ber-`entity_id = 0` → yang kedua **menimpa** yang pertama. Id tak unik lintas-operasi.
+2. **Id unik-global sebagai indeks World meledakkan memori.** Bila id dialokasikan monoton (mis. sequence: 1, 2, … 1_000_000), `spawn_at(1_000_000, 0)` menumbuhkan `entities: Vec` hingga sejuta slot **untuk satu entity** (RFC-0002 §storage: indeks = posisi Vec). Tak layak.
+3. **Free-list dense butuh World global.** Mempertahankan id **dense & reusable** (cara arke) mensyaratkan free-list in-memory → berarti seluruh World di memori. Bertentangan dengan per-op stateless.
+
+Akar masalah: **indeks World arke bukan id persisten** — ia posisi array dense yang dikelola free-list. Persistensi yang benar harus **memisahkan** id persisten dari indeks ephemeral.
+
+### Tegangan yang diakui
+
+- **Tidak membuang model working-set** RFC-0021. RFC ini **menyempurnakan**-nya: indeks World tetap ephemeral (kini *eksplisit*), `pid` jadi kunci persisten. Model World global tetap didukung (muat semua ke World, arke-postgres memetakan `pid ↔ Entity`), sekaligus membuka model per-op.
+- **Perubahan skema & kontrak** RFC-0021 (kunci `entity_id` → `pid`). Butuh jalur migrasi (lihat §5).
+- **`arke` core tetap 0-dependensi** (STD-0003) — perubahan hanya di adapter.
+
+## Usulan rinci
+
+### 1. Skema: `pid` sebagai kunci persisten
+
+```sql
+-- SEBELUM (RFC-0021): entity_id = indeks World
+arke_entities(entity_id BIGINT PK, generation BIGINT, version BIGINT)
+cmp_<T>(entity_id BIGINT PK REFERENCES arke_entities, <kolom>...)
+
+-- SESUDAH (RFC-0034): pid persisten, indeks World tak disimpan
+arke_entities(pid BIGSERIAL PRIMARY KEY, version BIGINT NOT NULL DEFAULT 0)
+cmp_<T>(pid BIGINT PRIMARY KEY REFERENCES arke_entities(pid) ON DELETE CASCADE, <kolom>...)
+```
+
+- `pid` dialokasikan DB (`BIGSERIAL`) — **unik global**, tak pernah jadi indeks World.
+- `generation` dihapus dari peran identitas persisten (identitas = `pid`; `version` untuk optimistic-lock).
+
+### 2. Pemetaan `pid ↔ Entity` (per working-set)
+
+`PgStore` (atau handle operasi) memelihara, untuk World aktif:
+
+```rust
+pid_of: HashMap<Entity, i64>,   // Entity (indeks ephemeral) → pid persisten
+entity_of: HashMap<i64, Entity> // pid → Entity
+```
+
+Diisi saat `create`/`fetch`/`load`. Indeks World kini **selalu dense & lokal** (via `spawn()`), pemetaan menautkannya ke `pid`. `save`/`update`/`query` bekerja lewat `pid` (baca dari peta), **bukan** `entity.index()`.
+
+### 3. API per-operasi (facet baru, pid-addressed)
+
+Semua dua-fase (sync-baca-World / async-DB) agar future `Send` (lih. `stage`/`commit`, RFC terkait):
+
+```rust
+impl PgStore {
+    /// Alokasi pid (INSERT arke_entities RETURNING pid) + tulis komponen entity di `world`.
+    pub async fn insert(&mut self, world: &World, entity: Entity) -> Result<i64>;   // → pid
+    /// Muat komponen `pid` ke `world` sebagai entity lokal baru; kembalikan handle.
+    pub async fn fetch(&mut self, world: &mut World, pid: i64) -> Result<Option<Entity>>;
+    /// Tulis-ulang komponen `pid` dari `entity` (versi naik, optimistic opsional).
+    pub async fn update(&mut self, world: &World, pid: i64, entity: Entity) -> Result<()>;
+    /// Hapus `pid` (cascade ke tabel komponen).
+    pub async fn remove(&mut self, pid: i64) -> Result<()>;
+    /// Query typed (RFC-0030): muat entity yang cocok + kembalikan (pid, Entity).
+    pub async fn query_pids<T: PgComponent>(&mut self, /* builder */) -> Result<Vec<(i64, Entity)>>;
+}
+```
+
+Model global World (RFC-0021) **tetap** didukung: `load` memuat semua entity ke World dengan indeks lokal dense (via `spawn`, bukan `spawn_at(pid)`), mengisi `pid_of`/`entity_of`; `save_incremental` mem-*diff* by `pid`.
+
+### 4. Dua-fase & Send
+
+`insert`/`update` mengikuti pola `stage`/`commit` (RFC pendahulu): fase sync membaca komponen entity dari `world` → data owned; fase async menulis DB tanpa menahan `&World`. Menjaga future handler async `Send` tanpa `World: Sync`.
+
+### 5. Migrasi & kompatibilitas
+
+- **Data lama** ber-`entity_id`: skrip migrasi menyalin `entity_id` → `pid` (nilai sama), set `BIGSERIAL` di atas `MAX(entity_id)`.
+- **API lama** (`save`/`load` berbasis indeks): dipertahankan sementara di atas pemetaan (indeks lama diperlakukan sebagai `pid`) atau ditandai *deprecated* → dihapus di rilis mayor. Keputusan di §Pertanyaan terbuka.
+- Cache (RFC-0033) di-key ulang oleh `pid`.
+
+### 6. Determinisme & konkurensi
+
+- Query tetap deterministik (`ORDER BY pid`).
+- Optimistic-lock via `version` per `pid` (`update` dengan `expected_version` opsional).
+- Multi-replica: stateless per-op → Postgres otoritatif; tak ada World global bersama.
+
+## Alternatif yang dipertimbangkan
+
+1. **Sequence + `spawn_at(pid)`** — id unik tapi indeks World = pid → `Vec` meledak (motivasi §2). **Ditolak.**
+2. **World global panjang-umur saja** (indeks dense via free-list) — sesuai desain arke, tapi memori-terikat & **tak multi-replica** (tiap replica World sendiri). Baik untuk single-instance; tak memenuhi tujuan web/scale. **Ditolak sebagai satu-satunya model.**
+3. **`pid` sebagai komponen pengguna** (mis. `Pid(i64)`) — menautkan pid via komponen, bukan peta internal. Sederhana tapi membocorkan identitas persisten ke ruang komponen pengguna & menyulitkan query. **Dipertimbangkan; peta internal lebih bersih.**
+
+## Dampak
+
+- **RFC-0021 diamandemen:** kunci persisten `entity_id` → `pid`; indeks World eksplisit-ephemeral. Model working-set tetap.
+- **Breaking (skema + API):** perlu migrasi + versi mayor `arke-postgres`.
+- **Konsumen (mis. backend-rs):** `Store` jadi thin wrapper per-op (`create`/`get`/`query`/`update`/`delete` by `pid`), stateless & multi-replica-safe. Menghapus kebutuhan World global.
+- **`stage`/`commit` & `stage_incremental`/`commit_incremental`** yang sudah ada di-*rework* ke keying `pid`.
+
+## Pertanyaan terbuka
+
+1. **Pertahankan API berbasis-indeks lama** (deprecated) vs hapus bersih di rilis mayor?
+2. **Bentuk `query_pids`** — kembalikan `(pid, Entity)` vs sisipkan `pid` sbg komponen internal agar mapper pengguna bisa membacanya.
+3. **`generation`** — masih perlu? (identitas = `pid`; generation mungkin usang).
+4. **Strategi migrasi data lama** (in-place `entity_id`→`pid` vs tabel baru).
+5. **Keying cache** by `pid` — perubahan di RFC-0033.
+
+## Keputusan
+
+*(menunggu review — Draft.)*
