@@ -21,7 +21,7 @@ use std::cell::UnsafeCell;
 ///
 /// Type-erased agar archetype dapat menyimpan kolom dari tipe-tipe berbeda
 /// dalam satu koleksi.
-pub(crate) trait Column: Any {
+pub(crate) trait Column: Any + Send {
     /// Referensi `Any` untuk downcast ke `TypedColumn<T>` konkret.
     fn as_any(&self) -> &dyn Any;
     /// Referensi `Any` mutabel untuk downcast ke `TypedColumn<T>` konkret.
@@ -71,7 +71,7 @@ impl<T> TypedColumn<T> {
     }
 }
 
-impl<T: 'static> Column for TypedColumn<T> {
+impl<T: 'static + Send> Column for TypedColumn<T> {
     fn as_any(&self) -> &dyn Any {
         self
     }
