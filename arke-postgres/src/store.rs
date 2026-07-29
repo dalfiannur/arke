@@ -55,6 +55,21 @@ fn apply_of<T: PgComponent + Component>(world: &mut World, entity: Entity, value
     }
 }
 
+/// Snapshot **owned** dari `World` yang siap di-[`commit`](PgStore::commit) secara
+/// async — hasil [`PgStore::stage`]. Tidak memegang `&World`, sehingga `commit`
+/// tak menahan World melewati `.await`: future-nya `Send` **tanpa** `World: Sync`.
+/// Berguna untuk handler async multi-thread (mis. web server) yang menyimpan
+/// `World` di balik mutex — snapshot diambil (sinkron) di bawah lock, lock dilepas,
+/// lalu `commit` dijalankan tanpa menahan `World`.
+pub struct StagedSave {
+    /// `(entity_id, generation)` tiap entity yang punya ≥1 komponen.
+    entities: Vec<(i64, i64)>,
+    /// Baris komponen, sejajar urutan `registered` saat `stage` dipanggil.
+    components: Vec<Vec<ComponentRow>>,
+    /// Rekam sinkron baru (untuk `save_incremental` berikutnya).
+    next_state: HashMap<i64, EntityState>,
+}
+
 /// Penyimpan Postgres untuk keadaan ECS (RFC-0021).
 ///
 /// Daftarkan tiap tipe komponen via [`Self::register`], `migrate`, lalu
@@ -215,7 +230,33 @@ impl PgStore {
     ///
     /// Menyelaraskan rekam sinkron internal, jadi `save_incremental` berikutnya
     /// hanya menulis perubahan **setelah** `save` ini.
-    pub async fn save(&mut self, world: &World) -> Result<(), sqlx::Error> {
+    /// **Fase 1 (sinkron)** persist dua-fase: baca seluruh `world` menjadi data
+    /// *owned* ([`StagedSave`]) **tanpa `.await`**. Karena tak menahan `&World`
+    /// melewati titik async, pemanggil boleh melepas lock `World` sebelum
+    /// [`commit`](Self::commit) — membuat future `commit` `Send` tanpa `World: Sync`
+    /// (ramah handler async multi-thread; RFC-0021 §4).
+    pub fn stage(&self, world: &World) -> StagedSave {
+        let mut entities: Vec<(i64, i64)> = Vec::new();
+        <Entity>::each_filtered_shared::<()>(world, |e| {
+            entities.push((i64::from(e.index()), i64::from(e.generation())));
+        });
+        let components: Vec<Vec<ComponentRow>> =
+            self.registered.iter().map(|r| (r.dump)(world)).collect();
+        let next_state = self.dump_state(world);
+        StagedSave {
+            entities,
+            components,
+            next_state,
+        }
+    }
+
+    /// **Fase 2 (async)** persist dua-fase: tulis [`StagedSave`] ke Postgres dalam
+    /// satu transaksi (overwrite penuh, versi baseline 0). **Tidak menyentuh
+    /// `World`**, jadi future-nya tak butuh `World: Sync`.
+    ///
+    /// Prasyarat: urutan komponen `staged` sama dengan urutan registrasi saat
+    /// [`stage`](Self::stage) (tidak ada `register` di antara stage & commit).
+    pub async fn commit(&mut self, staged: StagedSave) -> Result<(), sqlx::Error> {
         let mut tx = self.pool.begin().await?;
 
         // Overwrite penuh: DELETE meng-cascade ke tabel komponen.
@@ -223,25 +264,22 @@ impl PgStore {
             .execute(&mut *tx)
             .await?;
 
-        // Entity (yang punya ≥1 komponen).
-        let mut entities: Vec<Entity> = Vec::new();
-        <Entity>::each_filtered_shared::<()>(world, |e| entities.push(e));
-        for e in &entities {
-            // Overwrite penuh mereset versi ke 0 (baseline single-writer).
+        // Entity (baseline versi 0).
+        for (entity_id, generation) in &staged.entities {
             sqlx::query(
                 "INSERT INTO arke_entities (entity_id, generation, version) VALUES ($1, $2, 0)",
             )
-            .bind(i64::from(e.index()))
-            .bind(i64::from(e.generation()))
+            .bind(*entity_id)
+            .bind(*generation)
             .execute(&mut *tx)
             .await?;
         }
 
         // Komponen (referensi FK ke arke_entities).
-        for r in &self.registered {
+        for (r, rows) in self.registered.iter().zip(&staged.components) {
             let insert = insert_sql(r);
-            for (entity_id, params) in (r.dump)(world) {
-                let mut q = sqlx::query(&insert).bind(entity_id);
+            for (entity_id, params) in rows {
+                let mut q = sqlx::query(&insert).bind(*entity_id);
                 for (value, col) in params.iter().zip(r.columns) {
                     q = bind_value(q, col.ty, value);
                 }
@@ -250,13 +288,22 @@ impl PgStore {
         }
 
         tx.commit().await?;
-        // `save` menulis-ulang semua → kosongkan cache (RFC-0033).
+        // Overwrite penuh → kosongkan cache (RFC-0033).
         if let Some(c) = &self.cache {
             c.clear().await;
         }
         // Selaraskan rekam sinkron dengan keadaan yang baru ditulis.
-        self.last = self.dump_state(world);
+        self.last = staged.next_state;
         Ok(())
+    }
+
+    /// Simpan **seluruh** `world` (overwrite penuh) dalam satu transaksi — kini
+    /// = [`stage`](Self::stage) (sinkron) + [`commit`](Self::commit) (async). Karena
+    /// semua pembacaan `world` terjadi sebelum `.await`, future `save` sendiri pun
+    /// tak lagi menahan `&World` melewati titik async.
+    pub async fn save(&mut self, world: &World) -> Result<(), sqlx::Error> {
+        let staged = self.stage(world);
+        self.commit(staged).await
     }
 
     /// Memuat (materialize) **seluruh** keadaan dari Postgres ke `world`,
