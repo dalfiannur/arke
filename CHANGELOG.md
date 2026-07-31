@@ -7,6 +7,32 @@ rilis juga ada di [GitHub Releases](https://github.com/dalfiannur/arke/releases)
 
 ## [Unreleased]
 
+### Added
+
+- **Crate baru `arke-mongo` 0.1.0** — adapter MongoDB dengan pemetaan **satu
+  dokumen per entity** (komponen sebagai sub-dokumen di bawah `cmp`);
+  identitas persisten `pid` = `ObjectId` yang dialokasikan klien
+  ([RFC-0035](docs/RFC/RFC-0035-arke-mongo-adapter.md), [ADR-0035](docs/ADR/ADR-0035-arke-mongo-adapter.md)).
+  Tanpa derive baru: `#[derive(arke::Serialize)]` yang sudah ada menjadi
+  jembatan ke BSON — hanya trait tipis `MongoComponent` + `IndexDef` lewat
+  makro `mongo_component!` yang ditambahkan. `MongoStore` menyediakan
+  `connect`/`register`/`ensure_indexes`, CRUD per-operasi
+  (`create`/`fetch`/`update`/`update_checked`/`version_of`/`remove`) dengan
+  optimistic-lock `version`, dan `save`/`load` seluruh World. Core `arke` tak
+  berubah dan tetap 0-dependensi (STD-0003).
+
+  **Batasan yang diketahui:** `save` seluruh World memakai operasi per-dokumen
+  berurutan tanpa transaksi — atomik **per-entity**, bukan per-World, sehingga
+  `mongod` standalone sudah cukup; kegagalan di tengah meninggalkan sebagian
+  entity tertulis. Untuk `save` yang all-or-nothing, pakai `arke-postgres`.
+  Satu `MongoStore` harus melayani satu `World` — `pid_of`/`entity_of`
+  mengunci `Entity`, handle yang hanya bermakna di dalam satu `World`; tiga
+  mode kegagalan konkret didokumentasikan di rustdoc dan README serta dipatok
+  tes regresi, tapi belum ada penjaga runtime (butuh `WorldId` di core,
+  dicatat sebagai pertanyaan terbuka RFC-0035). `drop_database` sengaja tidak
+  ada di API publik. Query builder, relasi, cache, `save_incremental`, dan
+  strategi evolusi skema ditunda ke RFC lanjutan.
+
 ### Fixed
 
 - **`World::insert` atas komponen yang sudah dimiliki merusak archetype**
