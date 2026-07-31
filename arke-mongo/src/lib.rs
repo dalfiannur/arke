@@ -46,6 +46,9 @@ pub use bson_map::{bson_to_value, validate_names, value_to_bson};
 mod registry;
 pub use registry::Registry;
 
+mod store;
+pub use store::MongoStore;
+
 /// Arah urutan sebuah indeks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dir {
