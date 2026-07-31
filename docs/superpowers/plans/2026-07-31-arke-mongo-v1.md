@@ -2416,6 +2416,11 @@ Tambahkan job berikut di bawah `jobs:` pada `.github/workflows/ci.yml`, sejajar 
       - name: Test arke-mongo (integrasi)
         env:
           MONGODB_URI: mongodb://localhost:27017
+          # Tanpa ini, job yang salah konfigurasi (env var salah nama, service
+          # container gagal start) akan HIJAU sambil tak menjalankan satu asersi
+          # pun — tes lapis 2 melaporkan "pass" saat di-skip. Dengan ini diset,
+          # `MONGODB_URI` yang hilang jadi panic, bukan skip diam-diam.
+          ARKE_REQUIRE_MONGO: "1"
         run: cargo test -p arke-mongo --verbose
 ```
 
