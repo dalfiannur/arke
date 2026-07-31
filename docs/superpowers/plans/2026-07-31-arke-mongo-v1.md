@@ -1488,9 +1488,11 @@ Mulai di sini semua tes butuh MongoDB nyata dan di-skip bila `MONGODB_URI` tak d
 **Jalankan MongoDB lokal untuk pengembangan:**
 
 ```bash
-docker run -d --name arke-mongo-dev -p 27017:27017 mongo:7
-export MONGODB_URI=mongodb://localhost:27017
+docker run -d --name arke-mongo-dev -p 27017:27017 mongo:7   # atau `podman run …`
+export MONGODB_URI=mongodb://127.0.0.1:27017
 ```
+
+Pakai **`127.0.0.1`, bukan `localhost`**. Pada host yang mengutamakan IPv6, `localhost` resolve ke `::1` lebih dulu, dan network backend rootless podman (`passt`) tak meneruskan jalur itu ke container — koneksi kena RST dan gagal sebagai `ServerSelectionTimeout` yang membingungkan. Job CI tak terpengaruh (service container GitHub Actions memakai jaringan bridge).
 
 **Files:**
 - Create: `arke-mongo/src/store.rs`
