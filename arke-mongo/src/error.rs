@@ -15,6 +15,13 @@ pub enum MongoError {
         /// Versi yang diharapkan pemanggil.
         expected: i64,
         /// Versi yang sebenarnya ada; `None` bila dokumen sudah terhapus.
+        ///
+        /// Diperoleh lewat *round-trip kedua* ([`crate::MongoStore::version_of`])
+        /// setelah `find_one_and_update` gagal cocok, bukan dibaca atomik
+        /// bersama kegagalan itu — antara kedua round-trip, penulis lain bisa
+        /// saja mengubah atau menghapus dokumennya lagi. Perlakukan ini
+        /// sebagai observasi *belakangan* untuk membantu debugging/retry,
+        /// bukan sebagai versi yang benar-benar menyebabkan konfliknya.
         actual: Option<i64>,
     },
     /// Sub-dokumen komponen tak bisa direkonstruksi menjadi tipe Rust-nya.
@@ -39,6 +46,13 @@ pub enum MongoError {
         component: &'static str,
         /// Nama BSON yang muncul lebih dari sekali.
         field: String,
+    },
+    /// Dokumen `pid` tak ada, sehingga tulisan tak mengenai apa pun. Dibedakan
+    /// dari [`MongoError::Conflict`]: bukan versi yang bergeser, melainkan
+    /// entity yang sudah tak ada (mis. dihapus penulis lain).
+    Missing {
+        /// Entity yang dokumennya tak ditemukan.
+        pid: Pid,
     },
 }
 
@@ -77,6 +91,11 @@ impl std::fmt::Display for MongoError {
                  dari sekali setelah pemetaan — salah satunya akan hilang \
                  diam-diam di dalam `Document` (mis. dua `#[arke(rename)]` \
                  yang bertabrakan)"
+            ),
+            MongoError::Missing { pid } => write!(
+                f,
+                "dokumen entity {pid:?} tak ditemukan — tulisan tak mengenai \
+                 apa pun (entity mungkin sudah dihapus penulis lain)"
             ),
         }
     }

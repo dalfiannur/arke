@@ -29,6 +29,43 @@ const META: &str = "arke_meta";
 /// [`Self::ensure_indexes`], lalu pakai jalur per-operasi
 /// (`create`/`fetch`/`update`/`remove`) atau jalur seluruh World
 /// (`save`/`load`).
+///
+/// # Peringatan: satu store, satu `World`
+///
+/// `pid_of`/`entity_of` mengunci `Entity` — handle yang cuma bermakna di
+/// dalam **satu** `World` — ke `pid` yang persisten (RFC-0035 §3). Satu
+/// `MongoStore` mengasumsikan seluruh panggilan `create`/`fetch`/`load`/
+/// `save`/`update`/`update_checked` di atasnya memakai `Entity` dari `World`
+/// yang **sama**. Melanggar asumsi ini tak terdeteksi di tipe maupun di
+/// runtime — RFC §3 memang menyebut pemetaan ini per-working-set, jadi ini
+/// salah pakai, bukan pelanggaran spek — tapi salah pakainya diam-diam dan
+/// merusak data. Tiga mode konkret:
+///
+/// - **Mode A — `fetch` ke World scratch merebut `pid`.** `save(&w)` →
+///   `fetch(&mut scratch, pid1)` ke `World` sekali-pakai (mis. sekadar untuk
+///   inspeksi) → `save(&w)` lagi. `fetch` menaut ulang `pid1` ke entity di
+///   `scratch` (lewat [`Self::bind`], yang menjaga bijeksi `pid_of`/
+///   `entity_of`); `save` berikutnya atas `w` tak lagi melihat `pid1` sebagai
+///   milik entity `w`, memperlakukannya sebagai entity baru: dokumen lama
+///   terhapus, `pid` baru dicetak. Referensi eksternal mana pun ke `pid1`
+///   kini menggantung. Memeriksa satu entity di `World` sekali-pakai terasa
+///   seperti pembacaan yang sepenuhnya wajar — itulah yang membuat ini
+///   berbahaya.
+/// - **Mode B — handle `Entity` bertabrakan antar-`World`.** Dua `World`
+///   independen yang masing-masing men-spawn entity pertamanya menghasilkan
+///   `Entity` yang identik (indeks dense dimulai dari nol di tiap `World`).
+///   `save(&w2)` lantas diam-diam **menimpa** dokumen milik entity pertama
+///   `w1` dengan data dari `w2`; entity `w2` sendiri tak pernah punya
+///   dokumennya sendiri.
+/// - **Mode C (lebih ringan)** — memanggil `save` dengan `World` berbeda dari
+///   yang dipakai `save`/`create`/`fetch` sebelumnya pada `MongoStore` yang
+///   sama menghapus dokumen milik `World` lama: `entity_of` tak tahu batas
+///   antar-`World`, ia hanya tahu "pid yang tak terlihat di panggilan `save`
+///   ini" (didokumentasikan di [`Self::save`]).
+///
+/// Tak ada penjaga runtime untuk ini di v1 — lih. RFC-0035 "Pertanyaan
+/// terbuka" untuk kenapa (butuh `WorldId` di core `arke`, perubahan di luar
+/// scope adapter ini).
 pub struct MongoStore {
     db: Database,
     entities: Collection<Document>,
@@ -120,7 +157,10 @@ impl MongoStore {
     /// tak ada.
     ///
     /// Lihat [`Self::materialize`] untuk perlakuan `cmp` absen vs. korup dan
-    /// jaminan despawn-on-error.
+    /// jaminan despawn-on-error. **Peringatan:** memuat ke `World` yang
+    /// bukan `World` biasa dipakai bersama `MongoStore` ini (mis. `World`
+    /// sekali-pakai untuk inspeksi) menaut ulang `pid` — lihat "Peringatan:
+    /// satu store, satu `World`" pada [`MongoStore`].
     pub async fn fetch(
         &mut self,
         world: &mut World,
@@ -139,6 +179,19 @@ impl MongoStore {
     ///
     /// Memuat **seluruh** koleksi tanpa paging; materialisasi parsial
     /// (`load_where`) ditunda ke RFC lanjutan.
+    ///
+    /// **Peringatan:** sama seperti [`Self::fetch`], memuat ke `World` yang
+    /// bukan `World` biasa dipakai bersama `MongoStore` ini menaut ulang
+    /// `pid` — lihat "Peringatan: satu store, satu `World`" pada
+    /// [`MongoStore`].
+    ///
+    /// **`load` menambah, bukan mengganti.** [`Self::materialize`] selalu
+    /// `world.spawn()` entity baru; memanggil `load` dua kali ke `World`
+    /// yang sama menggandakan tiap entity — panggilan kedua men-`bind` ulang
+    /// tiap `pid` ke entity barunya, sehingga salinan pertama jadi entity
+    /// yatim (masih ada di `World`, tapi tak lagi tertaut ke `pid` mana pun
+    /// di `pid_of`/`entity_of`). `load` mengasumsikan `world` kosong atau
+    /// berisi entity yang memang bukan milik store ini.
     pub async fn load(&mut self, world: &mut World) -> Result<(), MongoError> {
         let mut cursor = self.entities.find(doc! {}).sort(doc! { "_id": 1 }).await?;
         while let Some(document) = cursor.try_next().await? {
@@ -211,6 +264,17 @@ impl MongoStore {
 
     /// Menulis keadaan `entity` ke dokumen `pid` (last-write-wins) dan
     /// menaikkan `version`.
+    ///
+    /// # Err bila dokumen sudah tak ada
+    ///
+    /// `update` tak meng-upsert: bila `pid` tak lagi cocok dengan dokumen
+    /// mana pun (mis. dihapus penulis lain di antara `fetch` dan `update`
+    /// ini), tulisan tak mengenai apa pun dan hasilnya
+    /// `Err(MongoError::Missing { pid })` — bukan `Ok(())` yang diam-diam
+    /// membuang tulisan. Ini beda perlakuan sengaja dari [`Self::remove`],
+    /// yang idempoten terhadap dokumen yang sudah tak ada (delete memang
+    /// wajar dipanggil dua kali); `update` bukan kasus yang sama karena
+    /// pemanggil datang membawa data yang mengira akan tersimpan.
     pub async fn update(
         &mut self,
         world: &World,
@@ -218,7 +282,10 @@ impl MongoStore {
         pid: Pid,
     ) -> Result<(), MongoError> {
         let ops = self.reg.update_ops(world, entity)?;
-        self.entities.update_one(doc! { "_id": pid.0 }, ops).await?;
+        let result = self.entities.update_one(doc! { "_id": pid.0 }, ops).await?;
+        if result.matched_count == 0 {
+            return Err(MongoError::Missing { pid });
+        }
         Ok(())
     }
 
@@ -252,6 +319,13 @@ impl MongoStore {
 
     /// Versi dokumen `pid` saat ini; `None` bila dokumen tak ada. Dipakai untuk
     /// retry setelah [`MongoError::Conflict`].
+    ///
+    /// `None` sebenarnya menutupi tiga keadaan: dokumen tak ada, field
+    /// `version` absen, atau `version` bukan Int64. Dokumen yang ditulis
+    /// `arke-mongo` sendiri (`create`/`save`) selalu punya `version` bertipe
+    /// Int64, jadi dua kemungkinan terakhir hanya muncul pada dokumen asing
+    /// (ditulis service lain, atau dikorupsi) — untuk dokumen milik
+    /// `arke-mongo`, `None` di sini memang berarti "dokumen tak ada".
     pub async fn version_of(&self, pid: Pid) -> Result<Option<i64>, MongoError> {
         Ok(self
             .entities
@@ -279,6 +353,18 @@ impl MongoStore {
     /// Menulis seluruh working-set: upsert tiap entity hidup, lalu hapus
     /// dokumen milik entity yang sudah tak ada di `world`.
     ///
+    /// **Versi awal berbeda dari [`Self::create`]:** `create` menyisip
+    /// `version: 0` secara eksplisit, sedangkan upsert `$inc` di sini atas
+    /// dokumen yang belum ada dimulai dari nol dan menaikkannya ke `1` dalam
+    /// operasi yang sama — jadi entity yang lahir lewat `save` mulai dari
+    /// `version: 1`, bukan `0`. Tak terlihat dari luar sampai dikombinasikan
+    /// dengan [`Self::update_checked`]: `save(&w)` diikuti
+    /// `update_checked(&w, e, pid, 0)` akan selalu `Conflict` (`expected: 0`
+    /// vs. `actual: Some(1)`) walau belum ada penulis lain yang menyentuhnya.
+    /// Pemanggil yang mencampur `save` dan `update_checked` atas entity yang
+    /// sama perlu membaca versi lewat [`Self::version_of`] dulu, bukan
+    /// mengasumsikan `0`.
+    ///
     /// # Atomisitas
     ///
     /// Operasi per-dokumen berurutan **tanpa transaksi**: atomik **per-entity**,
@@ -293,14 +379,29 @@ impl MongoStore {
     /// `bind` dipanggil tepat setelah `update_one` sukses untuk entity itu,
     /// jadi tak ada tautan yang mengklaim entity yang belum tertulis. Entity
     /// yang belum sempat diproses tetap pada tautan lamanya (atau tanpa
-    /// tautan bila baru). Peringatan terpisah: memanggil `save` dengan
-    /// `world` yang berbeda dari yang dipakai `save`/`create`/`fetch`
-    /// sebelumnya pada `MongoStore` yang sama akan menghapus dokumen milik
-    /// `World` yang lama — `entity_of` tak tahu batas antar-`World`, ia hanya
-    /// tahu "pid yang tak terlihat di panggilan `save` ini".
+    /// tautan bila baru).
+    ///
+    /// Memanggil `save` dengan `world` yang berbeda dari yang dipakai
+    /// `save`/`create`/`fetch` sebelumnya pada `MongoStore` yang sama akan
+    /// menghapus dokumen milik `World` yang lama — `entity_of` tak tahu batas
+    /// antar-`World`, ia hanya tahu "pid yang tak terlihat di panggilan
+    /// `save` ini". Ini salah satu dari beberapa mode kegagalan lintas-World;
+    /// lihat "Peringatan: satu store, satu `World`" pada [`MongoStore`] untuk
+    /// daftar lengkapnya (termasuk dua mode yang lebih tajam dan tak
+    /// melibatkan `save` sama sekali).
     pub async fn save(&mut self, world: &World) -> Result<(), MongoError> {
-        // Kumpulkan entity hidup lebih dulu (sinkron) agar `&World` tak ditahan
-        // melewati `.await`.
+        // Kumpulkan dulu (sinkron) alih-alih menulis sambil mengiterasi:
+        // `update_ops` bisa gagal dengan `InvalidName`/`DuplicateField`
+        // (validasi nama field, RFC-0035 Am. 2), dan mengumpulkan semua
+        // operasi dulu berarti error semacam itu membatalkan seluruh `save`
+        // **sebelum** satu dokumen pun tertulis — bukan meninggalkan separuh
+        // entity tertulis dan separuh gagal di tengah jalan. (Ini tak ada
+        // hubungannya dengan menahan `&World` melewati `.await`: `world` di
+        // sini parameter `async fn`, jadi ia sudah hidup di dalam future
+        // untuk seluruh umurnya terlepas dari kapan dikumpulkan — future ini
+        // `!Send` baik dikumpulkan lebih dulu maupun tidak, sejajar
+        // `arke-postgres`.) Biayanya: BSON seluruh entity hidup ditahan di
+        // memori sekaligus sebelum satu pun ditulis.
         let mut live: Vec<Entity> = Vec::new();
         <Entity>::each_filtered_shared::<()>(world, |e| live.push(e));
 

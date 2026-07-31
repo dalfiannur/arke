@@ -348,6 +348,31 @@ async fn update_menulis_nilai_baru_dan_menaikkan_version() {
 }
 
 #[tokio::test]
+async fn update_pada_dokumen_yang_sudah_hilang_gagal_bukan_diam_diam() {
+    let Some(mut s) = store("arke_test_update_missing").await else {
+        eprintln!("MONGODB_URI tak diset — tes dilewati");
+        return;
+    };
+
+    let mut w = World::new();
+    let e = w.spawn();
+    w.insert(e, Position { x: 0.0, y: 0.0 });
+    let pid = s.create(&w, e).await.unwrap();
+
+    // Replica lain (atau `remove` kita sendiri) menghapus dokumennya.
+    s.remove(pid).await.unwrap();
+
+    // `update` tak boleh melaporkan sukses atas tulisan yang tak mengenai
+    // apa pun — lihat FIX 1.
+    w.insert(e, Position { x: 9.0, y: 9.0 });
+    let hasil = s.update(&w, e, pid).await;
+    assert!(
+        matches!(hasil, Err(MongoError::Missing { pid: p }) if p == pid),
+        "update ke dokumen yang sudah hilang harus Err(Missing), dapat {hasil:?}"
+    );
+}
+
+#[tokio::test]
 async fn update_checked_mendeteksi_konflik_versi() {
     let Some(mut s) = store("arke_test_conflict").await else {
         eprintln!("MONGODB_URI tak diset — tes dilewati");
@@ -499,28 +524,56 @@ async fn load_deterministik_antar_materialisasi() {
         return;
     };
 
-    let mut w = World::new();
-    for hp in 1..=5i64 {
-        let e = w.spawn();
-        w.insert(e, Health { hp });
+    // Membandingkan dua run `load` satu sama lain tidak membuktikan apa-apa
+    // tentang STD-0005: urutan apa pun yang deterministik-tapi-salah lolos
+    // (termasuk tanpa sort sama sekali, karena kursor Mongo atas koleksi yang
+    // tak berubah cenderung stabil antar-panggilan). Tes ini sebagai gantinya
+    // menyisip dokumen dengan `_id` yang dipilih eksplisit dan TIDAK
+    // disisipkan berurutan, lalu menagih bahwa `load` memuatnya dalam urutan
+    // `_id` MENAIK — satu-satunya cara urutan itu bisa muncul benar adalah
+    // lewat `.sort({ _id: 1 })` yang eksplisit di `load`.
+    let ids: Vec<mongodb::bson::oid::ObjectId> = (1..=5u32)
+        .map(|n| {
+            mongodb::bson::oid::ObjectId::parse_str(format!("{n:024x}"))
+                .expect("ObjectId hex 24-karakter valid")
+        })
+        .collect();
+    // `hp` menaik seiring `_id` menaik — urutan _id menaik yang benar karena
+    // itu terbaca langsung dari urutan `hp` yang termaterialisasi.
+    let hp_for_ascending_id = [100i64, 200, 300, 400, 500];
+
+    // Sisip dalam urutan teracak (bukan menaik, bukan pula menurun murni)
+    // supaya urutan penyisipan alami tak kebetulan kongruen dengan urutan
+    // `_id` menaik yang ditagih di bawah.
+    let insert_order = [2usize, 4, 0, 3, 1]; // id3, id5, id1, id4, id2
+    let raw = mongodb::Client::with_uri_str(uri().expect("MONGODB_URI"))
+        .await
+        .expect("klien driver mentah untuk setup tes");
+    let coll = raw
+        .database("arke_test_load_order")
+        .collection::<mongodb::bson::Document>("arke_entities");
+    for &i in &insert_order {
+        coll.insert_one(mongodb::bson::doc! {
+            "_id": ids[i],
+            "version": 0i64,
+            "cmp": { "health": { "hp": hp_for_ascending_id[i] } },
+        })
+        .await
+        .expect("tulis dokumen uji urutan");
     }
-    s.save(&w).await.unwrap();
 
-    let order = |world: &World| {
-        let mut v = Vec::new();
-        <(arke::Entity, &Health)>::each_filtered_shared::<()>(world, |(_, h)| v.push(h.hp));
-        v
-    };
+    let mut w = World::new();
+    s.load(&mut w).await.unwrap();
 
-    let mut a = World::new();
-    s.load(&mut a).await.unwrap();
-    let mut b = World::new();
-    s.load(&mut b).await.unwrap();
+    let mut hps: Vec<i64> = Vec::new();
+    <(arke::Entity, &Health)>::each_filtered_shared::<()>(&w, |(_, h)| hps.push(h.hp));
 
     assert_eq!(
-        order(&a),
-        order(&b),
-        "urutan materialisasi harus identik (STD-0005)"
+        hps,
+        hp_for_ascending_id.to_vec(),
+        "load harus memuat dalam urutan _id menaik (STD-0005), dapat {hps:?} \
+         — dokumen disisip dalam urutan teracak justru untuk menagih sort \
+         eksplisit, bukan kebetulan urutan sisip"
     );
 }
 
@@ -550,5 +603,175 @@ async fn load_cmp_bertipe_salah_gagal_bukan_diam_diam() {
         matches!(hasil, Err(MongoError::Decode { .. })),
         "cmp bertipe salah harus membuat load Err(Decode), dapat {hasil:?} — \
          world yang diam-diam kosong berarti kehilangan data tanpa jejak"
+    );
+}
+
+#[tokio::test]
+async fn load_dua_kali_ke_world_yang_sama_menggandakan_entity() {
+    // FIX 4: `materialize` selalu `world.spawn()` entity baru; `load` tak
+    // pernah mengosongkan `world` lebih dulu. Tes ini menagih (bukan
+    // menganjurkan) perilaku itu, supaya tak diam-diam memburuk lebih jauh.
+    let Some(mut s) = store("arke_test_load_append").await else {
+        eprintln!("MONGODB_URI tak diset — tes dilewati");
+        return;
+    };
+
+    let mut w = World::new();
+    for hp in 1..=3i64 {
+        let e = w.spawn();
+        w.insert(e, Health { hp });
+    }
+    s.save(&w).await.unwrap();
+
+    let mut w2 = World::new();
+    s.load(&mut w2).await.unwrap();
+    s.load(&mut w2).await.unwrap();
+
+    let mut hps: Vec<i64> = Vec::new();
+    <(arke::Entity, &Health)>::each_filtered_shared::<()>(&w2, |(_, h)| hps.push(h.hp));
+    hps.sort_unstable();
+    assert_eq!(
+        hps,
+        vec![1, 1, 2, 2, 3, 3],
+        "load dua kali ke World yang sama harus menggandakan tiap entity \
+         (tak ada dedup/reset) — bila ini berubah, dokumentasikan perubahan \
+         perilakunya, jangan cuma perbarui angka di tes ini"
+    );
+}
+
+// --- FIX 3: tes yang MEMATOK bahaya lintas-World, bukan mendokumentasikan
+// perilaku yang diinginkan. `MongoStore` mengasumsikan satu `World` per
+// store (lihat rustdoc pada `MongoStore`); dua tes berikut membuktikan dua
+// mode kerusakan data yang muncul begitu asumsi itu dilanggar, tanpa
+// `save` pernah dipanggil dengan `World` kedua secara eksplisit-sengaja —
+// keduanya lahir dari operasi yang terlihat wajar (`fetch` untuk inspeksi,
+// dua `World` independen). Bila perilaku ini berubah karena penjaga
+// `WorldId` ditambahkan (lih. RFC-0035, Pertanyaan terbuka), tes ini
+// SEHARUSNYA gagal dan perlu ditulis ulang untuk memverifikasi penjaga
+// barunya — kegagalannya bukan tanda regresi.
+
+#[tokio::test]
+async fn bahaya_fetch_ke_world_scratch_merebut_pid() {
+    let Some(mut s) = store("arke_test_bahaya_fetch_scratch").await else {
+        eprintln!("MONGODB_URI tak diset — tes dilewati");
+        return;
+    };
+
+    let mut w = World::new();
+    // Entity dummy disisip lebih dulu supaya `a` BUKAN `Entity::from_raw(0,
+    // 0)` — kalau `a` kebetulan sama dengan spawn pertama `scratch` di
+    // bawah, tes ini diam-diam berubah jadi menguji Mode B (tabrakan
+    // handle), bukan Mode A (rebind lewat fetch).
+    let _dummy = w.spawn();
+    let a = w.spawn();
+    w.insert(a, Health { hp: 1 });
+    s.save(&w).await.unwrap();
+    let pid_asli = s.pid_of(a).expect("a harus punya pid setelah save");
+
+    // Pembacaan yang terlihat sepenuhnya wajar: inspeksi satu entity lewat
+    // World sekali-pakai (baru, jadi spawn pertamanya beda dari `a`).
+    let mut scratch = World::new();
+    s.fetch(&mut scratch, pid_asli)
+        .await
+        .unwrap()
+        .expect("fetch entity yang baru disimpan");
+
+    // `fetch` di atas menaut ulang `pid_asli` ke entity milik `scratch`
+    // (lewat `bind`, yang menjaga bijeksi) — `a` di `w` kehilangan tautannya.
+    assert_eq!(
+        s.pid_of(a),
+        None,
+        "fetch ke World scratch merebut tautan pid dari entity asal — ini \
+         bahayanya, bukan hasil yang diinginkan"
+    );
+
+    // `save` berikutnya atas `w` tak lagi mengenali `a` sebagai entity lama:
+    // ia mencetak pid baru dan menghapus dokumen lama.
+    s.save(&w).await.unwrap();
+    let pid_baru = s.pid_of(a).expect("a harus punya pid setelah save kedua");
+
+    assert_ne!(
+        pid_baru, pid_asli,
+        "save kedua seharusnya mencetak pid baru untuk `a` — pid lama sudah \
+         direbut scratch World"
+    );
+    assert_eq!(
+        s.version_of(pid_asli).await.unwrap(),
+        None,
+        "dokumen pid lama harus terhapus — referensi eksternal ke pid_asli \
+         kini menggantung, itulah bahayanya"
+    );
+    assert!(
+        s.version_of(pid_baru).await.unwrap().is_some(),
+        "dokumen pid baru harus ada"
+    );
+}
+
+#[tokio::test]
+async fn bahaya_entity_handle_bertabrakan_antar_world() {
+    let Some(mut s) = store("arke_test_bahaya_tabrakan_world").await else {
+        eprintln!("MONGODB_URI tak diset — tes dilewati");
+        return;
+    };
+
+    let mut w1 = World::new();
+    let e1 = w1.spawn();
+    w1.insert(e1, Health { hp: 1 });
+
+    let mut w2 = World::new();
+    let e2 = w2.spawn();
+    w2.insert(e2, Health { hp: 2 });
+
+    // Dua World independen yang masing-masing men-spawn entity pertamanya
+    // menghasilkan handle `Entity` yang identik (indeks dense mulai dari nol
+    // di tiap World) — prasyarat bahaya ini, bukan sesuatu yang direkayasa.
+    assert_eq!(
+        e1, e2,
+        "prasyarat tes: spawn pertama pada dua World kosong harus \
+         menghasilkan Entity yang identik"
+    );
+
+    s.save(&w1).await.unwrap();
+    let pid1 = s.pid_of(e1).expect("e1 harus punya pid setelah save w1");
+
+    // `save(&w2)` memakai `pid_of.get(e2)` untuk memutuskan upsert vs create
+    // baru — karena `e2 == e1`, ia menemukan `pid1` dan MENIMPA dokumen
+    // milik entity w1 dengan data w2, bukan mencetak dokumen baru.
+    s.save(&w2).await.unwrap();
+    let pid2 = s.pid_of(e2).expect("e2 harus punya pid setelah save w2");
+
+    assert_eq!(
+        pid1, pid2,
+        "save w2 menimpa pid yang sama alih-alih mencetak pid baru — \
+         entity w2 tak pernah punya dokumennya sendiri, itulah bahayanya"
+    );
+
+    let count = s
+        .collection()
+        .count_documents(doc! {})
+        .await
+        .expect("count_documents");
+    assert_eq!(
+        count, 1,
+        "harusnya dua entity independen -> dua dokumen, tapi tabrakan \
+         handle membuat keduanya berbagi satu dokumen"
+    );
+
+    let dokumen = s
+        .collection()
+        .find_one(doc! { "_id": pid1.0 })
+        .await
+        .unwrap()
+        .expect("dokumen harus ada");
+    let hp = dokumen
+        .get_document("cmp")
+        .unwrap()
+        .get_document("health")
+        .unwrap()
+        .get_i64("hp")
+        .unwrap();
+    assert_eq!(
+        hp, 2,
+        "data w1 (hp: 1) harus sudah tertimpa diam-diam oleh data w2 (hp: 2)"
     );
 }
