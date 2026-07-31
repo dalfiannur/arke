@@ -1,6 +1,7 @@
 //! Pemetaan murni [`arke::Value`] ↔ BSON (RFC-0035 §4). Tanpa I/O, tanpa World —
 //! seluruh modul ini dapat diuji tanpa database.
 
+use crate::MongoError;
 use arke::Value;
 use mongodb::bson::{Bson, Document};
 
@@ -53,4 +54,26 @@ pub fn bson_to_value(bson: &Bson) -> Option<Value> {
         ),
         _ => return None,
     })
+}
+
+/// Memastikan seluruh nama field di dalam `value` sah sebagai nama field BSON:
+/// tak mengandung `.` dan tak berawalan `$` (RFC-0035 §4). Rekursif menembus
+/// `Map` dan `List`.
+pub fn validate_names(component: &'static str, value: &Value) -> Result<(), MongoError> {
+    match value {
+        Value::Map(entries) => {
+            for (key, val) in entries {
+                if key.contains('.') || key.starts_with('$') {
+                    return Err(MongoError::InvalidName {
+                        component,
+                        field: key.clone(),
+                    });
+                }
+                validate_names(component, val)?;
+            }
+            Ok(())
+        }
+        Value::List(items) => items.iter().try_for_each(|v| validate_names(component, v)),
+        _ => Ok(()),
+    }
 }

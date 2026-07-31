@@ -2,7 +2,7 @@
 
 use arke::Value;
 use arke_mongo::bson::{Bson, Document};
-use arke_mongo::{bson_to_value, value_to_bson};
+use arke_mongo::{MongoError, bson_to_value, validate_names, value_to_bson};
 
 #[test]
 fn skalar_dipetakan_ke_bson_yang_setara() {
@@ -74,4 +74,43 @@ fn int32_dari_penulis_lain_diterima_sebagai_int() {
 #[test]
 fn tipe_bson_tak_dikenal_ditolak() {
     assert_eq!(bson_to_value(&Bson::Undefined), None);
+}
+
+#[test]
+fn nama_field_valid_diterima() {
+    let v = Value::Map(vec![("hp".into(), Value::Int(1))]);
+    assert!(validate_names("health", &v).is_ok());
+}
+
+#[test]
+fn titik_dalam_nama_field_ditolak() {
+    let v = Value::Map(vec![("a.b".into(), Value::Int(1))]);
+    match validate_names("health", &v) {
+        Err(MongoError::InvalidName { component, field }) => {
+            assert_eq!(component, "health");
+            assert_eq!(field, "a.b");
+        }
+        other => panic!("harus InvalidName, dapat {other:?}"),
+    }
+}
+
+#[test]
+fn dollar_di_awal_nama_field_ditolak() {
+    let v = Value::Map(vec![("$set".into(), Value::Int(1))]);
+    assert!(matches!(
+        validate_names("health", &v),
+        Err(MongoError::InvalidName { .. })
+    ));
+}
+
+#[test]
+fn validasi_menembus_map_bersarang_dan_list() {
+    let v = Value::Map(vec![(
+        "items".into(),
+        Value::List(vec![Value::Map(vec![("bad.name".into(), Value::Null)])]),
+    )]);
+    assert!(matches!(
+        validate_names("inventory", &v),
+        Err(MongoError::InvalidName { .. })
+    ));
 }
