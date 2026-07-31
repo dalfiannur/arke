@@ -14,7 +14,7 @@
 //! seperti biasa.
 
 use arke::{Entity, World};
-use arke_mongo::{IndexDef, MongoStore, mongo_component};
+use arke_mongo::{IndexDef, MongoError, MongoStore, mongo_component};
 
 #[derive(arke::Serialize, PartialEq, Debug)]
 struct Position {
@@ -322,4 +322,84 @@ async fn fetch_dua_kali_pid_sama_menjaga_bijeksi_pid_of_entity_of() {
     // mengklaim pid ini.
     assert_eq!(s.pid_of(e1), None);
     assert_eq!(s.pid_of(e2), Some(pid));
+}
+
+#[tokio::test]
+async fn update_menulis_nilai_baru_dan_menaikkan_version() {
+    let Some(mut s) = store("arke_test_update").await else {
+        eprintln!("MONGODB_URI tak diset — tes dilewati");
+        return;
+    };
+
+    let mut w = World::new();
+    let e = w.spawn();
+    w.insert(e, Position { x: 0.0, y: 0.0 });
+    let pid = s.create(&w, e).await.unwrap();
+    assert_eq!(s.version_of(pid).await.unwrap(), Some(0));
+
+    w.insert(e, Position { x: 9.0, y: 9.0 });
+    s.update(&w, e, pid).await.unwrap();
+    assert_eq!(s.version_of(pid).await.unwrap(), Some(1));
+
+    let mut w2 = World::new();
+    let e2 = s.fetch(&mut w2, pid).await.unwrap().unwrap();
+    assert_eq!(w2.get::<Position>(e2), Some(&Position { x: 9.0, y: 9.0 }));
+}
+
+#[tokio::test]
+async fn update_checked_mendeteksi_konflik_versi() {
+    let Some(mut s) = store("arke_test_conflict").await else {
+        eprintln!("MONGODB_URI tak diset — tes dilewati");
+        return;
+    };
+
+    let mut w = World::new();
+    let e = w.spawn();
+    w.insert(e, Health { hp: 10 });
+    let pid = s.create(&w, e).await.unwrap();
+
+    // Penulis lain menaikkan versi lebih dulu.
+    s.update(&w, e, pid).await.unwrap();
+
+    // Kita masih memegang harapan versi 0 → konflik.
+    match s.update_checked(&w, e, pid, 0).await {
+        Err(MongoError::Conflict {
+            expected, actual, ..
+        }) => {
+            assert_eq!(expected, 0);
+            assert_eq!(actual, Some(1));
+        }
+        other => panic!("harus Conflict, dapat {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn update_checked_sukses_mengembalikan_versi_baru() {
+    let Some(mut s) = store("arke_test_checked_ok").await else {
+        eprintln!("MONGODB_URI tak diset — tes dilewati");
+        return;
+    };
+
+    let mut w = World::new();
+    let e = w.spawn();
+    w.insert(e, Health { hp: 1 });
+    let pid = s.create(&w, e).await.unwrap();
+
+    assert_eq!(s.update_checked(&w, e, pid, 0).await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn remove_menghapus_dokumen() {
+    let Some(mut s) = store("arke_test_remove").await else {
+        eprintln!("MONGODB_URI tak diset — tes dilewati");
+        return;
+    };
+
+    let mut w = World::new();
+    let e = w.spawn();
+    w.insert(e, Health { hp: 3 });
+    let pid = s.create(&w, e).await.unwrap();
+
+    s.remove(pid).await.unwrap();
+    assert_eq!(s.version_of(pid).await.unwrap(), None);
 }

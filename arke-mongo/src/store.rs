@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use arke::{Entity, World};
 use mongodb::bson::{Document, doc};
+use mongodb::options::ReturnDocument;
 use mongodb::{Client, Collection, Database};
 
 use crate::registry::Registry;
@@ -171,6 +172,67 @@ impl MongoStore {
     /// untuk kenyamanan.
     pub fn entity_of(&self, pid: Pid) -> Option<Entity> {
         self.entity_of.get(&pid).copied()
+    }
+
+    /// Menulis keadaan `entity` ke dokumen `pid` (last-write-wins) dan
+    /// menaikkan `version`.
+    pub async fn update(
+        &mut self,
+        world: &World,
+        entity: Entity,
+        pid: Pid,
+    ) -> Result<(), MongoError> {
+        let ops = self.reg.update_ops(world, entity)?;
+        self.entities.update_one(doc! { "_id": pid.0 }, ops).await?;
+        Ok(())
+    }
+
+    /// Seperti [`Self::update`], tetapi hanya menulis bila `version` dokumen
+    /// masih `expected` (optimistic-lock). Mengembalikan versi baru.
+    ///
+    /// Kebijakan resolusi konflik (retry / LWW / merge) diserahkan pemanggil —
+    /// sejajar `PgStore::update_entity` (RFC-0035 §5).
+    pub async fn update_checked(
+        &mut self,
+        world: &World,
+        entity: Entity,
+        pid: Pid,
+        expected: i64,
+    ) -> Result<i64, MongoError> {
+        let ops = self.reg.update_ops(world, entity)?;
+        let updated = self
+            .entities
+            .find_one_and_update(doc! { "_id": pid.0, "version": expected }, ops)
+            .return_document(ReturnDocument::After)
+            .await?;
+        match updated {
+            Some(document) => Ok(document.get_i64("version").unwrap_or(expected + 1)),
+            None => Err(MongoError::Conflict {
+                pid,
+                expected,
+                actual: self.version_of(pid).await?,
+            }),
+        }
+    }
+
+    /// Versi dokumen `pid` saat ini; `None` bila dokumen tak ada. Dipakai untuk
+    /// retry setelah [`MongoError::Conflict`].
+    pub async fn version_of(&self, pid: Pid) -> Result<Option<i64>, MongoError> {
+        Ok(self
+            .entities
+            .find_one(doc! { "_id": pid.0 })
+            .projection(doc! { "version": 1i32 })
+            .await?
+            .and_then(|d| d.get_i64("version").ok()))
+    }
+
+    /// Menghapus dokumen `pid` dan melepas pemetaannya dari working-set.
+    pub async fn remove(&mut self, pid: Pid) -> Result<(), MongoError> {
+        self.entities.delete_one(doc! { "_id": pid.0 }).await?;
+        if let Some(entity) = self.entity_of.remove(&pid) {
+            self.pid_of.remove(&entity);
+        }
+        Ok(())
     }
 
     /// Menautkan `entity` ↔ `pid`, menjaga `pid_of`/`entity_of` tetap bijektif:
