@@ -3,7 +3,7 @@
 use arke::{Value, World};
 use arke_mongo::bson::{Bson, Document};
 use arke_mongo::{
-    Dir, IndexDef, MongoComponent, MongoError, Registry, bson_to_value, mongo_component,
+    Dir, IndexDef, MongoComponent, MongoError, Pid, Registry, bson_to_value, mongo_component,
     validate_names, value_to_bson,
 };
 
@@ -207,4 +207,56 @@ fn index_def_menyebut_field_yang_tak_ada_gagal_di_build_debug() {
     let e = world.spawn();
     world.insert(e, IndeksSalah { hp: 1 });
     let _ = reg.cmp_doc(&world, e);
+}
+
+#[test]
+fn apply_menyisipkan_komponen_terdaftar_ke_world() {
+    let mut reg = Registry::new();
+    reg.push::<Position>();
+
+    let mut src = World::new();
+    let a = src.spawn();
+    src.insert(a, Position { x: 3.0, y: 4.0 });
+    let cmp = reg.cmp_doc(&src, a).unwrap();
+
+    let mut dst = World::new();
+    let b = dst.spawn();
+    reg.apply(&mut dst, b, Pid::new(), &cmp).unwrap();
+
+    assert_eq!(dst.get::<Position>(b), Some(&Position { x: 3.0, y: 4.0 }));
+}
+
+#[test]
+fn apply_mengabaikan_komponen_yang_tak_terdaftar() {
+    let mut reg = Registry::new();
+    reg.push::<Position>();
+
+    let mut cmp = Document::new();
+    cmp.insert("tak_dikenal", Document::new());
+
+    let mut world = World::new();
+    let e = world.spawn();
+    assert!(
+        reg.apply(&mut world, e, Pid::new(), &cmp).is_ok(),
+        "komponen milik service lain tak boleh menggagalkan pembacaan"
+    );
+}
+
+#[test]
+fn apply_gagal_keras_saat_bentuk_komponen_tak_cocok() {
+    let mut reg = Registry::new();
+    reg.push::<Position>();
+
+    let mut bad = Document::new();
+    bad.insert("x", "bukan angka");
+    let mut cmp = Document::new();
+    cmp.insert("position", bad);
+
+    let mut world = World::new();
+    let e = world.spawn();
+    let pid = Pid::new();
+    match reg.apply(&mut world, e, pid, &cmp) {
+        Err(MongoError::Decode { component, .. }) => assert_eq!(component, "position"),
+        other => panic!("harus Decode, dapat {other:?}"),
+    }
 }

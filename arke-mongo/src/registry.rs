@@ -6,7 +6,7 @@
 use arke::{Entity, Value, World};
 use mongodb::bson::Document;
 
-use crate::bson_map::{validate_names, value_to_bson};
+use crate::bson_map::{bson_to_value, validate_names, value_to_bson};
 use crate::{IndexDef, MongoComponent, MongoError};
 
 /// Operasi type-erased untuk satu tipe komponen terdaftar.
@@ -15,10 +15,23 @@ struct Registered {
     indexes: &'static [IndexDef],
     /// Nilai komponen `T` milik `entity`, bila ada.
     dump_one: fn(&World, Entity) -> Option<Value>,
+    /// Rekonstruksi komponen dari `Value` lalu sisipkan; `false` bila bentuknya
+    /// tak cocok.
+    apply: fn(&mut World, Entity, &Value) -> bool,
 }
 
 fn dump_one_of<T: MongoComponent>(world: &World, entity: Entity) -> Option<Value> {
     world.get::<T>(entity).map(arke::Serialize::to_value)
+}
+
+fn apply_of<T: MongoComponent>(world: &mut World, entity: Entity, value: &Value) -> bool {
+    match T::from_value(value) {
+        Some(component) => {
+            world.insert(entity, component);
+            true
+        }
+        None => false,
+    }
 }
 
 /// Memastikan tiap `IndexDef::field` benar-benar ada sebagai field komponen
@@ -74,6 +87,7 @@ impl Registry {
             name: T::NAME,
             indexes: T::INDEXES,
             dump_one: dump_one_of::<T>,
+            apply: apply_of::<T>,
         });
     }
 
@@ -89,5 +103,38 @@ impl Registry {
             }
         }
         Ok(doc)
+    }
+
+    /// Menyisipkan komponen dari sub-dokumen `cmp` ke `entity`.
+    ///
+    /// Kunci yang **tak terdaftar diabaikan** — dokumen bisa ditulis service
+    /// lain atau versi aplikasi lain, dan kehadirannya bukan kesalahan.
+    /// Komponen terdaftar yang bentuknya tak cocok menghasilkan
+    /// [`MongoError::Decode`], **bukan** dilewati diam-diam: kehilangan
+    /// komponen tanpa suara akan lolos ke `save` berikutnya dan menjadi
+    /// kehilangan data permanen (RFC-0035 §6).
+    pub fn apply(
+        &self,
+        world: &mut World,
+        entity: Entity,
+        pid: crate::Pid,
+        cmp: &Document,
+    ) -> Result<(), MongoError> {
+        for r in &self.registered {
+            let Some(bson) = cmp.get(r.name) else {
+                continue;
+            };
+            let value = bson_to_value(bson).ok_or(MongoError::Decode {
+                pid,
+                component: r.name,
+            })?;
+            if !(r.apply)(world, entity, &value) {
+                return Err(MongoError::Decode {
+                    pid,
+                    component: r.name,
+                });
+            }
+        }
+        Ok(())
     }
 }
