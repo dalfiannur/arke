@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use arke::Entity;
+use arke::{Entity, World};
 use mongodb::bson::{Document, doc};
 use mongodb::{Client, Collection, Database};
 
@@ -31,14 +31,9 @@ pub struct MongoStore {
     db: Database,
     entities: Collection<Document>,
     reg: Registry,
-    // `#[allow(dead_code)]`: dibaca/ditulis oleh jalur per-operasi
-    // (`create`/`fetch`/`update`/`remove`, Task 12-13) yang belum ada di
-    // increment ini — bukan sisa `drop_database` yang dicabut (FIX 1).
     /// Jembatan Entity (indeks ephemeral) → `pid` persisten (RFC-0034 §2).
-    #[allow(dead_code)]
     pid_of: HashMap<Entity, Pid>,
     /// Jembatan `pid` → Entity (handle lokal working-set).
-    #[allow(dead_code)]
     entity_of: HashMap<Pid, Entity>,
 }
 
@@ -103,5 +98,45 @@ impl MongoStore {
             .upsert(true)
             .await?;
         Ok(())
+    }
+
+    /// Menyimpan `entity` sebagai dokumen baru dan mengembalikan `pid`-nya.
+    ///
+    /// `pid` dialokasikan di sisi klien, jadi operasi ini cukup satu
+    /// round-trip dan aman untuk multi-replica (RFC-0035 §3).
+    pub async fn create(&mut self, world: &World, entity: Entity) -> Result<Pid, MongoError> {
+        let cmp = self.reg.cmp_doc(world, entity)?;
+        let pid = Pid::new();
+        self.entities
+            .insert_one(doc! { "_id": pid.0, "version": 0i64, "cmp": cmp })
+            .await?;
+        self.pid_of.insert(entity, pid);
+        self.entity_of.insert(pid, entity);
+        Ok(pid)
+    }
+
+    /// Memuat dokumen `pid` ke `world` sebagai entity baru; `None` bila dokumen
+    /// tak ada.
+    ///
+    /// Bila sebuah komponen gagal di-decode, entity yang telanjur di-spawn
+    /// dibuang lagi supaya `world` tak meninggalkan entity separuh terisi.
+    pub async fn fetch(
+        &mut self,
+        world: &mut World,
+        pid: Pid,
+    ) -> Result<Option<Entity>, MongoError> {
+        let Some(document) = self.entities.find_one(doc! { "_id": pid.0 }).await? else {
+            return Ok(None);
+        };
+        let entity = world.spawn();
+        if let Ok(cmp) = document.get_document("cmp")
+            && let Err(e) = self.reg.apply(world, entity, pid, cmp)
+        {
+            world.despawn(entity);
+            return Err(e);
+        }
+        self.pid_of.insert(entity, pid);
+        self.entity_of.insert(pid, entity);
+        Ok(Some(entity))
     }
 }

@@ -13,6 +13,7 @@
 //! CI lain yang tak menyetel keduanya tak terpengaruh — tes tetap skip
 //! seperti biasa.
 
+use arke::World;
 use arke_mongo::{IndexDef, MongoStore, mongo_component};
 
 #[derive(arke::Serialize, PartialEq, Debug)]
@@ -129,4 +130,44 @@ async fn ensure_indexes_idempoten() {
 async fn connect_ke_host_mati_gagal_saat_connect_bukan_nanti() {
     let r = MongoStore::connect("mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=1500", "x").await;
     assert!(r.is_err(), "connect ke host mati harus Err, dapat Ok");
+}
+
+#[tokio::test]
+async fn create_lalu_fetch_round_trip_setia() {
+    let Some(mut s) = store("arke_test_create_fetch").await else {
+        eprintln!("MONGODB_URI tak diset — tes dilewati");
+        return;
+    };
+
+    let mut w = World::new();
+    let e = w.spawn();
+    w.insert(e, Position { x: 1.5, y: -2.5 });
+    w.insert(e, Health { hp: 77 });
+    let pid = s.create(&w, e).await.unwrap();
+
+    // World baru: materialisasi dari MongoDB.
+    let mut w2 = World::new();
+    let e2 = s
+        .fetch(&mut w2, pid)
+        .await
+        .unwrap()
+        .expect("entity harus ada");
+
+    assert_eq!(w2.get::<Position>(e2), Some(&Position { x: 1.5, y: -2.5 }));
+    assert_eq!(w2.get::<Health>(e2), Some(&Health { hp: 77 }));
+}
+
+#[tokio::test]
+async fn fetch_pid_tak_dikenal_mengembalikan_none() {
+    let Some(mut s) = store("arke_test_fetch_none").await else {
+        eprintln!("MONGODB_URI tak diset — tes dilewati");
+        return;
+    };
+    let mut w = World::new();
+    assert!(
+        s.fetch(&mut w, arke_mongo::Pid::new())
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
