@@ -110,8 +110,7 @@ impl MongoStore {
         self.entities
             .insert_one(doc! { "_id": pid.0, "version": 0i64, "cmp": cmp })
             .await?;
-        self.pid_of.insert(entity, pid);
-        self.entity_of.insert(pid, entity);
+        self.bind(entity, pid);
         Ok(pid)
     }
 
@@ -120,6 +119,10 @@ impl MongoStore {
     ///
     /// Bila sebuah komponen gagal di-decode, entity yang telanjur di-spawn
     /// dibuang lagi supaya `world` tak meninggalkan entity separuh terisi.
+    /// Field `cmp` yang **absen** berarti entity legit tanpa komponen
+    /// terdaftar (lanjut, `Ok`); `cmp` yang **ada tapi bukan sub-dokumen**
+    /// berarti dokumen korup — bukan sesuatu yang boleh diperlakukan sebagai
+    /// "entity tanpa komponen" secara diam-diam (RFC-0035 §6).
     pub async fn fetch(
         &mut self,
         world: &mut World,
@@ -129,14 +132,59 @@ impl MongoStore {
             return Ok(None);
         };
         let entity = world.spawn();
-        if let Ok(cmp) = document.get_document("cmp")
-            && let Err(e) = self.reg.apply(world, entity, pid, cmp)
-        {
-            world.despawn(entity);
-            return Err(e);
+        match document.get("cmp") {
+            None => {}
+            Some(mongodb::bson::Bson::Document(cmp)) => {
+                if let Err(e) = self.reg.apply(world, entity, pid, cmp) {
+                    world.despawn(entity);
+                    return Err(e);
+                }
+            }
+            Some(_) => {
+                world.despawn(entity);
+                return Err(MongoError::Decode {
+                    pid,
+                    component: "cmp",
+                });
+            }
         }
-        self.pid_of.insert(entity, pid);
-        self.entity_of.insert(pid, entity);
+        self.bind(entity, pid);
         Ok(Some(entity))
+    }
+
+    /// Tautan `entity` ↔ `pid` yang tercatat di store, bila ada.
+    ///
+    /// Aksesor sempit untuk Task 14 (`version_of`/`update_checked`), yang
+    /// butuh menerjemahkan `Entity` lokal ke `pid` persisten untuk operasi
+    /// per-op berikutnya.
+    pub fn pid_of(&self, entity: Entity) -> Option<Pid> {
+        self.pid_of.get(&entity).copied()
+    }
+
+    /// Tautan `pid` ↔ `entity` yang tercatat di store, bila ada.
+    ///
+    /// Sisi cermin dari [`Self::pid_of`]. `pid_of` sendiri tak cukup untuk
+    /// menguji bijeksi `pid_of`/`entity_of` dari luar crate: kebocoran
+    /// `bind` yang diperbaiki di sini (create dua kali untuk `entity` yang
+    /// sama) hanya kelihatan sebagai tautan basi di sisi `entity_of`, tak
+    /// pernah di `pid_of`. Karena itu diekspos di sini juga, bukan cuma
+    /// untuk kenyamanan.
+    pub fn entity_of(&self, pid: Pid) -> Option<Entity> {
+        self.entity_of.get(&pid).copied()
+    }
+
+    /// Menautkan `entity` ↔ `pid`, menjaga `pid_of`/`entity_of` tetap bijektif:
+    /// tautan lama pada salah satu sisi dibersihkan dari sisi lainnya.
+    fn bind(&mut self, entity: Entity, pid: Pid) {
+        if let Some(pid_lama) = self.pid_of.insert(entity, pid)
+            && pid_lama != pid
+        {
+            self.entity_of.remove(&pid_lama);
+        }
+        if let Some(entity_lama) = self.entity_of.insert(pid, entity)
+            && entity_lama != entity
+        {
+            self.pid_of.remove(&entity_lama);
+        }
     }
 }

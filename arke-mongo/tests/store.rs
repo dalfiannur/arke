@@ -13,7 +13,7 @@
 //! CI lain yang tak menyetel keduanya tak terpengaruh — tes tetap skip
 //! seperti biasa.
 
-use arke::World;
+use arke::{Entity, World};
 use arke_mongo::{IndexDef, MongoStore, mongo_component};
 
 #[derive(arke::Serialize, PartialEq, Debug)]
@@ -170,4 +170,156 @@ async fn fetch_pid_tak_dikenal_mengembalikan_none() {
             .unwrap()
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn fetch_cmp_bertipe_salah_gagal_bukan_diam_diam() {
+    let Some(mut s) = store("arke_test_cmp_rusak").await else {
+        eprintln!("MONGODB_URI tak diset — tes dilewati");
+        return;
+    };
+    // Dokumen rusak: `cmp` bukan sub-dokumen. Bisa ditulis service lain atau
+    // hasil korupsi. Membacanya sebagai "entity tanpa komponen" akan
+    // menghilangkan data diam-diam (RFC-0035 §6).
+    let pid = arke_mongo::Pid::new();
+    let raw = mongodb::Client::with_uri_str(uri().expect("MONGODB_URI"))
+        .await
+        .expect("klien driver mentah untuk setup tes");
+    raw.database("arke_test_cmp_rusak")
+        .collection::<mongodb::bson::Document>("arke_entities")
+        .insert_one(mongodb::bson::doc! { "_id": pid.0, "version": 0i64, "cmp": "bukan dokumen" })
+        .await
+        .expect("tulis dokumen rusak");
+
+    // `w` baru: `fetch` men-spawn tepat satu entity baru, yang karenanya
+    // dijamin `Entity::from_raw(0, 0)` (spawn pertama pada World kosong).
+    // Bila `fetch` gagal dan membuang entity itu lewat `despawn`, generasi
+    // slot 0 naik ke 1 sehingga handle lama (gen 0) tak lagi hidup.
+    let mut w = World::new();
+    let hasil = s.fetch(&mut w, pid).await;
+    assert!(
+        hasil.is_err(),
+        "cmp bertipe salah harus Err, dapat {hasil:?}"
+    );
+    assert!(
+        !w.contains(Entity::from_raw(0, 0)),
+        "fetch yang gagal harus membuang entity yang telanjur di-spawn \
+         (despawn tidak terjadi)"
+    );
+}
+
+#[tokio::test]
+async fn fetch_tanpa_field_cmp_mengembalikan_entity_tanpa_komponen() {
+    let Some(mut s) = store("arke_test_cmp_absen").await else {
+        eprintln!("MONGODB_URI tak diset — tes dilewati");
+        return;
+    };
+    // Dokumen legit: entity yang belum/tak pernah punya komponen terdaftar
+    // tak menulis field `cmp` sama sekali — ini bukan korupsi.
+    let pid = arke_mongo::Pid::new();
+    let raw = mongodb::Client::with_uri_str(uri().expect("MONGODB_URI"))
+        .await
+        .expect("klien driver mentah untuk setup tes");
+    raw.database("arke_test_cmp_absen")
+        .collection::<mongodb::bson::Document>("arke_entities")
+        .insert_one(mongodb::bson::doc! { "_id": pid.0, "version": 0i64 })
+        .await
+        .expect("tulis dokumen tanpa cmp");
+
+    let mut w = World::new();
+    let e = s
+        .fetch(&mut w, pid)
+        .await
+        .expect("fetch tanpa cmp harus Ok")
+        .expect("entity harus ada");
+    assert_eq!(w.get::<Position>(e), None);
+    assert_eq!(w.get::<Health>(e), None);
+}
+
+#[tokio::test]
+async fn fetch_cmp_field_bertipe_salah_gagal_decode_dan_membuang_entity() {
+    let Some(mut s) = store("arke_test_field_rusak").await else {
+        eprintln!("MONGODB_URI tak diset — tes dilewati");
+        return;
+    };
+    // `cmp` itu sendiri sub-dokumen yang sah, tapi salah satu field komponen
+    // di dalamnya bertipe salah (`x` string, bukan angka) — path
+    // `Registry::apply` -> `MongoError::Decode`, bukan `get("cmp")` yang
+    // ditutupi FIX 1.
+    let pid = arke_mongo::Pid::new();
+    let raw = mongodb::Client::with_uri_str(uri().expect("MONGODB_URI"))
+        .await
+        .expect("klien driver mentah untuk setup tes");
+    raw.database("arke_test_field_rusak")
+        .collection::<mongodb::bson::Document>("arke_entities")
+        .insert_one(mongodb::bson::doc! {
+            "_id": pid.0,
+            "version": 0i64,
+            "cmp": { "position": { "x": "bukan angka", "y": 1.0 } },
+        })
+        .await
+        .expect("tulis dokumen dengan field cmp rusak");
+
+    // Sama seperti tes sebelumnya: `w` baru, jadi entity yang di-spawn
+    // `fetch` di dalam dijamin `Entity::from_raw(0, 0)`.
+    let mut w = World::new();
+    let hasil = s.fetch(&mut w, pid).await;
+    assert!(
+        matches!(hasil, Err(arke_mongo::MongoError::Decode { .. })),
+        "field cmp bertipe salah harus Err(Decode), dapat {hasil:?}"
+    );
+    assert!(
+        !w.contains(Entity::from_raw(0, 0)),
+        "fetch yang gagal decode harus membuang entity yang telanjur \
+         di-spawn"
+    );
+}
+
+#[tokio::test]
+async fn create_dua_kali_entity_sama_menjaga_bijeksi_pid_of_entity_of() {
+    let Some(mut s) = store("arke_test_bind_create").await else {
+        eprintln!("MONGODB_URI tak diset — tes dilewati");
+        return;
+    };
+    let mut w = World::new();
+    let e = w.spawn();
+    w.insert(e, Position { x: 0.0, y: 0.0 });
+
+    let pid1 = s.create(&w, e).await.unwrap();
+    let pid2 = s.create(&w, e).await.unwrap();
+
+    assert_ne!(pid1, pid2);
+    assert_eq!(s.pid_of(e), Some(pid2));
+    // Tautan lama (pid1 -> e) di `entity_of` seharusnya sudah dibersihkan
+    // oleh `bind` saat `pid_of[e]` dipindah ke pid2 — pid1 tak boleh lagi
+    // mengklaim entity ini.
+    assert_eq!(
+        s.entity_of(pid1),
+        None,
+        "entity_of[pid1] harus dibersihkan begitu e dipetakan ulang ke pid2"
+    );
+    assert_eq!(s.entity_of(pid2), Some(e));
+}
+
+#[tokio::test]
+async fn fetch_dua_kali_pid_sama_menjaga_bijeksi_pid_of_entity_of() {
+    let Some(mut s) = store("arke_test_bind_fetch").await else {
+        eprintln!("MONGODB_URI tak diset — tes dilewati");
+        return;
+    };
+    let mut w = World::new();
+    let e = w.spawn();
+    w.insert(e, Position { x: 0.0, y: 0.0 });
+    let pid = s.create(&w, e).await.unwrap();
+
+    let mut w2 = World::new();
+    let e1 = s.fetch(&mut w2, pid).await.unwrap().expect("fetch pertama");
+    let e2 = s.fetch(&mut w2, pid).await.unwrap().expect("fetch kedua");
+
+    assert_ne!(e1, e2);
+    // Tautan lama (e1 -> pid) di `pid_of` seharusnya sudah dibersihkan
+    // oleh `bind` saat `entity_of[pid]` dipindah ke e2 — e1 tak boleh lagi
+    // mengklaim pid ini.
+    assert_eq!(s.pid_of(e1), None);
+    assert_eq!(s.pid_of(e2), Some(pid));
 }
