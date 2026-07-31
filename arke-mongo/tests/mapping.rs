@@ -1,10 +1,10 @@
 //! Lapis 1 (RFC-0035 §7): tes pemetaan tanpa database.
 
-use arke::Value;
+use arke::{Value, World};
 use arke_mongo::bson::{Bson, Document};
 use arke_mongo::{
-    Dir, IndexDef, MongoComponent, MongoError, bson_to_value, mongo_component, validate_names,
-    value_to_bson,
+    Dir, IndexDef, MongoComponent, MongoError, Registry, bson_to_value, mongo_component,
+    validate_names, value_to_bson,
 };
 
 #[derive(arke::Serialize, PartialEq, Debug)]
@@ -151,4 +151,60 @@ fn validasi_menembus_map_bersarang_dan_list() {
         validate_names("inventory", &v),
         Err(MongoError::InvalidName { .. })
     ));
+}
+
+#[test]
+fn cmp_doc_memuat_hanya_komponen_yang_dimiliki_entity() {
+    let mut reg = Registry::new();
+    reg.push::<Position>();
+    reg.push::<Health>();
+
+    let mut world = World::new();
+    let e = world.spawn();
+    world.insert(e, Position { x: 1.0, y: 2.0 });
+
+    let doc = reg.cmp_doc(&world, e).expect("cmp_doc harus sukses");
+    assert!(doc.contains_key("position"));
+    assert!(
+        !doc.contains_key("health"),
+        "komponen yang tak dimiliki entity tak boleh muncul"
+    );
+
+    let pos = doc.get_document("position").unwrap();
+    assert_eq!(pos.get_f64("x").unwrap(), 1.0);
+}
+
+#[test]
+#[should_panic(expected = "position")]
+fn nama_komponen_yang_bertabrakan_panic_saat_register() {
+    #[derive(arke::Serialize)]
+    struct Lain {
+        v: i64,
+    }
+    mongo_component!(Lain => "position");
+
+    let mut reg = Registry::new();
+    reg.push::<Position>();
+    reg.push::<Lain>();
+}
+
+#[derive(arke::Serialize)]
+struct IndeksSalah {
+    hp: i64,
+}
+mongo_component!(IndeksSalah => "indeks_salah", indexes: [IndexDef::asc("tidak_ada")]);
+
+/// RFC-0035 §2 (Am. 1): salah-ketik nama field pada `IndexDef` tak tertangkap
+/// kompilasi, jadi ditangkap `debug_assert!` saat komponen diserialisasi.
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "tidak_ada")]
+fn index_def_menyebut_field_yang_tak_ada_gagal_di_build_debug() {
+    let mut reg = Registry::new();
+    reg.push::<IndeksSalah>();
+
+    let mut world = World::new();
+    let e = world.spawn();
+    world.insert(e, IndeksSalah { hp: 1 });
+    let _ = reg.cmp_doc(&world, e);
 }
