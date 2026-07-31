@@ -14,4 +14,4 @@
 pub use mongodb::bson;
 
 mod bson_map;
-pub use bson_map::value_to_bson;
+pub use bson_map::{bson_to_value, value_to_bson};

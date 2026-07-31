@@ -25,3 +25,32 @@ pub fn value_to_bson(value: &Value) -> Bson {
         }
     }
 }
+
+/// Memetakan BSON kembali ke [`Value`]; `None` bila ada tipe BSON yang tak
+/// punya padanan (mis. `ObjectId` di dalam badan komponen, `Undefined`).
+///
+/// `Int32` diterima meski [`value_to_bson`] tak pernah menghasilkannya —
+/// dokumen bisa ditulis service lain atau `mongosh`, yang mengirim bilangan
+/// bulat kecil sebagai `Int32`.
+pub fn bson_to_value(bson: &Bson) -> Option<Value> {
+    Some(match bson {
+        Bson::Null => Value::Null,
+        Bson::Boolean(b) => Value::Bool(*b),
+        Bson::Int64(i) => Value::Int(*i),
+        Bson::Int32(i) => Value::Int(i64::from(*i)),
+        Bson::Double(f) => Value::Float(*f),
+        Bson::String(s) => Value::Text(s.clone()),
+        Bson::Array(items) => Value::List(
+            items
+                .iter()
+                .map(bson_to_value)
+                .collect::<Option<Vec<_>>>()?,
+        ),
+        Bson::Document(doc) => Value::Map(
+            doc.iter()
+                .map(|(k, v)| bson_to_value(v).map(|v| (k.clone(), v)))
+                .collect::<Option<Vec<_>>>()?,
+        ),
+        _ => return None,
+    })
+}

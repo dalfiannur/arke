@@ -2,7 +2,7 @@
 
 use arke::Value;
 use arke_mongo::bson::{Bson, Document};
-use arke_mongo::value_to_bson;
+use arke_mongo::{bson_to_value, value_to_bson};
 
 #[test]
 fn skalar_dipetakan_ke_bson_yang_setara() {
@@ -41,4 +41,37 @@ fn list_bersarang_dipetakan_rekursif() {
         value_to_bson(&v),
         Bson::Array(vec![Bson::Int64(1), Bson::Document(inner)])
     );
+}
+
+#[test]
+fn round_trip_value_bson_value_setia() {
+    let cases = vec![
+        Value::Null,
+        Value::Bool(false),
+        Value::Int(-7),
+        Value::Float(0.25),
+        Value::Text("teks".into()),
+        Value::List(vec![Value::Int(1), Value::Null]),
+        Value::Map(vec![
+            ("a".into(), Value::Int(1)),
+            (
+                "b".into(),
+                Value::Map(vec![("c".into(), Value::Bool(true))]),
+            ),
+        ]),
+    ];
+    for v in cases {
+        let back = bson_to_value(&value_to_bson(&v));
+        assert_eq!(back, Some(v.clone()), "round-trip gagal untuk {v:?}");
+    }
+}
+
+#[test]
+fn int32_dari_penulis_lain_diterima_sebagai_int() {
+    assert_eq!(bson_to_value(&Bson::Int32(5)), Some(Value::Int(5)));
+}
+
+#[test]
+fn tipe_bson_tak_dikenal_ditolak() {
+    assert_eq!(bson_to_value(&Bson::Undefined), None);
 }
