@@ -145,3 +145,7 @@ macro_rules! mongo_component {
         }
     };
 }
+
+#[doc = include_str!("../README.md")]
+#[cfg(doctest)]
+struct ReadmeDoctests;
