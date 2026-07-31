@@ -2,9 +2,17 @@
 
 - **Status:** Draft <!-- Draft | Discussion | Accepted | Rejected | Superseded by RFC-XXXX -->
 - **Tanggal:** 2026-07-31
-- **Milestone:** M-35 (Adapter MongoDB — fondasi)
+- **Milestone:** M-32 (Adapter MongoDB — fondasi)
 - **ADR terkait:** — (menyusul bila status menjadi Accepted)
 - **RFC terkait:** [RFC-0021](./RFC-0021-arke-postgres-adapter.md) (adapter Postgres), [RFC-0034](./RFC-0034-decoupled-persistent-id.md) (identitas persisten `pid`), [RFC-0007](./RFC-0007-world-snapshot.md) / [RFC-0009](./RFC-0009-derive-serialize.md) (`Serialize`/`Value`)
+
+> **Amandemen 1 (2026-07-31) — mekanisme `save`.** Naskah asli §5 menyebut
+> `bulkWrite ordered`. Perintah `bulkWrite` baru tersedia pada **MongoDB server
+> 8.0**, sedangkan §7 sengaja menargetkan `mongod` 7 standalone; driver Rust juga
+> tak menyediakan `Collection::bulk_write`. `save` karena itu diimplementasikan
+> sebagai **operasi per-dokumen berurutan** (`update_one` per entity + satu
+> `delete_many`). **Jaminan yang dijanjikan tidak berubah** — atomik per-entity,
+> bukan per-World; yang berubah hanya mekanismenya, demi portabilitas server.
 
 ## Ringkasan
 
@@ -78,7 +86,7 @@ mongo_component!(Health   => "health", indexes: [IndexDef::asc("hp")]);
 
 **Trade-off yang diterima:** deklarasi indeks jadi manual (`IndexDef::asc("x")`) alih-alih atribut `#[mongo(index)]`, dan tak ada jaminan kompilasi bahwa `field` benar-benar ada pada struct — Mongo dengan senang hati mengindeks path yang tak pernah terisi, jadi salah ketik tidak menimbulkan error, hanya indeks yang diam-diam kosong.
 
-Mitigasi v1 memang lemah dan diakui begitu: saat sebuah nilai `T` pertama kali diserialisasi, store membandingkan kunci hasil `to_value()` terhadap `INDEXES` dan mencatat peringatan bila ada `field` yang tak dikenali. Pemeriksaan saat `register` tak mungkin — tanpa nilai contoh, `Value` tak bisa dihasilkan. Lihat §Pertanyaan terbuka.
+Mitigasi v1 (Am. 1): saat komponen diserialisasi, `Registry` membandingkan kunci hasil `to_value()` terhadap `INDEXES` lewat `debug_assert!` — gagal keras di build debug dan di seluruh uji, nol biaya di rilis. Pemeriksaan saat `register` tak mungkin: tanpa nilai contoh, `Value` tak bisa dihasilkan. Pilihan `debug_assert!` menghindari menyeret crate logging ke dalam adapter hanya untuk satu peringatan.
 
 Bila kelak query builder typed masuk — yang memang butuh metadata per-field sungguhan — derive ditambahkan saat itu, dengan alasan nyata.
 
@@ -176,7 +184,7 @@ store.version_of(pid).await?;                                  // Option<i64>, u
 **Seluruh World:**
 
 ```rust
-store.save(&world).await?;          // bulkWrite ordered
+store.save(&world).await?;          // update_one per entity + delete_many
 store.load(&mut world).await?;      // find({}).sort({ _id: 1 })
 ```
 
@@ -191,9 +199,9 @@ store.load(&mut world).await?;      // find({}).sort({ _id: 1 })
 
 Alasannya penting: mengganti `cmp` utuh akan **menghapus diam-diam** komponen yang ditulis service lain atau versi aplikasi lain yang mendaftarkan himpunan komponen berbeda. Karena itu `$unset` hanya menyasar komponen **terdaftar** yang hilang dari World; komponen tak terdaftar sengaja dibiarkan utuh.
 
-`save` juga menghapus dokumen yang `pid`-nya ada di `entity_of` tetapi entity-nya sudah tak ada di World (despawn) — `delete_many` dalam `bulkWrite` yang sama.
+`save` juga menghapus dokumen yang `pid`-nya ada di `entity_of` tetapi entity-nya sudah tak ada di World (despawn) — satu `delete_many` setelah seluruh upsert.
 
-**Atomisitas.** `bulkWrite` **ordered** tanpa transaksi sesi: atomik **per-entity**, bukan per-World. Kegagalan di tengah meninggalkan sebagian entity tertulis. Ini konsekuensi sadar agar `mongod` **standalone** cukup untuk dev, tes, dan produksi sederhana — transaksi multi-dokumen Mongo menuntut replica set. Janji ini **lebih lemah** dari `arke-postgres` dan **wajib** tertulis di rustdoc `save` dan di README, bukan hanya di RFC ini. Transaksi opsional → RFC lanjutan (§8).
+**Atomisitas.** Operasi per-dokumen berurutan tanpa transaksi sesi (lihat Amandemen 1): atomik **per-entity**, bukan per-World. Kegagalan di tengah meninggalkan sebagian entity tertulis. Ini konsekuensi sadar agar `mongod` **standalone** cukup untuk dev, tes, dan produksi sederhana — transaksi multi-dokumen Mongo menuntut replica set. Janji ini **lebih lemah** dari `arke-postgres` dan **wajib** tertulis di rustdoc `save` dan di README, bukan hanya di RFC ini. Transaksi opsional → RFC lanjutan (§8).
 
 **Error berkonteks** (STD-0008 — menyebut entity/komponen yang terlibat):
 
@@ -259,7 +267,7 @@ Penundaan ini **sadar**, bukan kelupaan: mengunci API query untuk model dokumen 
 | **`ObjectId` sebagai `pid` (dipilih)** | Alokasi klien → `create` 1 round-trip; unik tanpa koordinasi; `_id` idiomatik | Tipe `pid` beda dari `arke-postgres` (`i64`) | Dipilih: kontensi nol; keseragaman tipe lintas-adapter bukan tujuan |
 | `i64` via koleksi counter (`findAndModify $inc`) | `pid` seragam dengan `arke-postgres` | Round-trip ekstra per `create`; satu dokumen counter jadi titik kontensi tulis global | Menukar skalabilitas tulis demi keseragaman kosmetik |
 | UUID v7 | Terurut waktu; portabel lintas-backend | Bukan `_id` idiomatik Mongo; indeks lebih besar dari `ObjectId` | `ObjectId` sudah memberi urut-waktu + alokasi klien, lebih ringkas |
-| **`bulkWrite` tanpa transaksi (dipilih)** | Jalan di `mongod` standalone; dev & CI cukup satu kontainer | `save` tidak all-or-nothing lintas-entity | Dipilih + didokumentasikan eksplisit; transaksi → RFC lanjutan |
+| **Operasi per-dokumen tanpa transaksi (dipilih)** | Jalan di `mongod` standalone; dev & CI cukup satu kontainer | `save` tidak all-or-nothing lintas-entity | Dipilih + didokumentasikan eksplisit; transaksi → RFC lanjutan |
 | Transaksi multi-dokumen | `save` all-or-nothing, sejajar `arke-postgres` | Menuntut replica set untuk dev, tes, dan produksi | Beban setup tak sepadan untuk v1 fondasi |
 | Deteksi otomatis (transaksi bila replica set) | Portabel | Jaminan bergantung deployment; dua jalur kode & dua semantik | Semantik yang berubah diam-diam menurut deployment sulit dinalar |
 | **Tanpa crate derive (dipilih)** | Memakai ulang `derive(Serialize)` yang sudah matang; nol proc-macro baru untuk dipelihara | Indeks dideklarasikan manual; salah-ketik nama field tak tertangkap kompilasi | Model dokumen tak butuh tipe per-field; derive ditambahkan bila query builder typed menuntutnya |
@@ -278,10 +286,10 @@ Penundaan ini **sadar**, bukan kelupaan: mengunci API query untuk model dokumen 
 - **Validasi `IndexDef::field`** (§2): peringatan runtime terasa lemah. Apakah pemeriksaan saat `ensure_indexes` terhadap satu dokumen contoh yang sudah ada lebih baik, atau justru menyesatkan saat koleksi masih kosong?
 - **Ambang ukuran dokumen 16 MB.** Entity dengan komponen `Vec<T>` besar bisa menabraknya. Perlukah v1 memberi peringatan proaktif, atau cukup membiarkan error driver muncul apa adanya?
 - **`load` seluruh koleksi** tanpa paging: untuk koleksi besar ini memuat semua ke memori. `load_where` (setara RFC-0021 v3) ditunda ke v2 — apakah v1 setidaknya perlu `load_ids(&[Pid])`?
-- **`NAME` yang bertabrakan.** Karena `NAME` wajib eksplisit (§2), dua komponen masih bisa mendeklarasikan nama yang sama. `register` mendeteksinya — tetapi bereaksi bagaimana: panic (bug programmer, gagal sedini mungkin) atau `Result`?
+- ~~**`NAME` yang bertabrakan.**~~ **Diputuskan (Am. 1): `panic`.** `register` bukan jalur yang bisa gagal karena data — dua komponen dengan `NAME` sama adalah bug programmer, dan `register` mengembalikan `&mut Self` untuk chaining (pola `PgStore::register`). Gagal sedini mungkin, dengan pesan yang menyebut nama yang bertabrakan.
 - **Bentuk query builder v2** untuk model dokumen — apakah `Filter` bergaya RFC-0030 masih cocok, atau path bersarang menuntut abstraksi lain?
 - **Feature `sync`** (driver blocking) untuk pengguna non-async — pertanyaan yang sama masih terbuka di RFC-0021.
 
 ## Keputusan
 
-Belum diputuskan — status **Draft**. Saat diterima, bagian ini diisi ringkasan keputusan dan ADR-0035 dibuat, lalu M-35 dibuka dengan TDD mulai dari pemetaan `Value` ↔ BSON (§7 Lapis 1, tanpa DB).
+Belum diputuskan — status **Draft**. Saat diterima, bagian ini diisi ringkasan keputusan dan ADR-0035 dibuat, lalu M-32 dibuka dengan TDD mulai dari pemetaan `Value` ↔ BSON (§7 Lapis 1, tanpa DB).
