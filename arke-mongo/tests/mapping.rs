@@ -260,3 +260,56 @@ fn apply_gagal_keras_saat_bentuk_komponen_tak_cocok() {
         other => panic!("harus Decode, dapat {other:?}"),
     }
 }
+
+#[test]
+fn update_ops_set_per_sub_field_bukan_mengganti_cmp() {
+    let mut reg = Registry::new();
+    reg.push::<Position>();
+    reg.push::<Health>();
+
+    let mut world = World::new();
+    let e = world.spawn();
+    world.insert(e, Position { x: 1.0, y: 2.0 });
+
+    let ops = reg.update_ops(&world, e).unwrap();
+    let set = ops.get_document("$set").unwrap();
+    assert!(
+        set.contains_key("cmp.position"),
+        "harus menyasar sub-field, bukan `cmp`"
+    );
+    assert!(
+        !set.contains_key("cmp"),
+        "mengganti `cmp` utuh akan menghapus komponen milik service lain"
+    );
+}
+
+#[test]
+fn update_ops_unset_komponen_terdaftar_yang_hilang() {
+    let mut reg = Registry::new();
+    reg.push::<Position>();
+    reg.push::<Health>();
+
+    let mut world = World::new();
+    let e = world.spawn();
+    world.insert(e, Position { x: 1.0, y: 2.0 });
+
+    let ops = reg.update_ops(&world, e).unwrap();
+    let unset = ops.get_document("$unset").unwrap();
+    assert!(
+        unset.contains_key("cmp.health"),
+        "komponen terdaftar yang tak dimiliki entity harus di-unset"
+    );
+}
+
+#[test]
+fn update_ops_menaikkan_version_dengan_inc() {
+    let mut reg = Registry::new();
+    reg.push::<Position>();
+
+    let mut world = World::new();
+    let e = world.spawn();
+    world.insert(e, Position { x: 0.0, y: 0.0 });
+
+    let ops = reg.update_ops(&world, e).unwrap();
+    assert_eq!(ops.get_document("$inc").unwrap().get_i64("version"), Ok(1));
+}

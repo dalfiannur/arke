@@ -4,7 +4,7 @@
 //! maupun I/O — sehingga dapat diuji tanpa database.
 
 use arke::{Entity, Value, World};
-use mongodb::bson::Document;
+use mongodb::bson::{Document, doc};
 
 use crate::bson_map::{bson_to_value, validate_names, value_to_bson};
 use crate::{IndexDef, MongoComponent, MongoError};
@@ -136,5 +136,39 @@ impl Registry {
             }
         }
         Ok(())
+    }
+
+    /// Membangun dokumen update untuk `entity`: `$set` per sub-field komponen
+    /// yang dimiliki, `$unset` untuk komponen **terdaftar** yang hilang, dan
+    /// `$inc` pada `version`.
+    ///
+    /// `$set` sengaja menyasar `cmp.<nama>` alih-alih mengganti `cmp` utuh —
+    /// mengganti utuh akan menghapus diam-diam komponen yang ditulis service
+    /// lain atau versi aplikasi lain (RFC-0035 §5). Karena itu `$unset` pun
+    /// hanya menyasar komponen terdaftar.
+    pub fn update_ops(&self, world: &World, entity: Entity) -> Result<Document, MongoError> {
+        let mut set = Document::new();
+        let mut unset = Document::new();
+        for r in &self.registered {
+            let path = format!("cmp.{}", r.name);
+            match (r.dump_one)(world, entity) {
+                Some(value) => {
+                    debug_check_indexes(r.name, r.indexes, &value);
+                    validate_names(r.name, &value)?;
+                    set.insert(path, value_to_bson(&value));
+                }
+                None => {
+                    unset.insert(path, "");
+                }
+            }
+        }
+        let mut ops = doc! { "$inc": { "version": 1i64 } };
+        if !set.is_empty() {
+            ops.insert("$set", set);
+        }
+        if !unset.is_empty() {
+            ops.insert("$unset", unset);
+        }
+        Ok(ops)
     }
 }
