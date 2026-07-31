@@ -1,0 +1,28 @@
+[package]
+name = "arke-mongo"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "MongoDB adapter for the arke ECS — document-per-entity persistence (source of truth)."
+license = "MIT"
+repository = "https://github.com/dalfiannur/arke"
+readme = "README.md"
+keywords = ["ecs", "mongodb", "persistence", "document", "nosql"]
+categories = ["database", "game-development"]
+# Paket ramping: sumber + README + lisensi.
+include = ["/src", "/Cargo.toml", "/README.md", "/LICENSE-MIT"]
+
+# Adapter: BOLEH punya dependensi (di luar STD-0003 yang mengikat core `arke`).
+[dependencies]
+arke = { version = "0.6.1", path = ".." }
+# `bson` dipakai lewat re-export `mongodb::bson` agar versi tak pernah skew.
+mongodb = "3.8"
+# `TryStreamExt` untuk iterasi `Cursor` pada `load`.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
