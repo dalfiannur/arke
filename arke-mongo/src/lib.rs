@@ -12,3 +12,6 @@
 /// Re-ekspor `bson` milik driver, agar pengguna tak perlu menambah dependensi
 /// `bson` sendiri (dan tak bisa salah-versi).
 pub use mongodb::bson;
+
+mod bson_map;
+pub use bson_map::value_to_bson;
