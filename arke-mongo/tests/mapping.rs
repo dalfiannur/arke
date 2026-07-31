@@ -2,7 +2,45 @@
 
 use arke::Value;
 use arke_mongo::bson::{Bson, Document};
-use arke_mongo::{MongoError, bson_to_value, validate_names, value_to_bson};
+use arke_mongo::{
+    Dir, IndexDef, MongoComponent, MongoError, bson_to_value, mongo_component, validate_names,
+    value_to_bson,
+};
+
+#[derive(arke::Serialize, PartialEq, Debug)]
+struct Position {
+    x: f32,
+    y: f32,
+}
+mongo_component!(Position => "position");
+
+#[derive(arke::Serialize, PartialEq, Debug)]
+struct Health {
+    hp: i64,
+}
+mongo_component!(Health => "health", indexes: [IndexDef::asc("hp")]);
+
+#[test]
+fn makro_mengisi_nama_dan_indeks_kosong() {
+    assert_eq!(Position::NAME, "position");
+    assert!(Position::INDEXES.is_empty());
+}
+
+#[test]
+fn makro_meneruskan_deklarasi_indeks() {
+    assert_eq!(Health::NAME, "health");
+    assert_eq!(Health::INDEXES.len(), 1);
+    assert_eq!(Health::INDEXES[0].field, "hp");
+    assert_eq!(Health::INDEXES[0].dir, Dir::Asc);
+    assert!(!Health::INDEXES[0].unique);
+}
+
+#[test]
+#[allow(clippy::assertions_on_constants)]
+fn index_def_unique_ditandai() {
+    const IDX: IndexDef = IndexDef::asc("slug").unique();
+    assert!(IDX.unique);
+}
 
 #[test]
 fn skalar_dipetakan_ke_bson_yang_setara() {
