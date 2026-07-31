@@ -22,6 +22,9 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+# Klien driver mentah untuk setup/assert tes (drop database, list_indexes) —
+# `arke_mongo` sengaja tak mengekspos `Client`/`Database` di API publiknya.
+mongodb = "3.8"
 
 [lints.rust]
 unsafe_code = "forbid"
