@@ -3,9 +3,9 @@
 //! Satu-satunya modul yang menyentuh I/O; seluruh logika pemetaan hidup di
 //! `bson_map` dan `registry` sebagai fungsi murni.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use arke::{Entity, World};
+use arke::{Entity, QueryData, World};
 use mongodb::bson::{Document, doc};
 use mongodb::options::ReturnDocument;
 use mongodb::{Client, Collection, Database};
@@ -231,6 +231,81 @@ impl MongoStore {
         self.entities.delete_one(doc! { "_id": pid.0 }).await?;
         if let Some(entity) = self.entity_of.remove(&pid) {
             self.pid_of.remove(&entity);
+        }
+        Ok(())
+    }
+
+    /// Koleksi `arke_entities` mentah — jalan keluar untuk query yang belum
+    /// dilayani API ini (query builder ditunda ke RFC lanjutan).
+    pub fn collection(&self) -> &Collection<Document> {
+        &self.entities
+    }
+
+    /// Menulis seluruh working-set: upsert tiap entity hidup, lalu hapus
+    /// dokumen milik entity yang sudah tak ada di `world`.
+    ///
+    /// # Atomisitas
+    ///
+    /// Operasi per-dokumen berurutan **tanpa transaksi**: atomik **per-entity**,
+    /// **bukan** per-World. Kegagalan di tengah meninggalkan sebagian entity
+    /// tertulis. Ini konsekuensi sadar agar `mongod` standalone cukup — transaksi
+    /// multi-dokumen MongoDB menuntut replica set. Janji ini **lebih lemah**
+    /// daripada `arke-postgres::PgStore::save`, yang transaksional penuh
+    /// (RFC-0035 §5, Amandemen 1).
+    ///
+    /// Bila `save` gagal di tengah, `pid_of`/`entity_of` tetap konsisten
+    /// dengan MongoDB **untuk entity yang sudah diproses** sebelum kegagalan:
+    /// `bind` dipanggil tepat setelah `update_one` sukses untuk entity itu,
+    /// jadi tak ada tautan yang mengklaim entity yang belum tertulis. Entity
+    /// yang belum sempat diproses tetap pada tautan lamanya (atau tanpa
+    /// tautan bila baru). Peringatan terpisah: memanggil `save` dengan
+    /// `world` yang berbeda dari yang dipakai `save`/`create`/`fetch`
+    /// sebelumnya pada `MongoStore` yang sama akan menghapus dokumen milik
+    /// `World` yang lama — `entity_of` tak tahu batas antar-`World`, ia hanya
+    /// tahu "pid yang tak terlihat di panggilan `save` ini".
+    pub async fn save(&mut self, world: &World) -> Result<(), MongoError> {
+        // Kumpulkan entity hidup lebih dulu (sinkron) agar `&World` tak ditahan
+        // melewati `.await`.
+        let mut live: Vec<Entity> = Vec::new();
+        <Entity>::each_filtered_shared::<()>(world, |e| live.push(e));
+
+        let mut ops: Vec<(Entity, Option<Pid>, Document)> = Vec::with_capacity(live.len());
+        for &entity in &live {
+            ops.push((
+                entity,
+                self.pid_of.get(&entity).copied(),
+                self.reg.update_ops(world, entity)?,
+            ));
+        }
+
+        let mut still_live: HashSet<Pid> = HashSet::with_capacity(ops.len());
+        for (entity, existing, update) in ops {
+            let pid = existing.unwrap_or_else(Pid::new);
+            self.entities
+                .update_one(doc! { "_id": pid.0 }, update)
+                .upsert(true)
+                .await?;
+            self.bind(entity, pid);
+            still_live.insert(pid);
+        }
+
+        // Entity yang hilang dari World (despawn) → hapus dokumennya.
+        let stale: Vec<Pid> = self
+            .entity_of
+            .keys()
+            .copied()
+            .filter(|pid| !still_live.contains(pid))
+            .collect();
+        if !stale.is_empty() {
+            let ids: Vec<_> = stale.iter().map(|p| p.0).collect();
+            self.entities
+                .delete_many(doc! { "_id": { "$in": ids } })
+                .await?;
+            for pid in stale {
+                if let Some(entity) = self.entity_of.remove(&pid) {
+                    self.pid_of.remove(&entity);
+                }
+            }
         }
         Ok(())
     }

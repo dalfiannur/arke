@@ -14,6 +14,7 @@
 //! seperti biasa.
 
 use arke::{Entity, World};
+use arke_mongo::bson::doc;
 use arke_mongo::{IndexDef, MongoError, MongoStore, mongo_component};
 
 #[derive(arke::Serialize, PartialEq, Debug)]
@@ -402,4 +403,68 @@ async fn remove_menghapus_dokumen() {
 
     s.remove(pid).await.unwrap();
     assert_eq!(s.version_of(pid).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn save_menulis_entity_baru_dan_menghapus_yang_despawn() {
+    let Some(mut s) = store("arke_test_save").await else {
+        eprintln!("MONGODB_URI tak diset — tes dilewati");
+        return;
+    };
+
+    let mut w = World::new();
+    let a = w.spawn();
+    w.insert(a, Health { hp: 1 });
+    let b = w.spawn();
+    w.insert(b, Health { hp: 2 });
+    s.save(&w).await.unwrap();
+
+    let pid_b = s.pid_of(b).expect("b harus punya pid setelah save");
+    w.despawn(b);
+    s.save(&w).await.unwrap();
+
+    assert_eq!(s.version_of(pid_b).await.unwrap(), None, "b harus terhapus");
+    let pid_a = s.pid_of(a).unwrap();
+    assert!(
+        s.version_of(pid_a).await.unwrap().is_some(),
+        "a harus tetap"
+    );
+}
+
+#[tokio::test]
+async fn save_tidak_menghapus_komponen_yang_tak_terdaftar() {
+    let Some(mut s) = store("arke_test_foreign").await else {
+        eprintln!("MONGODB_URI tak diset — tes dilewati");
+        return;
+    };
+
+    let mut w = World::new();
+    let e = w.spawn();
+    w.insert(e, Health { hp: 5 });
+    let pid = s.create(&w, e).await.unwrap();
+
+    // Service lain menulis komponennya sendiri ke dokumen yang sama.
+    s.collection()
+        .update_one(
+            doc! { "_id": pid.0 },
+            doc! { "$set": { "cmp.dari_service_lain": { "v": 1i64 } } },
+        )
+        .await
+        .unwrap();
+
+    w.insert(e, Health { hp: 6 });
+    s.save(&w).await.unwrap();
+
+    let d = s
+        .collection()
+        .find_one(doc! { "_id": pid.0 })
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        d.get_document("cmp")
+            .unwrap()
+            .contains_key("dari_service_lain"),
+        "save tak boleh menghapus komponen milik penulis lain"
+    );
 }
