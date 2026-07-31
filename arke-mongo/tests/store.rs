@@ -13,7 +13,7 @@
 //! CI lain yang tak menyetel keduanya tak terpengaruh — tes tetap skip
 //! seperti biasa.
 
-use arke::{Entity, World};
+use arke::{Entity, QueryData, World};
 use arke_mongo::bson::doc;
 use arke_mongo::{IndexDef, MongoError, MongoStore, mongo_component};
 
@@ -466,5 +466,89 @@ async fn save_tidak_menghapus_komponen_yang_tak_terdaftar() {
             .unwrap()
             .contains_key("dari_service_lain"),
         "save tak boleh menghapus komponen milik penulis lain"
+    );
+}
+
+#[tokio::test]
+async fn load_memuat_seluruh_koleksi() {
+    let Some(mut s) = store("arke_test_load").await else {
+        eprintln!("MONGODB_URI tak diset — tes dilewati");
+        return;
+    };
+
+    let mut w = World::new();
+    for hp in 1..=3i64 {
+        let e = w.spawn();
+        w.insert(e, Health { hp });
+    }
+    s.save(&w).await.unwrap();
+
+    let mut w2 = World::new();
+    s.load(&mut w2).await.unwrap();
+
+    let mut hps: Vec<i64> = Vec::new();
+    <(arke::Entity, &Health)>::each_filtered_shared::<()>(&w2, |(_, h)| hps.push(h.hp));
+    hps.sort_unstable();
+    assert_eq!(hps, vec![1, 2, 3]);
+}
+
+#[tokio::test]
+async fn load_deterministik_antar_materialisasi() {
+    let Some(mut s) = store("arke_test_load_order").await else {
+        eprintln!("MONGODB_URI tak diset — tes dilewati");
+        return;
+    };
+
+    let mut w = World::new();
+    for hp in 1..=5i64 {
+        let e = w.spawn();
+        w.insert(e, Health { hp });
+    }
+    s.save(&w).await.unwrap();
+
+    let order = |world: &World| {
+        let mut v = Vec::new();
+        <(arke::Entity, &Health)>::each_filtered_shared::<()>(world, |(_, h)| v.push(h.hp));
+        v
+    };
+
+    let mut a = World::new();
+    s.load(&mut a).await.unwrap();
+    let mut b = World::new();
+    s.load(&mut b).await.unwrap();
+
+    assert_eq!(
+        order(&a),
+        order(&b),
+        "urutan materialisasi harus identik (STD-0005)"
+    );
+}
+
+#[tokio::test]
+async fn load_cmp_bertipe_salah_gagal_bukan_diam_diam() {
+    let Some(mut s) = store("arke_test_load_cmp_rusak").await else {
+        eprintln!("MONGODB_URI tak diset — tes dilewati");
+        return;
+    };
+    // Sama seperti `fetch_cmp_bertipe_salah_gagal_bukan_diam_diam`: dokumen
+    // dengan `cmp` yang ada tapi bukan sub-dokumen adalah korupsi, bukan
+    // "entity tanpa komponen". `load` harus gagal loud, bukan memuat world
+    // yang diam-diam kosong/parsial (RFC-0035 §6).
+    let pid = arke_mongo::Pid::new();
+    let raw = mongodb::Client::with_uri_str(uri().expect("MONGODB_URI"))
+        .await
+        .expect("klien driver mentah untuk setup tes");
+    raw.database("arke_test_load_cmp_rusak")
+        .collection::<mongodb::bson::Document>("arke_entities")
+        .insert_one(mongodb::bson::doc! { "_id": pid.0, "version": 0i64, "cmp": "bukan dokumen" })
+        .await
+        .expect("tulis dokumen rusak");
+
+    let mut w = World::new();
+    let hasil = s.load(&mut w).await;
+    assert!(
+        matches!(hasil, Err(MongoError::Decode { .. })),
+        "cmp bertipe salah harus membuat load Err(Decode), dapat {hasil:?} — \
+         world yang diam-diam kosong berarti kehilangan data tanpa jejak"
     );
 }

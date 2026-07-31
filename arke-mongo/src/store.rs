@@ -6,6 +6,7 @@
 use std::collections::{HashMap, HashSet};
 
 use arke::{Entity, QueryData, World};
+use futures_util::TryStreamExt;
 use mongodb::bson::{Document, doc};
 use mongodb::options::ReturnDocument;
 use mongodb::{Client, Collection, Database};
@@ -118,12 +119,8 @@ impl MongoStore {
     /// Memuat dokumen `pid` ke `world` sebagai entity baru; `None` bila dokumen
     /// tak ada.
     ///
-    /// Bila sebuah komponen gagal di-decode, entity yang telanjur di-spawn
-    /// dibuang lagi supaya `world` tak meninggalkan entity separuh terisi.
-    /// Field `cmp` yang **absen** berarti entity legit tanpa komponen
-    /// terdaftar (lanjut, `Ok`); `cmp` yang **ada tapi bukan sub-dokumen**
-    /// berarti dokumen korup — bukan sesuatu yang boleh diperlakukan sebagai
-    /// "entity tanpa komponen" secara diam-diam (RFC-0035 §6).
+    /// Lihat [`Self::materialize`] untuk perlakuan `cmp` absen vs. korup dan
+    /// jaminan despawn-on-error.
     pub async fn fetch(
         &mut self,
         world: &mut World,
@@ -132,6 +129,44 @@ impl MongoStore {
         let Some(document) = self.entities.find_one(doc! { "_id": pid.0 }).await? else {
             return Ok(None);
         };
+        Ok(Some(self.materialize(world, pid, &document)?))
+    }
+
+    /// Memuat seluruh koleksi ke `world` sebagai working-set.
+    ///
+    /// Diurutkan `_id` menaik supaya urutan materialisasi identik antar-run
+    /// (STD-0005) — sejajar `ORDER BY pid` di `arke-postgres`.
+    ///
+    /// Memuat **seluruh** koleksi tanpa paging; materialisasi parsial
+    /// (`load_where`) ditunda ke RFC lanjutan.
+    pub async fn load(&mut self, world: &mut World) -> Result<(), MongoError> {
+        let mut cursor = self.entities.find(doc! {}).sort(doc! { "_id": 1 }).await?;
+        while let Some(document) = cursor.try_next().await? {
+            let Ok(oid) = document.get_object_id("_id") else {
+                continue; // dokumen dengan `_id` non-ObjectId bukan milik arke
+            };
+            self.materialize(world, Pid(oid), &document)?;
+        }
+        Ok(())
+    }
+
+    /// Memuat komponen dari `document` ke entity baru di `world`, menautkannya
+    /// ke `pid`. Entity dibuang lagi bila dokumen gagal di-decode, sehingga
+    /// `world` tak pernah menyimpan entity separuh terisi.
+    ///
+    /// Dipakai bersama oleh [`Self::fetch`] dan [`Self::load`] — satu-satunya
+    /// tempat urutan spawn / decode `cmp` / apply / despawn-on-error / bind
+    /// hidup, agar keduanya tak lagi bisa hanyut berbeda (lih. RFC-0035 §6).
+    /// Field `cmp` yang **absen** berarti entity legit tanpa komponen
+    /// terdaftar (lanjut, `Ok`); `cmp` yang **ada tapi bukan sub-dokumen**
+    /// berarti dokumen korup — bukan sesuatu yang boleh diperlakukan sebagai
+    /// "entity tanpa komponen" secara diam-diam.
+    fn materialize(
+        &mut self,
+        world: &mut World,
+        pid: Pid,
+        document: &Document,
+    ) -> Result<Entity, MongoError> {
         let entity = world.spawn();
         match document.get("cmp") {
             None => {}
@@ -150,7 +185,7 @@ impl MongoStore {
             }
         }
         self.bind(entity, pid);
-        Ok(Some(entity))
+        Ok(entity)
     }
 
     /// Tautan `entity` ↔ `pid` yang tercatat di store, bila ada.
