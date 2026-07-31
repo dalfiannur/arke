@@ -31,6 +31,15 @@ pub enum MongoError {
         /// Nama field yang melanggar.
         field: String,
     },
+    /// Dua field komponen memetakan ke nama BSON yang sama — dokumen akan
+    /// kehilangan salah satunya secara diam-diam (mis. dua `#[arke(rename)]`
+    /// yang bertabrakan).
+    DuplicateField {
+        /// Nama komponen pemilik field.
+        component: &'static str,
+        /// Nama BSON yang muncul lebih dari sekali.
+        field: String,
+    },
 }
 
 impl From<mongodb::error::Error> for MongoError {
@@ -61,6 +70,13 @@ impl std::fmt::Display for MongoError {
                 f,
                 "field `{field}` pada komponen `{component}` bukan nama BSON \
                  yang sah (tak boleh mengandung `.` atau berawalan `$`)"
+            ),
+            MongoError::DuplicateField { component, field } => write!(
+                f,
+                "field `{field}` pada komponen `{component}` muncul lebih \
+                 dari sekali setelah pemetaan — salah satunya akan hilang \
+                 diam-diam di dalam `Document` (mis. dua `#[arke(rename)]` \
+                 yang bertabrakan)"
             ),
         }
     }

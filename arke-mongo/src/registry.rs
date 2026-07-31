@@ -1,7 +1,8 @@
 //! Registry type-erased komponen terdaftar + pembangunan dokumen (RFC-0035 §5).
 //!
-//! Seluruh modul ini **murni**: ia tahu `World`, tetapi tak menyentuh driver
-//! maupun I/O — sehingga dapat diuji tanpa database.
+//! Seluruh modul ini **murni**: ia tahu `World` dan tipe `mongodb` seperti
+//! `IndexModel`/`Document`, tetapi tak melakukan I/O apa pun — sehingga dapat
+//! diuji tanpa database.
 
 use arke::{Entity, Value, World};
 use mongodb::bson::{Document, doc};
@@ -77,7 +78,21 @@ impl Registry {
     /// Panic bila `T::NAME` sudah dipakai komponen lain. Dua komponen dengan
     /// nama sama adalah bug programmer, bukan kegagalan data — gagal sedini
     /// mungkin (RFC-0035 Am. 1).
+    ///
+    /// Panic juga bila `T::NAME` bukan nama BSON yang sah — kosong,
+    /// mengandung `.`, atau berawalan `$` (RFC-0035 Am. 2). `cmp_doc`
+    /// memakai `NAME` sebagai kunci literal sementara `update_ops` memakainya
+    /// sebagai path bertitik (`cmp.<NAME>`); `NAME` yang mengandung `.` sudah
+    /// menyasar tempat berbeda di kedua jalur itu, sehingga setiap update
+    /// hilang diam-diam tanpa error di mana pun. Ini pun bug programmer di
+    /// sebuah `const`, tertangkap di saat registrasi, seawal mungkin.
     pub fn push<T: MongoComponent>(&mut self) {
+        assert!(
+            !T::NAME.is_empty() && !T::NAME.contains('.') && !T::NAME.starts_with('$'),
+            "MongoComponent::NAME `{}` bukan nama BSON yang sah — tak boleh \
+             kosong, mengandung `.`, atau berawalan `$` (lihat RFC-0035 Am. 2)",
+            T::NAME
+        );
         assert!(
             !self.registered.iter().any(|r| r.name == T::NAME),
             "nama komponen `{}` sudah terdaftar — tiap MongoComponent::NAME \
@@ -108,12 +123,29 @@ impl Registry {
 
     /// Menyisipkan komponen dari sub-dokumen `cmp` ke `entity`.
     ///
+    /// # Precondition
+    ///
+    /// `entity` harus hidup di `world` (`world.contains(entity)`). `World::
+    /// insert` mengabaikan sisipan ke entity mati tanpa error, sehingga tanpa
+    /// pemeriksaan ini `apply` akan mengembalikan `Ok(())` padahal tak
+    /// menulis apa pun — sukses palsu. Ini bug pemanggil, bukan kegagalan
+    /// data, jadi ditangkap lewat `debug_assert!`, bukan varian error.
+    ///
     /// Kunci yang **tak terdaftar diabaikan** — dokumen bisa ditulis service
     /// lain atau versi aplikasi lain, dan kehadirannya bukan kesalahan.
     /// Komponen terdaftar yang bentuknya tak cocok menghasilkan
     /// [`MongoError::Decode`], **bukan** dilewati diam-diam: kehilangan
     /// komponen tanpa suara akan lolos ke `save` berikutnya dan menjadi
     /// kehilangan data permanen (RFC-0035 §6).
+    ///
+    /// # Error parsial
+    ///
+    /// Bila sebuah komponen gagal di-decode, komponen-komponen terdaftar
+    /// yang diproses **sebelumnya** dalam pemanggilan ini sudah tersisip ke
+    /// `entity` — `apply` tidak transaksional atas satu entity. Saat `Err`
+    /// dikembalikan, `entity` bisa dalam keadaan separuh terisi; pemanggil
+    /// tidak boleh menganggapnya utuh dan sebaiknya membuangnya (pola yang
+    /// akan dipakai `fetch`/`load` pada task selanjutnya).
     pub fn apply(
         &self,
         world: &mut World,
@@ -121,6 +153,11 @@ impl Registry {
         pid: crate::Pid,
         cmp: &Document,
     ) -> Result<(), MongoError> {
+        debug_assert!(
+            world.contains(entity),
+            "Registry::apply dipanggil dengan entity yang tak hidup di world \
+             — entity harus hidup sebelum apply dipanggil"
+        );
         for r in &self.registered {
             let Some(bson) = cmp.get(r.name) else {
                 continue;

@@ -1,5 +1,6 @@
-//! Pemetaan murni [`arke::Value`] ↔ BSON (RFC-0035 §4). Tanpa I/O, tanpa World —
-//! seluruh modul ini dapat diuji tanpa database.
+//! Pemetaan murni [`arke::Value`] ↔ BSON, plus validasi nama field dan
+//! deteksi field duplikat (RFC-0035 §4). Tanpa I/O, tanpa World — seluruh
+//! modul ini dapat diuji tanpa database.
 
 use crate::MongoError;
 use arke::Value;
@@ -57,14 +58,24 @@ pub fn bson_to_value(bson: &Bson) -> Option<Value> {
 }
 
 /// Memastikan seluruh nama field di dalam `value` sah sebagai nama field BSON:
-/// tak mengandung `.` dan tak berawalan `$` (RFC-0035 §4). Rekursif menembus
-/// `Map` dan `List`.
+/// tak mengandung `.` dan tak berawalan `$` (RFC-0035 §4), dan bahwa tak ada
+/// dua field pada level `Map` yang sama yang memetakan ke nama BSON yang sama
+/// — `Value::Map` (`Vec<(String, Value)>`) mengizinkan duplikat, tetapi
+/// `Document::insert` mendeduplikasi diam-diam (yang terakhir menang), jadi
+/// duplikat berarti kehilangan data tanpa suara (RFC-0035 Am. 2). Rekursif
+/// menembus `Map` dan `List`.
 pub fn validate_names(component: &'static str, value: &Value) -> Result<(), MongoError> {
     match value {
         Value::Map(entries) => {
-            for (key, val) in entries {
+            for (i, (key, val)) in entries.iter().enumerate() {
                 if key.contains('.') || key.starts_with('$') {
                     return Err(MongoError::InvalidName {
+                        component,
+                        field: key.clone(),
+                    });
+                }
+                if entries[..i].iter().any(|(other, _)| other == key) {
+                    return Err(MongoError::DuplicateField {
                         component,
                         field: key.clone(),
                     });

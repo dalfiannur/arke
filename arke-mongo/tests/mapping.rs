@@ -20,6 +20,16 @@ struct Health {
 }
 mongo_component!(Health => "health", indexes: [IndexDef::asc("hp")]);
 
+#[derive(arke::Serialize, PartialEq, Debug)]
+struct Akun {
+    slug: i64,
+    peringkat: i64,
+}
+mongo_component!(Akun => "akun", indexes: [
+    IndexDef::asc("slug").unique(),
+    IndexDef::desc("peringkat"),
+]);
+
 #[test]
 fn makro_mengisi_nama_dan_indeks_kosong() {
     assert_eq!(Position::NAME, "position");
@@ -154,6 +164,33 @@ fn validasi_menembus_map_bersarang_dan_list() {
 }
 
 #[test]
+fn field_duplikat_dalam_map_ditolak() {
+    let v = Value::Map(vec![
+        ("v".into(), Value::Int(1)),
+        ("v".into(), Value::Int(2)),
+    ]);
+    match validate_names("collide", &v) {
+        Err(MongoError::DuplicateField { component, field }) => {
+            assert_eq!(component, "collide");
+            assert_eq!(field, "v");
+        }
+        other => panic!("harus DuplicateField, dapat {other:?}"),
+    }
+}
+
+#[test]
+fn duplikat_terdeteksi_juga_di_map_bersarang() {
+    let v = Value::Map(vec![(
+        "inner".into(),
+        Value::Map(vec![("x".into(), Value::Null), ("x".into(), Value::Null)]),
+    )]);
+    assert!(matches!(
+        validate_names("c", &v),
+        Err(MongoError::DuplicateField { .. })
+    ));
+}
+
+#[test]
 fn cmp_doc_memuat_hanya_komponen_yang_dimiliki_entity() {
     let mut reg = Registry::new();
     reg.push::<Position>();
@@ -172,6 +209,11 @@ fn cmp_doc_memuat_hanya_komponen_yang_dimiliki_entity() {
 
     let pos = doc.get_document("position").unwrap();
     assert_eq!(pos.get_f64("x").unwrap(), 1.0);
+    assert_eq!(
+        pos.get_f64("y").unwrap(),
+        2.0,
+        "seluruh field harus dipetakan, bukan hanya yang pertama"
+    );
 }
 
 #[test]
@@ -186,6 +228,32 @@ fn nama_komponen_yang_bertabrakan_panic_saat_register() {
     let mut reg = Registry::new();
     reg.push::<Position>();
     reg.push::<Lain>();
+}
+
+#[derive(arke::Serialize)]
+struct NamaBertitik {
+    hp: i64,
+}
+mongo_component!(NamaBertitik => "a.b");
+
+#[test]
+#[should_panic(expected = "a.b")]
+fn nama_komponen_bertitik_ditolak_saat_register() {
+    let mut reg = Registry::new();
+    reg.push::<NamaBertitik>();
+}
+
+#[derive(arke::Serialize)]
+struct NamaDollar {
+    hp: i64,
+}
+mongo_component!(NamaDollar => "$evil");
+
+#[test]
+#[should_panic(expected = "$evil")]
+fn nama_komponen_berawalan_dollar_ditolak_saat_register() {
+    let mut reg = Registry::new();
+    reg.push::<NamaDollar>();
 }
 
 #[derive(arke::Serialize)]
@@ -207,6 +275,20 @@ fn index_def_menyebut_field_yang_tak_ada_gagal_di_build_debug() {
     let e = world.spawn();
     world.insert(e, IndeksSalah { hp: 1 });
     let _ = reg.cmp_doc(&world, e);
+}
+
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "hidup")]
+fn apply_ke_entity_mati_terdeteksi_di_build_debug() {
+    let mut reg = Registry::new();
+    reg.push::<Position>();
+
+    let mut world = World::new();
+    let e = world.spawn();
+    world.despawn(e);
+
+    let _ = reg.apply(&mut world, e, Pid::new(), &Document::new());
 }
 
 #[test]
@@ -239,6 +321,31 @@ fn apply_mengabaikan_komponen_yang_tak_terdaftar() {
     assert!(
         reg.apply(&mut world, e, Pid::new(), &cmp).is_ok(),
         "komponen milik service lain tak boleh menggagalkan pembacaan"
+    );
+}
+
+#[test]
+fn apply_tetap_menyisipkan_komponen_terdaftar_di_samping_yang_tak_dikenal() {
+    let mut reg = Registry::new();
+    reg.push::<Position>();
+
+    let mut pos = Document::new();
+    pos.insert("x", 3.0);
+    pos.insert("y", 4.0);
+    let mut cmp = Document::new();
+    cmp.insert("tak_dikenal", Document::new());
+    cmp.insert("position", pos);
+
+    let mut world = World::new();
+    let e = world.spawn();
+    reg.apply(&mut world, e, Pid::new(), &cmp)
+        .expect("apply harus sukses meski ada kunci tak dikenal");
+
+    assert_eq!(
+        world.get::<Position>(e),
+        Some(&Position { x: 3.0, y: 4.0 }),
+        "komponen terdaftar tetap harus tersisip walau ada kunci lain yang \
+         tak dikenal di dokumen yang sama"
     );
 }
 
@@ -302,6 +409,68 @@ fn update_ops_unset_komponen_terdaftar_yang_hilang() {
 }
 
 #[test]
+fn update_ops_tanpa_unset_saat_entity_punya_seluruh_komponen_terdaftar() {
+    let mut reg = Registry::new();
+    reg.push::<Position>();
+    reg.push::<Health>();
+
+    let mut world = World::new();
+    let e = world.spawn();
+    world.insert(e, Position { x: 1.0, y: 2.0 });
+    world.insert(e, Health { hp: 10 });
+
+    let ops = reg.update_ops(&world, e).unwrap();
+    assert!(
+        !ops.contains_key("$unset"),
+        "tak boleh ada $unset ketika entity punya seluruh komponen terdaftar"
+    );
+    let set = ops.get_document("$set").unwrap();
+    assert!(set.contains_key("cmp.position"));
+    assert!(set.contains_key("cmp.health"));
+}
+
+#[test]
+fn update_ops_tanpa_set_saat_entity_tak_punya_komponen_terdaftar() {
+    let mut reg = Registry::new();
+    reg.push::<Position>();
+    reg.push::<Health>();
+
+    let mut world = World::new();
+    let e = world.spawn();
+
+    let ops = reg.update_ops(&world, e).unwrap();
+    assert!(
+        !ops.contains_key("$set"),
+        "tak boleh ada $set ketika entity tak punya komponen terdaftar apa pun"
+    );
+    let unset = ops.get_document("$unset").unwrap();
+    assert!(unset.contains_key("cmp.position"));
+    assert!(unset.contains_key("cmp.health"));
+}
+
+#[derive(arke::Serialize)]
+struct IndeksSalahUpdate {
+    hp: i64,
+}
+mongo_component!(IndeksSalahUpdate => "indeks_salah_update", indexes: [IndexDef::asc("tidak_ada")]);
+
+/// Mirror `index_def_menyebut_field_yang_tak_ada_gagal_di_build_debug`, tapi
+/// lewat `update_ops` — jalur `$set`/`$unset` yang dipakai `update`/`save`,
+/// lebih panas daripada `cmp_doc` yang hanya dipakai `create`.
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "tidak_ada")]
+fn update_ops_menjalankan_pemeriksaan_indeks_juga() {
+    let mut reg = Registry::new();
+    reg.push::<IndeksSalahUpdate>();
+
+    let mut world = World::new();
+    let e = world.spawn();
+    world.insert(e, IndeksSalahUpdate { hp: 1 });
+    let _ = reg.update_ops(&world, e);
+}
+
+#[test]
 fn update_ops_menaikkan_version_dengan_inc() {
     let mut reg = Registry::new();
     reg.push::<Position>();
@@ -329,4 +498,38 @@ fn komponen_tanpa_indeks_tak_menghasilkan_model() {
     let mut reg = Registry::new();
     reg.push::<Position>();
     assert!(reg.index_models().is_empty());
+}
+
+#[test]
+fn index_models_meneruskan_unique() {
+    let mut reg = Registry::new();
+    reg.push::<Akun>();
+
+    let models = reg.index_models();
+    let slug_model = models
+        .iter()
+        .find(|m| m.keys.contains_key("cmp.akun.slug"))
+        .expect("harus ada model untuk field `slug`");
+    assert_eq!(
+        slug_model.options.as_ref().and_then(|o| o.unique),
+        Some(true),
+        "IndexDef::unique() harus diteruskan ke IndexOptions::unique"
+    );
+}
+
+#[test]
+fn index_models_memetakan_dir_desc_ke_minus_satu() {
+    let mut reg = Registry::new();
+    reg.push::<Akun>();
+
+    let models = reg.index_models();
+    let peringkat_model = models
+        .iter()
+        .find(|m| m.keys.contains_key("cmp.akun.peringkat"))
+        .expect("harus ada model untuk field `peringkat`");
+    assert_eq!(
+        peringkat_model.keys.get_i32("cmp.akun.peringkat"),
+        Ok(-1),
+        "Dir::Desc harus dipetakan ke -1"
+    );
 }
