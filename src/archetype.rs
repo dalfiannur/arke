@@ -23,7 +23,13 @@ impl Archetype {
     /// Membuat archetype kosong dengan himpunan komponen `component_ids`
     /// (harus terurut) dan `columns` yang sejajar dengannya.
     pub(crate) fn new(component_ids: Vec<ComponentId>, columns: Vec<Box<dyn Column>>) -> Self {
-        debug_assert!(component_ids.windows(2).all(|w| w[0] < w[1]));
+        // `assert!` (bukan `debug_assert!`): pelanggaran urutan-ketat berarti id
+        // duplikat → archetype berkolom-ganda, yaitu korupsi data diam di rilis.
+        // Biaya nol pada jalur panas — hanya jalan sekali per archetype baru.
+        assert!(
+            component_ids.windows(2).all(|w| w[0] < w[1]),
+            "Archetype::new: component_ids harus terurut menaik & tanpa duplikat"
+        );
         debug_assert_eq!(component_ids.len(), columns.len());
         Self {
             component_ids,

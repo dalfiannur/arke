@@ -126,6 +126,12 @@ impl World {
     ///
     /// Bila `entity` tidak hidup, operasi diabaikan. Tipe komponen didaftarkan
     /// otomatis pada pemakaian pertama.
+    ///
+    /// Bila `entity` **sudah memiliki** komponen bertipe `T`, nilainya
+    /// **ditimpa di tempat**: baris tidak berpindah archetype dan nilai lama
+    /// dibuang (*upsert*). Inilah cara mengganti **seluruh nilai** sebuah
+    /// komponen; untuk memodifikasi isinya secara in-place, pakai `&mut T` dari
+    /// jalur query ([`World::query_mut`] / [`QueryData`](crate::QueryData)).
     pub fn insert<T: Component>(&mut self, entity: Entity, component: T) {
         if !self.contains(entity) {
             return;
@@ -149,7 +155,15 @@ impl World {
             return;
         };
 
-        // Entity sudah punya komponen: pindahkan ke archetype {komponen lama ∪ cid}.
+        // Komponen sudah dimiliki → timpa nilainya di tempat. Tanpa cabang ini,
+        // `cid` akan terduplikasi di daftar id archetype tujuan (push+sort tanpa
+        // dedup) dan membentuk archetype rusak berkolom-ganda.
+        if let Some(col) = self.archetypes[loc.archetype].column_index(cid) {
+            self.archetypes[loc.archetype].slice_mut::<T>(col)[loc.row] = component;
+            return;
+        }
+
+        // Entity sudah punya komponen lain: pindahkan ke archetype {komponen lama ∪ cid}.
         let mut ids = self.archetypes[loc.archetype].component_ids().to_vec();
         ids.push(cid);
         ids.sort_unstable();
@@ -985,6 +999,38 @@ mod tests {
         world.insert(e, Velocity(3, 4));
         assert_eq!(world.get::<Position>(e), Some(&Position(1, 2)));
         assert_eq!(world.get::<Velocity>(e), Some(&Velocity(3, 4)));
+    }
+
+    // Regresi: menyisipkan komponen yang **sudah dimiliki** harus menimpa
+    // nilainya di tempat. Sebelum perbaikan, `cid` didorong ulang ke daftar id
+    // archetype tujuan tanpa dedup → panik `debug_assert` urutan ketat di
+    // `Archetype::new` (debug) atau archetype rusak berkolom-ganda (release).
+    #[test]
+    fn insert_komponen_yang_sudah_dimiliki_menimpa_nilainya() {
+        use crate::QueryData;
+
+        let mut world = World::new();
+        let e = world.spawn();
+        world.insert(e, Position(1, 1));
+        world.insert(e, Position(2, 2)); // upsert, bukan pindah archetype
+        assert_eq!(world.get::<Position>(e), Some(&Position(2, 2)));
+
+        // Tidak ada kolom/baris hantu: setelah menambah komponen kedua, query
+        // pasangan menghasilkan **tepat satu** baris dengan nilai yang benar.
+        world.insert(e, Velocity(3, 4));
+        let mut rows = Vec::new();
+        <(&Position, &Velocity)>::each(&mut world, |(p, v)| {
+            rows.push((p.0, p.1, v.0, v.1));
+        });
+        assert_eq!(rows, vec![(2, 2, 3, 4)]);
+        assert_eq!(world.query::<Position>().count(), 1);
+
+        // Kasus berselang: A, B, lalu timpa A — B tak tersentuh.
+        world.insert(e, Position(9, 9));
+        assert_eq!(world.get::<Position>(e), Some(&Position(9, 9)));
+        assert_eq!(world.get::<Velocity>(e), Some(&Velocity(3, 4)));
+        assert_eq!(world.query::<Position>().count(), 1);
+        assert_eq!(world.query::<Velocity>().count(), 1);
     }
 
     #[test]

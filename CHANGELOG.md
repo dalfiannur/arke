@@ -7,6 +7,24 @@ rilis juga ada di [GitHub Releases](https://github.com/dalfiannur/arke/releases)
 
 ## [Unreleased]
 
+### Fixed
+
+- **`World::insert` atas komponen yang sudah dimiliki merusak archetype**
+  (`src/world.rs`). Cabang "entity sudah punya komponen" menyusun himpunan
+  komponen tujuan dengan `push` + `sort_unstable` **tanpa dedup**, sehingga
+  menyisipkan ulang tipe `T` yang sudah dimiliki menghasilkan daftar ber-id
+  kembar. Di build debug hal itu memicu panik `debug_assert` urutan-ketat di
+  `Archetype::new`; di **build rilis** `debug_assert` hilang dan archetype rusak
+  **terbentuk diam-diam** — dua kolom logis untuk satu komponen, sehingga
+  `get`/query membaca kolom pertama dan mengembalikan **nilai basi**.
+  `insert` kini bersifat **upsert**: bila `T` sudah dimiliki, nilainya ditimpa
+  di tempat tanpa perpindahan archetype (baris tidak bergerak, urutan iterasi
+  tetap deterministik — STD-0005). `insert_bundle` tidak terpengaruh (sudah
+  menjaga dengan `panic!` sejati). Sebagai pertahanan berlapis, guard urutan di
+  `Archetype::new` dinaikkan dari `debug_assert!` menjadi `assert!` agar
+  himpunan komponen cacat gagal keras juga di rilis (jalur dingin: sekali per
+  archetype baru).
+
 ## [0.6.1] — 2026-07-29
 
 ### Added
