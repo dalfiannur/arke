@@ -14,6 +14,33 @@
 > `delete_many`). **Jaminan yang dijanjikan tidak berubah** — atomik per-entity,
 > bukan per-World; yang berubah hanya mekanismenya, demi portabilitas server.
 
+> **Amandemen 2 (2026-07-31) — validasi `NAME` saat `register`, dan
+> `MongoError::DuplicateField`.** Review kode Task 3–10 menemukan dua celah.
+>
+> Pertama: `cmp_doc` menulis `MongoComponent::NAME` sebagai **kunci literal**
+> di bawah `cmp`, sedangkan `update_ops` memakainya untuk membangun
+> `format!("cmp.{NAME}")` — sebuah **path bertitik**. Untuk `NAME` yang
+> mengandung `.`, kedua jalur menyasar tempat berbeda di dokumen: `create`
+> menulis kunci literal, `update`/`save` menulis ke sub-dokumen bersarang.
+> Akibatnya `apply` (yang membaca kunci literal) tak pernah melihat apa yang
+> ditulis `update`, dan setiap update hilang diam-diam tanpa error di mana
+> pun. `NAME` berawalan `$` punya masalah sejenis: menghasilkan operator
+> Mongo tak sengaja (mis. `$unset: {"cmp.$evil": ""}`), ditolak server dengan
+> pesan driver yang opak, bukan kegagalan jelas seperti dijanjikan §4. Karena
+> itu `Registry::push` kini memvalidasi `NAME` — panic bila kosong,
+> mengandung `.`, atau berawalan `$` — sejajar pemeriksaan tabrakan nama yang
+> sudah ada: bug programmer di sebuah `const`, ditangkap sedini mungkin, saat
+> registrasi.
+>
+> Kedua: `Value::Map` (`Vec<(String, Value)>`) mengizinkan kunci duplikat,
+> tetapi `Document::insert` mendeduplikasi diam-diam — yang disisip terakhir
+> menang. `arke-derive` tak punya penjaga tabrakan `rename`, jadi dua field
+> yang memetakan ke nama BSON sama akan saling menimpa tanpa peringatan,
+> melanggar klaim round-trip setia (STD-0002) di §4. Varian error baru
+> `MongoError::DuplicateField { component, field }` menolak kondisi ini
+> alih-alih mendiamkannya; `validate_names` di `bson_map.rs` mendeteksinya di
+> tiap level `Map`, termasuk yang bersarang.
+
 ## Ringkasan
 
 Crate adapter baru **`arke-mongo`** yang menjadikan **MongoDB sumber kebenaran durable** bagi keadaan ECS, dengan pemetaan **satu dokumen per entity**: seluruh komponen sebuah entity hidup sebagai sub-dokumen di bawah field `cmp`. Identitas persisten memakai **`ObjectId`** sebagai `pid` (RFC-0034: indeks World tetap ephemeral). Jembatan komponen → dokumen adalah **`arke::Serialize`/`Value` yang sudah ada** — **tanpa** crate proc-macro baru.
@@ -208,9 +235,10 @@ Alasannya penting: mengganti `cmp` utuh akan **menghapus diam-diam** komponen ya
 ```rust
 pub enum MongoError {
     Driver(mongodb::error::Error),
-    Conflict    { pid: Pid, expected: i64, actual: Option<i64> },
-    Decode      { pid: Pid, component: &'static str },
-    InvalidName { component: &'static str, field: String },
+    Conflict       { pid: Pid, expected: i64, actual: Option<i64> },
+    Decode         { pid: Pid, component: &'static str },
+    InvalidName    { component: &'static str, field: String },
+    DuplicateField { component: &'static str, field: String },  // Am. 2
 }
 ```
 
