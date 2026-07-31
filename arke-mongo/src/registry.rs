@@ -5,6 +5,7 @@
 
 use arke::{Entity, Value, World};
 use mongodb::bson::{Document, doc};
+use mongodb::{IndexModel, options::IndexOptions};
 
 use crate::bson_map::{bson_to_value, validate_names, value_to_bson};
 use crate::{IndexDef, MongoComponent, MongoError};
@@ -170,5 +171,27 @@ impl Registry {
             ops.insert("$unset", unset);
         }
         Ok(ops)
+    }
+
+    /// Spesifikasi indeks untuk seluruh komponen terdaftar, atas path bersarang
+    /// `cmp.<nama>.<field>`.
+    pub fn index_models(&self) -> Vec<IndexModel> {
+        let mut models = Vec::new();
+        for r in &self.registered {
+            for idx in r.indexes {
+                let key = format!("cmp.{}.{}", r.name, idx.field);
+                let mut opts = IndexOptions::default();
+                if idx.unique {
+                    opts.unique = Some(true);
+                }
+                models.push(
+                    IndexModel::builder()
+                        .keys(doc! { key: idx.dir.as_i32() })
+                        .options(opts)
+                        .build(),
+                );
+            }
+        }
+        models
     }
 }

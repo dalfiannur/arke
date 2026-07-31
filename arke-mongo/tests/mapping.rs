@@ -313,3 +313,20 @@ fn update_ops_menaikkan_version_dengan_inc() {
     let ops = reg.update_ops(&world, e).unwrap();
     assert_eq!(ops.get_document("$inc").unwrap().get_i64("version"), Ok(1));
 }
+
+#[test]
+fn index_models_memakai_path_bersarang() {
+    let mut reg = Registry::new();
+    reg.push::<Health>(); // IndexDef::asc("hp")
+
+    let models = reg.index_models();
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].keys.get_i32("cmp.health.hp"), Ok(1));
+}
+
+#[test]
+fn komponen_tanpa_indeks_tak_menghasilkan_model() {
+    let mut reg = Registry::new();
+    reg.push::<Position>();
+    assert!(reg.index_models().is_empty());
+}
