@@ -132,3 +132,31 @@ jobs:
         env:
           DATABASE_URL: postgres://arke:arke@localhost:5432/arke_test
           REDIS_URL: redis://localhost:6379
+
+  # Uji integrasi arke-mongo (RFC-0035 §7). MongoDB 7 **standalone** — tanpa
+  # replica set, karena `save` sengaja tak memakai transaksi multi-dokumen.
+  mongo:
+    runs-on: ubuntu-latest
+    services:
+      mongo:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --eval 'db.runCommand({ping:1})'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Test arke-mongo (integrasi)
+        env:
+          MONGODB_URI: mongodb://localhost:27017
+          # Tanpa ini, job yang salah konfigurasi (env var salah nama, service
+          # container gagal start) akan HIJAU sambil tak menjalankan satu asersi
+          # pun — tes lapis 2 melaporkan "pass" saat di-skip. Dengan ini diset,
+          # `MONGODB_URI` yang hilang jadi panic, bukan skip diam-diam.
+          ARKE_REQUIRE_MONGO: "1"
+        run: cargo test -p arke-mongo --verbose
