@@ -1,9 +1,9 @@
 # RFC-0035: `arke-mongo` — adapter MongoDB dokumen-per-entity
 
-- **Status:** Draft <!-- Draft | Discussion | Accepted | Rejected | Superseded by RFC-XXXX -->
+- **Status:** Accepted <!-- Draft | Discussion | Accepted | Rejected | Superseded by RFC-XXXX -->
 - **Tanggal:** 2026-07-31
 - **Milestone:** M-32 (Adapter MongoDB — fondasi)
-- **ADR terkait:** — (menyusul bila status menjadi Accepted)
+- **ADR terkait:** [ADR-0035](../ADR/ADR-0035-arke-mongo-adapter.md)
 - **RFC terkait:** [RFC-0021](./RFC-0021-arke-postgres-adapter.md) (adapter Postgres), [RFC-0034](./RFC-0034-decoupled-persistent-id.md) (identitas persisten `pid`), [RFC-0007](./RFC-0007-world-snapshot.md) / [RFC-0009](./RFC-0009-derive-serialize.md) (`Serialize`/`Value`)
 
 > **Amandemen 1 (2026-07-31) — mekanisme `save`.** Naskah asli §5 menyebut
@@ -321,4 +321,4 @@ Penundaan ini **sadar**, bukan kelupaan: mengunci API query untuk model dokumen 
 
 ## Keputusan
 
-Belum diputuskan — status **Draft**. Saat diterima, bagian ini diisi ringkasan keputusan dan ADR-0035 dibuat, lalu M-32 dibuka dengan TDD mulai dari pemetaan `Value` ↔ BSON (§7 Lapis 1, tanpa DB).
+**Diterima.** Lihat [ADR-0035](../ADR/ADR-0035-arke-mongo-adapter.md). M-32 diselesaikan lewat TDD dari pemetaan `Value` ↔ BSON (§7 Lapis 1, tanpa DB) hingga `MongoStore` penuh (CRUD per-operasi, `save`/`load` seluruh World). Dua amandemen lahir selama implementasi: Amandemen 1 mengganti `bulkWrite` dengan operasi per-dokumen berurutan untuk `save` (portabilitas ke `mongod` 7 standalone) dan memutuskan `NAME` bertabrakan → `panic` saat `register`; Amandemen 2 menambah validasi `NAME` sebagai nama field BSON saat `register` dan `MongoError::DuplicateField` untuk field yang saling menimpa diam-diam.
