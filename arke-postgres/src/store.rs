@@ -309,8 +309,27 @@ impl PgStore {
 
     /// Muat entity yang cocok `predicate` (fragmen `WHERE` atas tabel `T`) ke
     /// `world`; kembalikan pasangan `(pid, Entity)`. `predicate` = SQL tepercaya.
+    ///
+    /// Memuat lewat [`Self::materialize`] — satu query per tabel komponen dengan
+    /// `pid = ANY($1)` — bukan satu `fetch` per pid. Versi per-pid membuat biaya
+    /// tumbuh sebagai `baris × (1 + jumlah komponen terdaftar)`: pada 32 komponen
+    /// terdaftar, memuat 398 entity berarti 13.135 round-trip, dan itu terukur
+    /// sebagai ~900 ms untuk satu request yang isinya cuma satu tabel. Jalur batch
+    /// membuatnya tetap `1 + 1 + jumlah komponen` berapa pun jumlah barisnya.
+    ///
+    /// Dua konsekuensi yang disengaja, keduanya menyelaraskan jalur ini dengan
+    /// `load_ids` yang sudah memakai `materialize`:
+    /// - Jembatan `pid_of`/`entity_of` kini ikut terisi, sehingga kolom
+    ///   `entity_ref` yang targetnya ikut ter-muat menerjemah ke `Ref` yang benar
+    ///   alih-alih selalu menggantung — persis kontrak di `translate_refs`.
+    /// - Cache read-through (RFC-0033) kini melayani jalur ini juga; `fetch`
+    ///   melewatinya.
+    ///
+    /// `self.last` sengaja TIDAK disentuh: ini jalur baca, dan `fetch` dulu juga
+    /// tidak menyentuhnya. Menyelaraskan rekam sinkron di sini akan mengubah arti
+    /// `save_incremental` bagi pemanggil yang cuma membaca.
     pub async fn query_pids<T: PgComponent>(
-        &self,
+        &mut self,
         world: &mut World,
         predicate: Option<&str>,
     ) -> Result<Vec<(i64, Entity)>, sqlx::Error> {
@@ -322,13 +341,7 @@ impl PgStore {
             .iter()
             .map(|r| r.try_get("pid"))
             .collect::<Result<_, _>>()?;
-        let mut out = Vec::with_capacity(pids.len());
-        for pid in pids {
-            if let Some(e) = self.fetch(world, pid).await? {
-                out.push((pid, e));
-            }
-        }
-        Ok(out)
+        self.materialize(world, &pids).await
     }
 
     /// Membuat tabel komponen bila belum ada, lalu menyelaraskan kolomnya dengan
@@ -586,11 +599,17 @@ impl PgStore {
     }
 
     /// Rekonstruksi entity `ids` + seluruh komponennya ke `world`.
+    ///
+    /// Mengembalikan pasangan `(pid, Entity)` — `pid` ikut dikembalikan supaya
+    /// pemanggil tak perlu menebak ulang lewat jembatan `entity_of`, yang hidup
+    /// lebih lama dari satu muat dan bisa memuat sisa World sebelumnya.
+    /// Urutannya mengikuti `ORDER BY pid` pada tabel `arke_entities`, dan `pid`
+    /// yang tak punya baris di sana memang tidak muncul.
     async fn materialize(
         &mut self,
         world: &mut World,
         ids: &[i64],
-    ) -> Result<Vec<Entity>, sqlx::Error> {
+    ) -> Result<Vec<(i64, Entity)>, sqlx::Error> {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -601,12 +620,12 @@ impl PgStore {
             .fetch_all(&self.pool)
             .await?;
         let mut by_id: HashMap<i64, Entity> = HashMap::with_capacity(rows.len());
-        let mut entities: Vec<Entity> = Vec::with_capacity(rows.len());
+        let mut entities: Vec<(i64, Entity)> = Vec::with_capacity(rows.len());
         for row in rows {
             let pid: i64 = row.try_get("pid")?;
             let entity = world.spawn();
             by_id.insert(pid, entity);
-            entities.push(entity);
+            entities.push((pid, entity));
             self.pid_of.insert(entity.index(), pid);
             self.entity_of.insert(pid, entity);
         }
@@ -679,7 +698,7 @@ impl PgStore {
     ) -> Result<Vec<Entity>, sqlx::Error> {
         let entities = self.materialize(world, ids).await?;
         self.last = self.dump_state(world);
-        Ok(entities)
+        Ok(entities.into_iter().map(|(_, e)| e).collect())
     }
 
     /// Versi optimistic-lock `entity` di DB, atau `None` bila entity tak ada.
