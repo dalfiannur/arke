@@ -55,6 +55,14 @@ rilis juga ada di [GitHub Releases](https://github.com/dalfiannur/arke/releases)
   ikut ditambahkan. Op lama (`commit_insert` dkk.) kini wrapper begin→`_in`→commit
   — perilaku sama.
 
+- **`arke-postgres`: pola World per-request.** `PgStore::fork()` — store baru
+  berbagi pool/registry/cache dengan jembatan pid↔entity kosong (satu template
+  di state, `fork()` per handler; tanpa `Mutex`). `PgStore::pid_of(entity)` /
+  `entity_of(pid)` kini publik, dan `Query::load_pids(world)` mengembalikan
+  `(pid, Entity)` entity yang dimuat — id persisten untuk `remove`/respons API
+  tanpa `load_where`. README: resep POST/GET/PATCH/DELETE dengan id publik
+  kolom `#[pg(unique)]` dan `save_incremental` relatif ke working set.
+
 ### Fixed
 
 - **`World::insert` atas komponen yang sudah dimiliki merusak archetype**

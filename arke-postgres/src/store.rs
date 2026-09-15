@@ -35,6 +35,7 @@ const DANGLING_INDEX: i64 = u32::MAX as i64;
 type EntityState = (i64, Vec<Option<Vec<PgValue>>>);
 
 /// Operasi type-erased untuk satu tipe komponen terdaftar.
+#[derive(Clone)]
 struct Registered {
     table: &'static str,
     columns: &'static [ColumnDef],
@@ -150,6 +151,36 @@ impl PgStore {
     pub fn with_cache(mut self, cache: Arc<dyn ComponentCache>) -> Self {
         self.cache = Some(cache);
         self
+    }
+
+    /// Store baru dengan **pool, registry, dan cache yang sama** tetapi jembatan
+    /// pid↔entity dan rekam `save_incremental` **kosong** — untuk pola *World
+    /// per-request*: simpan satu store template (sudah `register` + `migrate`)
+    /// di state aplikasi, `fork()` di tiap handler, pakai bersama satu `World`
+    /// sekali-pakai. Murah: `PgPool` adalah `Arc` di dalam; registry hanya
+    /// fn-pointer.
+    pub fn fork(&self) -> Self {
+        Self {
+            pool: self.pool.clone(),
+            registered: self.registered.clone(),
+            last: HashMap::new(),
+            pid_of: HashMap::new(),
+            entity_of: HashMap::new(),
+            cache: self.cache.clone(),
+        }
+    }
+
+    /// `pid` persisten untuk `entity` di working-set ini — terisi setelah
+    /// `load`/`load_pids`/`fetch`/`save*` memetakan entity tersebut. `None` bila
+    /// entity belum pernah disinkronkan lewat store ini.
+    pub fn pid_of(&self, entity: Entity) -> Option<i64> {
+        self.pid_of.get(&entity.index()).copied()
+    }
+
+    /// Kebalikan [`Self::pid_of`]: handle lokal untuk `pid`, bila termuat di
+    /// working-set ini.
+    pub fn entity_of(&self, pid: i64) -> Option<Entity> {
+        self.entity_of.get(&pid).copied()
     }
 
     /// Mendaftarkan tipe komponen `T` untuk dipersist.
@@ -623,9 +654,9 @@ impl PgStore {
             .iter()
             .map(|r| r.try_get("pid"))
             .collect::<Result<_, _>>()?;
-        self.materialize(world, &ids).await?;
+        let loaded = self.materialize(world, &ids).await?;
         self.last = self.dump_state(world);
-        Ok(ids.len())
+        Ok(loaded.len())
     }
 
     /// Mulai **query builder typed** untuk komponen `T` (RFC-0030) — alternatif
@@ -656,7 +687,7 @@ impl PgStore {
         sql: String,
         params: Vec<(PgType, PgValue)>,
         world: &mut World,
-    ) -> Result<usize, sqlx::Error> {
+    ) -> Result<Vec<(i64, Entity)>, sqlx::Error> {
         let mut q = sqlx::query(&sql);
         for (ty, val) in &params {
             q = bind_value(q, *ty, val);
@@ -667,9 +698,9 @@ impl PgStore {
             .iter()
             .map(|r| r.try_get("pid"))
             .collect::<Result<_, _>>()?;
-        self.materialize(world, &ids).await?;
+        let loaded = self.materialize(world, &ids).await?;
         self.last = self.dump_state(world);
-        Ok(ids.len())
+        Ok(loaded)
     }
 
     /// Rekonstruksi entity `ids` + seluruh komponennya ke `world`.

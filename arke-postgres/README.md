@@ -106,6 +106,51 @@ let n = store.query::<Meeting>().filter(f)
 # }
 ```
 
+### World per-request (REST/axum)
+
+`PgStore` memegang jembatan pid↔entity dan rekam `save_incremental` yang
+**per-World**, sehingga metode baca/tulisnya `&mut self`. Jangan dibagi lewat
+`Mutex` antar-handler: simpan satu store **template** (sudah `register` +
+`migrate`) di state, lalu **`fork()`** per request — pool (`Arc`), registry, dan
+cache dibagi, jembatannya kosong. Id publik = kolom `#[pg(unique)]` (mis. UUID
+string), bukan `Entity` (ephemeral) maupun `pid` (integer sekuensial).
+
+```rust,no_run
+# use arke::World;
+# use arke_postgres::{PgComponent, PgStore, UpdateError};
+# #[derive(PgComponent, Clone)] struct Booking { #[pg(unique)] booking_id: String, title: String }
+# async fn handlers(tpl: &PgStore, id: String, title: String) -> Result<(), sqlx::Error> {
+// POST: World kosong + spawn → save_incremental = INSERT murni.
+let mut store = tpl.fork();
+let mut w = World::new();
+let e = w.spawn();
+w.insert(e, Booking { booking_id: id.clone(), title });
+store.save_incremental(&w).await?;
+let pid = store.pid_of(e);                      // Some(pid) setelah tersimpan
+
+// GET/PATCH by id: fork → muat subset → ubah → save_incremental hanya menyentuh subset.
+let mut store = tpl.fork();
+let mut w = World::new();
+let hits = store.query::<Booking>().filter(Booking::booking_id().eq(id)).load_pids(&mut w).await?;
+if let Some(&(pid, e)) = hits.first() {
+    let mut b = w.get::<Booking>(e).unwrap().clone();
+    b.title = "diubah".into();
+    w.insert(e, b);                             // insert = upsert di tempat
+    store.save_incremental(&w).await?;          // last-writer-wins
+    // …atau ber-optimistic-lock (→ 409 pada konflik):
+    // let v = store.entity_version(e).await?.unwrap();
+    // match store.update_entity(&w, e, v).await { Err(UpdateError::Conflict) => …, r => … }
+    // DELETE:
+    // tpl.remove(pid).await?;
+}
+# Ok(())
+# }
+```
+
+Diff `save_incremental` relatif ke **working set yang dimuat** (`last`), bukan
+seluruh tabel: entity di luar subset tak tersentuh; yang di-`despawn` dari
+subset di-DELETE; yang di-`spawn` baru di-INSERT.
+
 ### Transaksi milik pemanggil (cek-lalu-tulis atomik)
 
 Op per-entity (`commit_insert`/`commit_update`/`remove`) masing-masing

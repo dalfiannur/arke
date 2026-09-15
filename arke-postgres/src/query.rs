@@ -536,6 +536,13 @@ impl<'a, T: PgComponent> Query<'a, T> {
     /// ke `world`; untuk tiap `join_load`, muat pula entity target `R`.
     /// Mengembalikan jumlah entity `T` dimuat.
     pub async fn load(self, world: &mut World) -> Result<usize, sqlx::Error> {
+        Ok(self.load_pids(world).await?.len())
+    }
+
+    /// Seperti [`load`](Self::load) tetapi mengembalikan pasangan `(pid, Entity)`
+    /// entity `T` yang dimuat (urut `ORDER BY` query) — id persisten untuk
+    /// `remove(pid)`/`commit_update(pid)`/respons API, tanpa `load_where`.
+    pub async fn load_pids(self, world: &mut World) -> Result<Vec<(i64, Entity)>, sqlx::Error> {
         // Susun semua SQL (pinjam-baca `self`) sebelum menyentuh `self.store`.
         let (main_sql, main_params) = self.build();
         let targets: Vec<(String, Vec<(PgType, PgValue)>)> = self
@@ -553,8 +560,7 @@ impl<'a, T: PgComponent> Query<'a, T> {
         for (sql, params) in targets {
             store.load_by_query(sql, params, world).await?;
         }
-        let n = store.load_by_query(main_sql, main_params, world).await?;
-        Ok(n)
+        store.load_by_query(main_sql, main_params, world).await
     }
 
     /// Mulai **path relasi bertipe** (RFC-0032): hop pertama `T →(rel)→ Next`.
@@ -699,7 +705,7 @@ impl<'a> PathLoad<'a> {
         let n = store
             .load_by_query(root_sql, self.leaf_params.clone(), world)
             .await?;
-        Ok(n)
+        Ok(n.len())
     }
 }
 
@@ -751,7 +757,11 @@ impl<'a> RecursiveLoad<'a> {
     /// Mengembalikan jumlah entity dimuat.
     pub async fn load(self, world: &mut World) -> Result<usize, sqlx::Error> {
         self.store.reset_world_bridge();
-        self.store.load_by_query(self.sql, self.params, world).await
+        Ok(self
+            .store
+            .load_by_query(self.sql, self.params, world)
+            .await?
+            .len())
     }
 }
 
