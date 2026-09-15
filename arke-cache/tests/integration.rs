@@ -38,21 +38,29 @@ async fn redis_cache_end_to_end() {
     let e1 = world.spawn();
     world.insert(e1, CacheProbe { value: 8 });
     store.save(&world).await.unwrap(); // clear cache
+    let pid0 = store.pid_of(e0).expect("pid teralokasi");
+
+    // Pembaca memakai `fork()` (pool + cache sama, jembatan sendiri) agar `store`
+    // tetap tertaut ke `world` untuk `save_incremental` di bawah.
+    let mut reader = store.fork();
 
     // Muat #1 → isi cache Redis.
     let mut w1 = World::new();
-    store.load(&mut w1).await.unwrap();
+    reader.load(&mut w1).await.unwrap();
     assert_eq!(w1.get::<CacheProbe>(e0), Some(&CacheProbe { value: 7 }));
 
-    // Bukti: kunci terisi di Redis (MGET langsung via cache).
-    let probe = cache
-        .get_many("cmp_cacheprobe", &[i64::from(e0.index())])
-        .await;
+    // Bukti: kunci terisi di Redis (MGET langsung via cache) — di bawah namespace
+    // ber-fingerprint skema dan `pid` persisten (bukan indeks World).
+    let ns = store
+        .cache_namespace(CacheProbe::TABLE)
+        .expect("tabel terdaftar")
+        .to_string();
+    let probe = cache.get_many(&ns, &[pid0]).await;
     assert!(probe[0].is_some(), "load harus mengisi cache Redis");
 
     // Muat #2 → dilayani cache; data tetap benar.
     let mut w2 = World::new();
-    store.load(&mut w2).await.unwrap();
+    reader.load(&mut w2).await.unwrap();
     assert_eq!(w2.get::<CacheProbe>(e1), Some(&CacheProbe { value: 8 }));
 
     // Ubah e0 (7→77) → save_incremental → invalidate → muat #3 = NILAI BARU.
@@ -63,7 +71,7 @@ async fn redis_cache_end_to_end() {
     }
     store.save_incremental(&world).await.unwrap();
     let mut w3 = World::new();
-    store.load(&mut w3).await.unwrap();
+    reader.load(&mut w3).await.unwrap();
     assert_eq!(
         w3.get::<CacheProbe>(e0),
         Some(&CacheProbe { value: 77 }),

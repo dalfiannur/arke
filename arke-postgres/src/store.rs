@@ -463,6 +463,18 @@ impl PgStore {
         crate::DeleteWhere::new(self)
     }
 
+    /// Namespace cache (RFC-0033) untuk tabel komponen `table`:
+    /// `table@fingerprint(kolom)` — kunci yang dipakai [`ComponentCache`] untuk
+    /// tabel itu pada skema saat ini. `None` bila tabel tak terdaftar. Berguna
+    /// untuk inspeksi/purge kunci di backend (mis. `arke:<namespace>:<pid>` di
+    /// `arke-cache`).
+    pub fn cache_namespace(&self, table: &str) -> Option<&str> {
+        self.registered
+            .iter()
+            .find(|r| r.table == table)
+            .map(|r| r.cache_ns.as_str())
+    }
+
     /// Invalidate cache komponen bertabel `table` untuk `pids` (no-op tanpa
     /// cache / pids kosong / tabel tak terdaftar). Namespace cache = `cache_ns`
     /// tabel itu (ber-fingerprint skema).
