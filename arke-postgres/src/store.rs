@@ -62,23 +62,47 @@ struct Registered {
     remove: fn(&mut World, Entity),
 }
 
-/// Fingerprint deterministik definisi kolom (FNV-1a 64-bit atas `nama:tipe:null`)
-/// — bukan `DefaultHasher`, yang algoritmanya boleh berubah antar rilis Rust.
-fn schema_fingerprint(columns: &[ColumnDef]) -> u64 {
+/// FNV-1a 64-bit — deterministik lintas rilis Rust (bukan `DefaultHasher`).
+fn fnv1a(parts: &[&[u8]]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut feed = |bytes: &[u8]| {
-        for &b in bytes {
+    for part in parts {
+        for &b in *part {
             h ^= u64::from(b);
             h = h.wrapping_mul(0x0000_0100_0000_01b3);
         }
-    };
-    for c in columns {
-        feed(c.name.as_bytes());
-        feed(b":");
-        feed(c.ty.sql().as_bytes());
-        feed(if c.nullable { b":n;" } else { b":;" });
     }
     h
+}
+
+/// Fingerprint deterministik definisi kolom (atas `nama:tipe:null`).
+fn schema_fingerprint(columns: &[ColumnDef]) -> u64 {
+    let mut parts: Vec<&[u8]> = Vec::with_capacity(columns.len() * 4);
+    for c in columns {
+        parts.push(c.name.as_bytes());
+        parts.push(b":");
+        parts.push(c.ty.sql().as_bytes());
+        parts.push(if c.nullable { b":n;" } else { b":;" });
+    }
+    fnv1a(&parts)
+}
+
+/// Nama constraint CHECK **content-addressed**: `chk_<tabel>_<fnv64(expr)>`.
+/// Ekspresi berbeda → nama berbeda, sehingga `migrate` dapat merekonsiliasi
+/// perubahan ekspresi tanpa registry nama. Bagian tabel dipangkas agar total
+/// ≤ 63 byte (batas identifier Postgres; bila lebih, Postgres memotong diam-diam
+/// dan nama tak lagi cocok saat dibandingkan).
+fn check_constraint_name(table: &str, expr: &str) -> String {
+    let hash = format!("{:016x}", fnv1a(&[expr.trim().as_bytes()]));
+    // "chk_" (4) + tabel + "_" (1) + 16 hex ≤ 63 → tabel ≤ 42 byte.
+    let mut t = table;
+    while t.len() > 42 {
+        let mut cut = t.len() - 1;
+        while !t.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        t = &t[..cut];
+    }
+    format!("chk_{t}_{hash}")
 }
 
 fn dump_of<T: PgComponent + Component>(world: &World) -> Vec<ComponentRow> {
@@ -656,17 +680,43 @@ impl PgStore {
             .await?;
         }
 
-        // Constraint `CHECK` (`#[pg(check = "…")]`), idempoten via nama + guard.
-        for (i, expr) in r.checks.iter().enumerate() {
+        // Constraint `CHECK` (`#[pg(check = "…")]`) ber-nama **content-addressed**:
+        // `chk_<tabel>_<fnv64(ekspresi)>`. Ekspresi yang berubah = nama baru →
+        // dipasang; nama `chk_<tabel>_*` yang tak lagi diinginkan (ekspresi
+        // dihapus/berubah) di-DROP. Definisi yang sama → tak ada DDL (stabil).
+        // Baris yang melanggar CHECK baru membuat `ADD CONSTRAINT` gagal keras —
+        // migrasi data adalah keputusan operator, bukan sesuatu yang dilewati diam.
+        let desired: Vec<(String, &str)> = r
+            .checks
+            .iter()
+            .map(|expr| (check_constraint_name(r.table, expr), *expr))
+            .collect();
+        let existing: Vec<String> = sqlx::query_scalar(
+            "SELECT conname FROM pg_constraint \
+             WHERE conrelid = $1::regclass AND contype = 'c' AND conname LIKE 'chk\\_%'",
+        )
+        .bind(quote_ident(r.table).as_ref())
+        .fetch_all(&self.pool)
+        .await?;
+        for name in &existing {
+            if !desired.iter().any(|(n, _)| n == name) {
+                sqlx::query(&format!(
+                    "ALTER TABLE {} DROP CONSTRAINT {}",
+                    quote_ident(r.table),
+                    quote_ident(name)
+                ))
+                .execute(&self.pool)
+                .await?;
+            }
+        }
+        for (name, expr) in &desired {
+            if existing.contains(name) {
+                continue;
+            }
             sqlx::query(&format!(
-                "DO $$ BEGIN \
-                   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = '{chk}') THEN \
-                     ALTER TABLE {qtable} ADD CONSTRAINT {qchk} CHECK ({expr}); \
-                   END IF; \
-                 END $$;",
-                chk = format!("chk_{}_{i}", r.table).replace('\'', "''"),
-                qchk = quote_ident(&format!("chk_{}_{i}", r.table)),
-                qtable = quote_ident(r.table),
+                "ALTER TABLE {} ADD CONSTRAINT {} CHECK ({expr})",
+                quote_ident(r.table),
+                quote_ident(name)
             ))
             .execute(&self.pool)
             .await?;

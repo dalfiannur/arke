@@ -283,7 +283,10 @@ struct Enemy {
   melayani `contains`/`contains_all` (`@>`). `migrate` mengganti btree lama di
   kolom JSONB dengan GIN. `#[pg(unique)]` selalu btree (GIN tak mendukung UNIQUE).
 - `#[pg(unique)]` → `CREATE UNIQUE INDEX`.
-- `#[pg(check = "…")]` (level-tipe, boleh banyak) → constraint `CHECK`.
+- `#[pg(check = "…")]` (level-tipe, boleh banyak) → constraint `CHECK` bernama
+  `chk_<tabel>_<hash ekspresi>`; mengubah/menghapus ekspresi direkonsiliasi
+  `migrate` (yang lama di-drop). Baris lama yang melanggar ekspresi baru
+  membuat `migrate` gagal — perbaiki datanya dulu.
 - `#[pg(table = "…")]` (level-tipe) → nama tabel, dipakai **verbatim** (di-quote:
   huruf besar jadi case-sensitive). Dua struct bernama sama di modul berbeda
   butuh ini agar tak bertabrakan di `cmp_<nama>`.

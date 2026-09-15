@@ -90,12 +90,14 @@ async fn index_dan_check_dibuat_dan_ditegakkan() {
     .unwrap();
     assert!(uniq.is_some(), "indeks unik code harus dibuat");
 
-    // Constraint CHECK dibuat.
-    let chk: Option<String> =
-        sqlx::query_scalar("SELECT conname FROM pg_constraint WHERE conname = 'chk_cmp_guard_0'")
-            .fetch_optional(&pool)
-            .await
-            .unwrap();
+    // Constraint CHECK dibuat (nama content-addressed `chk_cmp_guard_<hash>`).
+    let chk: Option<String> = sqlx::query_scalar(
+        "SELECT conname FROM pg_constraint \
+         WHERE conrelid = 'cmp_guard'::regclass AND contype = 'c' AND conname LIKE 'chk\\_cmp\\_guard\\_%'",
+    )
+    .fetch_optional(&pool)
+    .await
+    .unwrap();
     assert!(chk.is_some(), "constraint CHECK harus dibuat");
 
     // migrate idempoten (jalankan lagi tanpa error).

@@ -7,6 +7,18 @@ rilis juga ada di [GitHub Releases](https://github.com/dalfiannur/arke/releases)
 
 ## [Unreleased]
 
+### Changed
+
+- **`arke-postgres`: `#[pg(check)]` ber-nama-stabil (content-addressed).**
+  Constraint kini bernama `chk_<tabel>_<fnv64(ekspresi)>` (dulu
+  `chk_<tabel>_<indeks posisi>`, sehingga ekspresi yang diubah di posisi yang
+  sama tak pernah diterapkan). `migrate` merekonsiliasi: ekspresi baru/berubah
+  dipasang, `chk_<tabel>_*` yang tak lagi dideklarasikan di-DROP; definisi
+  sama → tanpa DDL. Constraint `chk_<tabel>_<n>` lama dari 0.16 di-drop dan
+  dipasang ulang dengan nama baru pada `migrate` pertama. Baris yang melanggar
+  CHECK baru membuat `migrate` gagal keras (keputusan migrasi data ada di
+  operator).
+
 ## [0.7.0] — 2026-09-15
 
 Rilis gelombang breaking kedua menuju 1.0 ([RFC-0036](docs/RFC/RFC-0036-audit-0.7-soundness-stability-security.md), [ADR-0036](docs/ADR/ADR-0036-audit-0.7-soundness-stability-security.md), [Milestone 33](docs/MILESTONE_33.md)). Crate pendamping: `arke-derive` 0.4.0 (`#[serialize(name/default)]`; kode hasil derive butuh `arke` ≥ 0.7), `arke-postgres` 0.16.0, `arke-postgres-derive` 0.8.0, `arke-cache` 0.4.0, `arke-mongo` 0.1.0 (rilis pertama).
