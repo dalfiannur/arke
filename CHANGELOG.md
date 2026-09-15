@@ -33,6 +33,15 @@ rilis juga ada di [GitHub Releases](https://github.com/dalfiannur/arke/releases)
   ada di API publik. Query builder, relasi, cache, `save_incremental`, dan
   strategi evolusi skema ditunda ke RFC lanjutan.
 
+- **`arke-postgres`: `Query::count()` dan `contains`/`contains_all` untuk field
+  array JSONB.** `count()` menjalankan `SELECT COUNT(*)` dengan `WHERE` yang sama
+  dengan `load()` (tanpa `ORDER BY`/`LIMIT`/`OFFSET`) — total halaman tanpa
+  `load_where` + `sqlx` mentah; `Filter` kini `Clone` agar satu filter dipakai
+  untuk `count()` dan `load()`. `#[derive(PgComponent)]` kini juga menghasilkan
+  token untuk field non-skalar (`Field<Self, T>` atas kolom JSONB); untuk
+  `Vec<V>`/`Option<Vec<V>>` tersedia `contains(v)`/`contains_all(iter)` →
+  `col @> $n::jsonb` (memakai index GIN bila ada). Additif; `load_where` tetap.
+
 ### Fixed
 
 - **`World::insert` atas komponen yang sudah dimiliki merusak archetype**

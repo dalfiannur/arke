@@ -9,6 +9,8 @@ use arke_postgres::{Dir, PgComponent, PgStore};
 struct Mob {
     power: i32,
     name: String,
+    /// Non-skalar → JSONB; uji `contains`/`contains_all`.
+    tags: Vec<i64>,
 }
 
 #[tokio::test]
@@ -32,6 +34,8 @@ async fn query_builder_typed_end_to_end() {
             Mob {
                 power: (i as i32) * 10,
                 name: (*nm).to_string(),
+                // tags: [0], [0,1], [0,1,2], … → tag `k` dimiliki oleh i >= k.
+                tags: (0..=i as i64).collect(),
             },
         );
     }
@@ -82,4 +86,51 @@ async fn query_builder_typed_end_to_end() {
         .await
         .unwrap();
     assert_eq!(ne, 3);
+
+    // 5) count: total tanpa LIMIT/OFFSET, filter sama dengan `load`.
+    let f = Mob::power().gte(10);
+    let total = store
+        .query::<Mob>()
+        .filter(f.clone())
+        .count()
+        .await
+        .unwrap();
+    assert_eq!(total, 4); // 10,20,30,40
+    let mut g = World::new();
+    let ng = store
+        .query::<Mob>()
+        .filter(f)
+        .order_by(Mob::power(), Dir::Desc)
+        .limit(2)
+        .offset(1)
+        .load(&mut g)
+        .await
+        .unwrap();
+    assert_eq!(ng, 2, "halaman terbatas, total tetap 4");
+    let semua = store.query::<Mob>().count().await.unwrap();
+    assert_eq!(semua, 5);
+
+    // 6) contains / contains_all atas array JSONB (`@>`).
+    let n_tag3 = store
+        .query::<Mob>()
+        .filter(Mob::tags().contains(3))
+        .count()
+        .await
+        .unwrap();
+    assert_eq!(n_tag3, 2); // i = 3, 4
+    let n_tag14 = store
+        .query::<Mob>()
+        .filter(Mob::tags().contains_all([1, 4]))
+        .count()
+        .await
+        .unwrap();
+    assert_eq!(n_tag14, 1); // hanya i = 4
+    let mut h = World::new();
+    let nh = store
+        .query::<Mob>()
+        .filter(Mob::tags().contains(2).and(Mob::name().like("a%")))
+        .load(&mut h)
+        .await
+        .unwrap();
+    assert_eq!(nh, 2); // apex(2), aqua(4)
 }

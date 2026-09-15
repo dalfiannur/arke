@@ -89,6 +89,23 @@ let n = store.load_where::<Health>(world, "hp < 20").await?; // predikat = SQL m
 
 Aman dikombinasi dengan `save_incremental` (entity tak-dimuat tak tersentuh).
 
+Untuk filter **typed** (dicek compiler, ter-parameterisasi) pakai `query::<T>()`
+— termasuk paginasi berikut total halamannya dan *containment* array JSONB:
+
+```rust,no_run
+# use arke::World;
+# use arke_postgres::{Dir, PgComponent, PgStore};
+# #[derive(PgComponent)] struct Meeting { start: i64, participants: Vec<i64> }
+# async fn f(store: &mut PgStore, world: &mut World, uid: i64) -> Result<(), sqlx::Error> {
+let f = Meeting::participants().contains(uid).and(Meeting::start().gte(1_700_000_000));
+let total = store.query::<Meeting>().filter(f.clone()).count().await?; // COUNT(*), tanpa LIMIT
+let n = store.query::<Meeting>().filter(f)
+    .order_by(Meeting::start(), Dir::Asc).limit(20).offset(40)
+    .load(world).await?;
+# Ok(())
+# }
+```
+
 ### Optimistic-lock (multi-writer)
 
 `arke_entities.version` naik tiap tulis-balik; `update_entity` gagal dengan

@@ -504,8 +504,9 @@ fn gen_impl(name: &str, fields: &[Field], checks: &[String]) -> Result<String, S
     }
 
     // Token field typed untuk query builder (RFC-0030): satu metode `fn <field>()
-    // -> Field<Self, V>` per field **skalar**. Field JSONB (non-skalar) dilewati
-    // — pakai `load_where` string untuk itu.
+    // -> Field<Self, V>` per field. Field JSONB (non-skalar) bertipe
+    // `Field<Self, T>` dengan `T` apa adanya (mis. `Vec<i64>`) — operator
+    // `@>` tersedia untuk `Vec<_>`/`Option<Vec<_>>`; selebihnya via `load_where`.
     let mut tokens = String::new();
     for f in fields {
         let inner = strip_option(&f.ty);
@@ -534,6 +535,14 @@ fn gen_impl(name: &str, fields: &[Field], checks: &[String]) -> Result<String, S
                 inner = inner,
                 col = f.name,
                 pg = sc.pg_type,
+            ));
+        } else {
+            tokens.push_str(&format!(
+                "    pub fn {field}() -> ::arke_postgres::Field<Self, {ty}> {{ \
+                     ::arke_postgres::Field::new({col:?}, ::arke_postgres::PgType::Jsonb) }}\n",
+                field = f.name,
+                ty = f.ty,
+                col = f.name,
             ));
         }
     }

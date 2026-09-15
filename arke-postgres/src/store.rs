@@ -226,11 +226,7 @@ impl PgStore {
 
     /// Muat komponen `pid` ke `world` sebagai entity lokal baru; kembalikan handle
     /// (atau `None` bila `pid` tak ada).
-    pub async fn fetch(
-        &self,
-        world: &mut World,
-        pid: i64,
-    ) -> Result<Option<Entity>, sqlx::Error> {
+    pub async fn fetch(&self, world: &mut World, pid: i64) -> Result<Option<Entity>, sqlx::Error> {
         let exists: Option<i64> =
             sqlx::query_scalar("SELECT pid FROM arke_entities WHERE pid = $1")
                 .bind(pid)
@@ -596,6 +592,20 @@ impl PgStore {
         self.materialize(world, &ids).await?;
         self.last = self.dump_state(world);
         Ok(ids.len())
+    }
+
+    /// Jalankan SQL `SELECT COUNT(*) AS n …` ter-parameterisasi (dipakai
+    /// [`Query::count`](crate::Query::count)). Tak menyentuh `world`/`last`.
+    pub(crate) async fn count_by_query(
+        &self,
+        sql: String,
+        params: Vec<(PgType, PgValue)>,
+    ) -> Result<i64, sqlx::Error> {
+        let mut q = sqlx::query(&sql);
+        for (ty, val) in &params {
+            q = bind_value(q, *ty, val);
+        }
+        q.fetch_one(&self.pool).await?.try_get("n")
     }
 
     /// Rekonstruksi entity `ids` + seluruh komponennya ke `world`.

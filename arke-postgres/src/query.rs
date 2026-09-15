@@ -12,6 +12,10 @@
 //!     .load(&mut world).await?;
 //! ```
 //!
+//! Total tanpa paginasi: `.count()` (`SELECT COUNT(*)` dengan `WHERE` yang sama;
+//! `Filter` dapat di-`clone()` untuk dipakai ulang). Field array (`Vec<V>` →
+//! JSONB): `Tags::ids().contains(7)` / `.contains_all([1, 2])` → `@>`.
+//!
 //! `load_where::<T>(w, "sql")` string tetap ada sebagai escape-hatch.
 //!
 //! # Type-safety (dicek compiler)
@@ -121,6 +125,12 @@ pub struct Filter<C> {
     /// Nilai ter-bind, urut sesuai kemunculan `?`.
     params: Vec<(PgType, PgValue)>,
     _pd: PhantomData<fn() -> C>,
+}
+
+impl<C> Clone for Filter<C> {
+    fn clone(&self) -> Self {
+        Self::raw(self.sql.clone(), self.params.clone())
+    }
 }
 
 impl<C> Filter<C> {
@@ -233,6 +243,32 @@ impl<C: PgComponent> Field<C, String> {
         )
     }
 }
+
+/// Operator *containment* JSONB (`@>`) untuk field array (`Vec<V>` → kolom JSONB
+/// via derive). Nilai dibangun lewat [`arke::Serialize`] agar representasinya
+/// identik dengan yang ditulis `to_params`. Memanfaatkan index GIN bila ada.
+macro_rules! jsonb_contains {
+    ($($ty:ty),*) => { $(
+        impl<C: PgComponent, V: arke::Serialize> Field<C, $ty> {
+            /// `col @> '[v]'` — array memuat elemen `v`.
+            pub fn contains(self, v: V) -> Filter<C> {
+                self.contains_all([v])
+            }
+
+            /// `col @> '[v1, v2, …]'` — array memuat **semua** elemen `vals`
+            /// (urutan bebas). Iterator kosong → `@> '[]'` → selalu benar untuk
+            /// baris non-NULL.
+            pub fn contains_all<I: IntoIterator<Item = V>>(self, vals: I) -> Filter<C> {
+                let list = arke::Value::List(vals.into_iter().map(|v| v.to_value()).collect());
+                Filter::raw(
+                    format!("{} @> ?::jsonb", self.column),
+                    vec![(PgType::Jsonb, PgValue::Json(list.to_json()))],
+                )
+            }
+        }
+    )* };
+}
+jsonb_contains!(Vec<V>, Option<Vec<V>>);
 
 /// Predikat relasi (RFC-0031/0032) pada token relasi `Field<C, EntityRef>`.
 impl<C: PgComponent> Field<C, EntityRef> {
@@ -445,6 +481,17 @@ impl<'a, T: PgComponent> Query<'a, T> {
             tbl = T::TABLE,
         );
         (renumber(&sql), params)
+    }
+
+    /// Hitung jumlah entity `T` yang cocok (`SELECT COUNT(*)`) memakai `WHERE`
+    /// yang sama dengan [`load`](Self::load); `order_by`/`limit`/`offset`
+    /// **diabaikan** — cocok untuk total halaman: bangun satu `Filter`, `clone()`
+    /// untuk `count()`, sisanya untuk `load()` berpaginasi.
+    pub async fn count(self) -> Result<u64, sqlx::Error> {
+        let (where_opt, params) = self.where_clause();
+        let sql = renumber(&count_sql(T::TABLE, where_opt.as_deref()));
+        let n = self.store.count_by_query(sql, params).await?;
+        Ok(u64::try_from(n).unwrap_or(0))
     }
 
     /// Jalankan query, materialisasi entity `T` yang cocok (+ seluruh komponennya)
@@ -700,6 +747,15 @@ fn join_cond(rel_column: &str, related_table: &str, filter_sql: &str) -> String 
     format!("{rel_column} IN (SELECT pid FROM {related_table} WHERE {filter_sql})")
 }
 
+/// SQL `COUNT(*)` atas `table` dengan `WHERE` opsional (placeholder `?`, belum
+/// dinomori). Dipisah dari [`Query::count`] agar dapat diuji tanpa DB.
+fn count_sql(table: &str, where_sql: Option<&str>) -> String {
+    match where_sql {
+        Some(w) => format!("SELECT COUNT(*) AS n FROM {table} WHERE {w}"),
+        None => format!("SELECT COUNT(*) AS n FROM {table}"),
+    }
+}
+
 /// Ubah placeholder `?` berurutan menjadi `$1..$n` (dialek Postgres).
 fn renumber(sql: &str) -> String {
     let mut out = String::with_capacity(sql.len() + 8);
@@ -749,6 +805,13 @@ mod tests {
         fn boss() -> Field<Self, EntityRef> {
             Field::new("boss_id", PgType::BigInt)
         }
+        // Field array (non-skalar → JSONB via derive).
+        fn tags() -> Field<Self, Vec<i64>> {
+            Field::new("tags", PgType::Jsonb)
+        }
+        fn extra() -> Field<Self, Option<Vec<String>>> {
+            Field::new("extra", PgType::Jsonb)
+        }
     }
 
     // Susun query lengkap tanpa store (uji `build` via helper).
@@ -797,10 +860,7 @@ mod tests {
     #[test]
     fn predikat_sederhana_terparameterisasi() {
         let (sql, params) = built(Some(Health::hp().lt(20)), vec![], None, None);
-        assert_eq!(
-            sql,
-            "SELECT pid FROM cmp_health WHERE hp < $1 ORDER BY pid"
-        );
+        assert_eq!(sql, "SELECT pid FROM cmp_health WHERE hp < $1 ORDER BY pid");
         assert_eq!(params, vec![(PgType::Integer, PgValue::Int(20))]);
     }
 
@@ -855,10 +915,7 @@ mod tests {
             None,
             None,
         );
-        assert_eq!(
-            sql,
-            "SELECT pid FROM cmp_health WHERE 1 = 0 ORDER BY pid"
-        );
+        assert_eq!(sql, "SELECT pid FROM cmp_health WHERE 1 = 0 ORDER BY pid");
     }
 
     #[test]
@@ -875,6 +932,73 @@ mod tests {
         );
         assert_eq!(params.len(), 4);
         assert_eq!(params[3], (PgType::Text, PgValue::Text("a%".to_string())));
+    }
+
+    #[test]
+    fn contains_jsonb_containment() {
+        // `Vec<V>` (JSONB) → `col @> ?::jsonb` dengan nilai array JSON; berlaku
+        // pula untuk `Option<Vec<V>>` (NULL @> … → NULL → baris tak cocok).
+        let (sql, params) = built(
+            Some(
+                Health::tags()
+                    .contains(7)
+                    .and(Health::extra().contains("x".to_string())),
+            ),
+            vec![],
+            None,
+            None,
+        );
+        assert_eq!(
+            sql,
+            "SELECT pid FROM cmp_health WHERE (tags @> $1::jsonb) AND (extra @> $2::jsonb) ORDER BY pid"
+        );
+        assert_eq!(
+            params,
+            vec![
+                (PgType::Jsonb, PgValue::Json("[7]".to_string())),
+                (PgType::Jsonb, PgValue::Json("[\"x\"]".to_string())),
+            ]
+        );
+    }
+
+    #[test]
+    fn contains_all_semua_elemen() {
+        let (sql, params) = built(
+            Some(Health::tags().contains_all([1, 2, 3])),
+            vec![],
+            None,
+            None,
+        );
+        assert_eq!(
+            sql,
+            "SELECT pid FROM cmp_health WHERE tags @> $1::jsonb ORDER BY pid"
+        );
+        assert_eq!(
+            params,
+            vec![(PgType::Jsonb, PgValue::Json("[1,2,3]".to_string()))]
+        );
+    }
+
+    #[test]
+    fn count_mengabaikan_order_limit_offset() {
+        // COUNT(*) memakai WHERE yang sama, tanpa ORDER BY/LIMIT/OFFSET.
+        let f = Health::hp().lt(20);
+        assert_eq!(
+            renumber(&count_sql(Health::TABLE, Some(&f.sql))),
+            "SELECT COUNT(*) AS n FROM cmp_health WHERE hp < $1"
+        );
+        assert_eq!(
+            count_sql(Health::TABLE, None),
+            "SELECT COUNT(*) AS n FROM cmp_health"
+        );
+    }
+
+    #[test]
+    fn filter_clone_dipakai_ulang_untuk_count_dan_load() {
+        let f = Health::hp().lt(20).and(Health::tags().contains(1));
+        let g = f.clone();
+        assert_eq!(f.sql, g.sql);
+        assert_eq!(f.params, g.params);
     }
 
     #[test]
