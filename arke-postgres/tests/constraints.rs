@@ -12,6 +12,18 @@ struct Guard {
     level: i32,
     #[pg(unique)]
     code: i32,
+    /// Non-skalar → JSONB; `#[pg(index)]` di sini harus jadi GIN (untuk `@>`).
+    #[pg(index)]
+    tags: Vec<i64>,
+}
+
+/// `indexdef` dari `pg_indexes` untuk `name`, bila ada.
+async fn indexdef(pool: &PgPool, name: &str) -> Option<String> {
+    sqlx::query_scalar("SELECT indexdef FROM pg_indexes WHERE indexname = $1")
+        .bind(name)
+        .fetch_optional(pool)
+        .await
+        .unwrap()
 }
 
 #[tokio::test]
@@ -29,6 +41,35 @@ async fn index_dan_check_dibuat_dan_ditegakkan() {
     let mut store = PgStore::connect(&url).await.unwrap();
     store.register::<Guard>();
     store.migrate().await.unwrap();
+
+    // Indeks JSONB → GIN; indeks skalar tetap btree.
+    let gin = indexdef(&pool, "idx_cmp_guard_tags")
+        .await
+        .expect("indeks tags");
+    assert!(gin.contains("USING gin"), "harus GIN, dapat: {gin}");
+    let bt = indexdef(&pool, "idx_cmp_guard_level")
+        .await
+        .expect("indeks level");
+    assert!(bt.contains("USING btree"), "harus btree, dapat: {bt}");
+
+    // Tiru sisa migrate versi lama (btree di kolom JSONB): migrate berikutnya
+    // harus menggantinya dengan GIN, bukan sekadar `IF NOT EXISTS`.
+    sqlx::query("DROP INDEX idx_cmp_guard_tags")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("CREATE INDEX idx_cmp_guard_tags ON cmp_guard (tags)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    store.migrate().await.unwrap();
+    let gin = indexdef(&pool, "idx_cmp_guard_tags")
+        .await
+        .expect("indeks tags");
+    assert!(
+        gin.contains("USING gin"),
+        "btree lama harus diganti GIN: {gin}"
+    );
 
     // Indeks dibuat.
     let idx: Option<String> = sqlx::query_scalar(
@@ -63,13 +104,27 @@ async fn index_dan_check_dibuat_dan_ditegakkan() {
     // Save valid → sukses.
     let mut ok = World::new();
     let e = ok.spawn();
-    ok.insert(e, Guard { level: 5, code: 1 });
+    ok.insert(
+        e,
+        Guard {
+            level: 5,
+            code: 1,
+            tags: vec![1],
+        },
+    );
     store.save(&ok).await.unwrap();
 
     // CHECK menolak level negatif.
     let mut bad = World::new();
     let e = bad.spawn();
-    bad.insert(e, Guard { level: -1, code: 2 });
+    bad.insert(
+        e,
+        Guard {
+            level: -1,
+            code: 2,
+            tags: vec![],
+        },
+    );
     assert!(
         store.save(&bad).await.is_err(),
         "CHECK harus menolak level < 0"
@@ -78,9 +133,23 @@ async fn index_dan_check_dibuat_dan_ditegakkan() {
     // UNIQUE menolak code duplikat.
     let mut dup = World::new();
     let a = dup.spawn();
-    dup.insert(a, Guard { level: 1, code: 9 });
+    dup.insert(
+        a,
+        Guard {
+            level: 1,
+            code: 9,
+            tags: vec![],
+        },
+    );
     let b = dup.spawn();
-    dup.insert(b, Guard { level: 2, code: 9 });
+    dup.insert(
+        b,
+        Guard {
+            level: 2,
+            code: 9,
+            tags: vec![],
+        },
+    );
     assert!(
         store.save(&dup).await.is_err(),
         "UNIQUE harus menolak code duplikat"

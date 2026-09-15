@@ -40,7 +40,11 @@ rilis juga ada di [GitHub Releases](https://github.com/dalfiannur/arke/releases)
   untuk `count()` dan `load()`. `#[derive(PgComponent)]` kini juga menghasilkan
   token untuk field non-skalar (`Field<Self, T>` atas kolom JSONB); untuk
   `Vec<V>`/`Option<Vec<V>>` tersedia `contains(v)`/`contains_all(iter)` →
-  `col @> $n::jsonb` (memakai index GIN bila ada). Additif; `load_where` tetap.
+  `col @> $n::jsonb`. Additif; `load_where` tetap.
+- **`arke-postgres`: `#[pg(index)]` pada kolom JSONB kini membuat index GIN**
+  (bukan btree) agar `contains`/`@>` ter-index; `migrate` mengganti index
+  btree lama bernama sama di kolom JSONB dengan GIN (DROP + CREATE, idempoten
+  sesudahnya). `#[pg(unique)]` tetap btree karena GIN tak mendukung UNIQUE.
 
 ### Fixed
 

@@ -387,11 +387,40 @@ impl PgStore {
             }
         }
 
-        // Indeks kustom (`#[pg(index)]`/`#[pg(unique)]`), idempoten.
+        // Indeks kustom (`#[pg(index)]`/`#[pg(unique)]`), idempoten. Kolom JSONB
+        // non-unik → GIN (melayani `@>`/`contains`); GIN tak mendukung UNIQUE,
+        // jadi `#[pg(unique)]` tetap btree. Indeks bernama sama yang metodenya
+        // beda (btree sisa migrate lama di kolom JSONB) di-DROP lalu dibuat ulang.
         for idx in r.indexes {
+            let name = format!("idx_{}_{}", r.table, idx.column);
+            let is_jsonb = r
+                .columns
+                .iter()
+                .any(|c| c.name == idx.column && c.ty == PgType::Jsonb);
+            let method = if is_jsonb && !idx.unique {
+                "gin"
+            } else {
+                "btree"
+            };
+            let existing: Option<String> = sqlx::query_scalar(
+                "SELECT indexdef FROM pg_indexes \
+                 WHERE schemaname = current_schema() AND tablename = $1 AND indexname = $2",
+            )
+            .bind(r.table)
+            .bind(&name)
+            .fetch_optional(&self.pool)
+            .await?;
+            if let Some(def) = existing {
+                if def.contains(&format!("USING {method} ")) {
+                    continue;
+                }
+                sqlx::query(&format!("DROP INDEX {name}"))
+                    .execute(&self.pool)
+                    .await?;
+            }
             let unique = if idx.unique { "UNIQUE " } else { "" };
             sqlx::query(&format!(
-                "CREATE {unique}INDEX IF NOT EXISTS idx_{table}_{col} ON {table} ({col})",
+                "CREATE {unique}INDEX {name} ON {table} USING {method} ({col})",
                 table = r.table,
                 col = idx.column
             ))

@@ -159,7 +159,10 @@ struct Enemy {
 }
 ```
 
-- `#[pg(index)]` → `CREATE INDEX idx_<tabel>_<kolom>` (mempercepat filter `load_where`).
+- `#[pg(index)]` → `CREATE INDEX idx_<tabel>_<kolom>` btree (mempercepat filter
+  `load_where`/builder); pada kolom **JSONB** (mis. `Vec<i64>`) → **GIN**, yang
+  melayani `contains`/`contains_all` (`@>`). `migrate` mengganti btree lama di
+  kolom JSONB dengan GIN. `#[pg(unique)]` selalu btree (GIN tak mendukung UNIQUE).
 - `#[pg(unique)]` → `CREATE UNIQUE INDEX`.
 - `#[pg(check = "…")]` (level-tipe, boleh banyak) → constraint `CHECK`.
 
