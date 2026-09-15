@@ -79,6 +79,9 @@ pub use store::{
 pub mod cache;
 pub use cache::ComponentCache;
 
+pub mod tx;
+pub use tx::PgTx;
+
 pub mod query;
 pub use query::{
     Dir, EntityRef, Field, Filter, IntoPgValue, PathLoad, PathQuery, Query, Recursive,

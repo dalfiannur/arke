@@ -46,6 +46,15 @@ rilis juga ada di [GitHub Releases](https://github.com/dalfiannur/arke/releases)
   btree lama bernama sama di kolom JSONB dengan GIN (DROP + CREATE, idempoten
   sesudahnya). `#[pg(unique)]` tetap btree karena GIN tak mendukung UNIQUE.
 
+- **`arke-postgres`: transaksi milik pemanggil (`PgStore::begin` → `PgTx`).**
+  Pola *cek-lalu-tulis* atomik (mis. tolak booking yang bentrok) kini tanpa SQL
+  mentah: `tx.advisory_lock(key)` (`pg_advisory_xact_lock`, lepas otomatis),
+  `Query::exists_in`/`count_in(&mut tx)` membaca lewat koneksi tx, dan
+  `commit_insert_in`/`commit_update_in`/`remove_in(&mut tx, …)` menulis tanpa
+  commit; `tx.commit()`/`rollback()`, drop = rollback. `Query::exists()` (pool)
+  ikut ditambahkan. Op lama (`commit_insert` dkk.) kini wrapper begin→`_in`→commit
+  — perilaku sama.
+
 ### Fixed
 
 - **`World::insert` atas komponen yang sudah dimiliki merusak archetype**

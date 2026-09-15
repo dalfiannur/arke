@@ -11,7 +11,12 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use arke::{Component, Entity, QueryData, World};
-use sqlx::{PgPool, Postgres, Row, postgres::PgArguments, postgres::PgPoolOptions, query::Query};
+use sqlx::{
+    PgConnection, PgPool, Postgres, Row, postgres::PgArguments, postgres::PgPoolOptions,
+    query::Query,
+};
+
+use crate::tx::PgTx;
 
 use crate::cache::{ComponentCache, decode_row, encode_row};
 use crate::{ColumnDef, IndexDef, PgComponent, PgType, PgValue, create_table_sql_from};
@@ -203,25 +208,49 @@ impl PgStore {
 
     /// **Fase 2 (async)**: alokasi `pid` + tulis [`StagedInsert`]. Tak menyentuh World.
     pub async fn commit_insert(&self, staged: StagedInsert) -> Result<i64, sqlx::Error> {
-        let mut tx = self.pool.begin().await?;
-        let pid: i64 =
-            sqlx::query_scalar("INSERT INTO arke_entities (version) VALUES (0) RETURNING pid")
-                .fetch_one(&mut *tx)
-                .await?;
-        for (ci, params) in &staged.rows {
-            let r = &self.registered[*ci];
-            let insert = insert_sql(r);
-            // Per-op: `pid_of` kosong → relasi lintas-op menggantung → NULL (RFC-0034
-            // Am.3); konsumen per-op memakai id-string, bukan `EntityRef`.
-            let params = self.resolve_refs(params);
-            let mut q = sqlx::query(&insert).bind(pid);
-            for (v, col) in params.iter().zip(r.columns) {
-                q = bind_value(q, col.ty, v);
-            }
-            q.execute(&mut *tx).await?;
-        }
+        let mut tx = self.begin().await?;
+        let pid = self.commit_insert_in(&mut tx, staged).await?;
         tx.commit().await?;
         Ok(pid)
+    }
+
+    /// Seperti [`Self::commit_insert`] tetapi di dalam transaksi `tx` milik
+    /// pemanggil (tanpa commit) — lihat [`crate::tx`].
+    pub async fn commit_insert_in(
+        &self,
+        tx: &mut PgTx<'_>,
+        staged: StagedInsert,
+    ) -> Result<i64, sqlx::Error> {
+        let conn = tx.conn();
+        let pid: i64 =
+            sqlx::query_scalar("INSERT INTO arke_entities (version) VALUES (0) RETURNING pid")
+                .fetch_one(&mut *conn)
+                .await?;
+        for (ci, params) in &staged.rows {
+            self.insert_row(conn, *ci, pid, params).await?;
+        }
+        Ok(pid)
+    }
+
+    /// Sisipkan satu baris komponen `registered[ci]` untuk `pid`. Per-op:
+    /// `pid_of` kosong → relasi lintas-op menggantung → NULL (RFC-0034 Am.3);
+    /// konsumen per-op memakai id-string, bukan `EntityRef`.
+    async fn insert_row(
+        &self,
+        conn: &mut PgConnection,
+        ci: usize,
+        pid: i64,
+        params: &[PgValue],
+    ) -> Result<(), sqlx::Error> {
+        let r = &self.registered[ci];
+        let insert = insert_sql(r);
+        let params = self.resolve_refs(params);
+        let mut q = sqlx::query(&insert).bind(pid);
+        for (v, col) in params.iter().zip(r.columns) {
+            q = bind_value(q, col.ty, v);
+        }
+        q.execute(&mut *conn).await?;
+        Ok(())
     }
 
     /// Muat komponen `pid` ke `world` sebagai entity lokal baru; kembalikan handle
@@ -268,29 +297,34 @@ impl PgStore {
 
     /// **Fase 2 (async)**: tulis-ulang komponen `pid` (versi naik) dari [`StagedUpdate`].
     pub async fn commit_update(&self, pid: i64, staged: StagedUpdate) -> Result<(), sqlx::Error> {
-        let rows = &staged.rows;
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin().await?;
+        self.commit_update_in(&mut tx, pid, staged).await?;
+        tx.commit().await
+    }
+
+    /// Seperti [`Self::commit_update`] tetapi di dalam transaksi `tx` milik
+    /// pemanggil (tanpa commit) — lihat [`crate::tx`].
+    pub async fn commit_update_in(
+        &self,
+        tx: &mut PgTx<'_>,
+        pid: i64,
+        staged: StagedUpdate,
+    ) -> Result<(), sqlx::Error> {
+        let conn = tx.conn();
         sqlx::query("UPDATE arke_entities SET version = version + 1 WHERE pid = $1")
             .bind(pid)
-            .execute(&mut *tx)
+            .execute(&mut *conn)
             .await?;
-        for (ci, params) in rows {
+        for (ci, params) in &staged.rows {
             let r = &self.registered[*ci];
             sqlx::query(&format!("DELETE FROM {} WHERE pid = $1", r.table))
                 .bind(pid)
-                .execute(&mut *tx)
+                .execute(&mut *conn)
                 .await?;
             if let Some(params) = params {
-                let insert = insert_sql(r);
-                let params = self.resolve_refs(params);
-                let mut q = sqlx::query(&insert).bind(pid);
-                for (v, col) in params.iter().zip(r.columns) {
-                    q = bind_value(q, col.ty, v);
-                }
-                q.execute(&mut *tx).await?;
+                self.insert_row(conn, *ci, pid, params).await?;
             }
         }
-        tx.commit().await?;
         Ok(())
     }
 
@@ -301,6 +335,21 @@ impl PgStore {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    /// Seperti [`Self::remove`] tetapi di dalam transaksi `tx` milik pemanggil
+    /// (tanpa commit) — lihat [`crate::tx`].
+    pub async fn remove_in(&self, tx: &mut PgTx<'_>, pid: i64) -> Result<(), sqlx::Error> {
+        sqlx::query("DELETE FROM arke_entities WHERE pid = $1")
+            .bind(pid)
+            .execute(tx.conn())
+            .await?;
+        Ok(())
+    }
+
+    /// Pool koneksi store ini (dipakai [`Self::begin`]).
+    pub(crate) fn pool(&self) -> &PgPool {
+        &self.pool
     }
 
     /// Muat entity yang cocok `predicate` (fragmen `WHERE` atas tabel `T`) ke
@@ -621,20 +670,6 @@ impl PgStore {
         self.materialize(world, &ids).await?;
         self.last = self.dump_state(world);
         Ok(ids.len())
-    }
-
-    /// Jalankan SQL `SELECT COUNT(*) AS n …` ter-parameterisasi (dipakai
-    /// [`Query::count`](crate::Query::count)). Tak menyentuh `world`/`last`.
-    pub(crate) async fn count_by_query(
-        &self,
-        sql: String,
-        params: Vec<(PgType, PgValue)>,
-    ) -> Result<i64, sqlx::Error> {
-        let mut q = sqlx::query(&sql);
-        for (ty, val) in &params {
-            q = bind_value(q, *ty, val);
-        }
-        q.fetch_one(&self.pool).await?.try_get("n")
     }
 
     /// Rekonstruksi entity `ids` + seluruh komponennya ke `world`.
@@ -1099,7 +1134,7 @@ fn select_sql(r: &Registered, filter: Option<&str>) -> String {
 }
 
 /// Bind satu [`PgValue`] ke query. `col_ty` menentukan tipe `NULL` yang benar.
-fn bind_value<'q>(
+pub(crate) fn bind_value<'q>(
     q: Query<'q, Postgres, PgArguments>,
     col_ty: PgType,
     value: &PgValue,

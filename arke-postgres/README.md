@@ -106,6 +106,37 @@ let n = store.query::<Meeting>().filter(f)
 # }
 ```
 
+### Transaksi milik pemanggil (cek-lalu-tulis atomik)
+
+Op per-entity (`commit_insert`/`commit_update`/`remove`) masing-masing
+transaksional sendiri. Untuk pola **lock → cek → tulis** yang harus atomik
+terhadap penulis lain — mis. tolak booking yang bentrok — pegang transaksinya
+lewat `begin()` dan pakai varian `*_in(&mut tx, …)`:
+
+```rust,no_run
+# use arke::World;
+# use arke_postgres::{PgComponent, PgStore};
+# #[derive(PgComponent)] struct Slot { room: i64, start_ts: i64, end_ts: i64 }
+# async fn f(store: &mut PgStore, world: &World, e: arke::Entity, room: i64, start: i64, end: i64)
+# -> Result<Option<i64>, sqlx::Error> {
+let staged = store.stage_insert(world, e);
+let mut tx = store.begin().await?;
+tx.advisory_lock(room).await?;                       // pg_advisory_xact_lock: serial per-ruang
+let overlap = Slot::room().eq(room).and(Slot::start_ts().lt(end)).and(Slot::end_ts().gt(start));
+if store.query::<Slot>().filter(overlap).exists_in(&mut tx).await? {
+    tx.rollback().await?;
+    return Ok(None);                                 // bentrok
+}
+let pid = store.commit_insert_in(&mut tx, staged).await?;
+tx.commit().await?;
+Ok(Some(pid))
+# }
+```
+
+`count_in`/`exists_in` membaca lewat koneksi tx yang sama (melihat tulisan tx
+itu yang belum di-commit); drop `PgTx` tanpa `commit` = rollback. `load`/`fetch`
+sengaja tak punya versi tx — di dalam transaksi cukup cek keberadaan/jumlah.
+
 ### Optimistic-lock (multi-writer)
 
 `arke_entities.version` naik tiap tulis-balik; `update_entity` gagal dengan

@@ -41,7 +41,9 @@
 use std::marker::PhantomData;
 
 use arke::{Entity, World};
+use sqlx::Row;
 
+use crate::tx::PgTx;
 use crate::{PgComponent, PgStore, PgType, PgValue};
 
 /// Konversi nilai skalar → [`PgValue`] untuk *bind* ter-parameterisasi.
@@ -488,10 +490,46 @@ impl<'a, T: PgComponent> Query<'a, T> {
     /// **diabaikan** — cocok untuk total halaman: bangun satu `Filter`, `clone()`
     /// untuk `count()`, sisanya untuk `load()` berpaginasi.
     pub async fn count(self) -> Result<u64, sqlx::Error> {
-        let (where_opt, params) = self.where_clause();
-        let sql = renumber(&count_sql(T::TABLE, where_opt.as_deref()));
-        let n = self.store.count_by_query(sql, params).await?;
+        let (sql, params) = self.count_query();
+        let n = fetch_count(self.store.pool(), &sql, &params).await?;
         Ok(u64::try_from(n).unwrap_or(0))
+    }
+
+    /// Seperti [`count`](Self::count) tetapi lewat koneksi transaksi `tx` milik
+    /// pemanggil — melihat baris yang belum di-commit oleh `tx` itu (lihat
+    /// [`crate::tx`]).
+    pub async fn count_in(self, tx: &mut PgTx<'_>) -> Result<u64, sqlx::Error> {
+        let (sql, params) = self.count_query();
+        let n = fetch_count(tx.conn(), &sql, &params).await?;
+        Ok(u64::try_from(n).unwrap_or(0))
+    }
+
+    /// Ada minimal satu entity `T` yang cocok? `SELECT EXISTS(SELECT 1 …)` —
+    /// berhenti di baris pertama, lebih murah dari `count() > 0`.
+    pub async fn exists(self) -> Result<bool, sqlx::Error> {
+        let (sql, params) = self.exists_query();
+        let store = self.store;
+        fetch_exists(store.pool(), &sql, &params).await
+    }
+
+    /// Seperti [`exists`](Self::exists) tetapi lewat transaksi `tx` milik
+    /// pemanggil — inti pola "lock → cek → tulis" (lihat [`crate::tx`]).
+    pub async fn exists_in(self, tx: &mut PgTx<'_>) -> Result<bool, sqlx::Error> {
+        let (sql, params) = self.exists_query();
+        fetch_exists(tx.conn(), &sql, &params).await
+    }
+
+    fn count_query(&self) -> (String, Vec<(PgType, PgValue)>) {
+        let (where_opt, params) = self.where_clause();
+        (renumber(&count_sql(T::TABLE, where_opt.as_deref())), params)
+    }
+
+    fn exists_query(&self) -> (String, Vec<(PgType, PgValue)>) {
+        let (where_opt, params) = self.where_clause();
+        (
+            renumber(&exists_sql(T::TABLE, where_opt.as_deref())),
+            params,
+        )
     }
 
     /// Jalankan query, materialisasi entity `T` yang cocok (+ seluruh komponennya)
@@ -756,6 +794,47 @@ fn count_sql(table: &str, where_sql: Option<&str>) -> String {
     }
 }
 
+/// SQL `EXISTS` atas `table` dengan `WHERE` opsional (placeholder `?`, belum
+/// dinomori). Dipisah dari [`Query::exists`] agar dapat diuji tanpa DB.
+fn exists_sql(table: &str, where_sql: Option<&str>) -> String {
+    match where_sql {
+        Some(w) => format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE {w}) AS e"),
+        None => format!("SELECT EXISTS(SELECT 1 FROM {table}) AS e"),
+    }
+}
+
+/// Jalankan SQL `SELECT COUNT(*) AS n …` pada executor `ex` (pool atau koneksi tx).
+async fn fetch_count<'e, E>(
+    ex: E,
+    sql: &str,
+    params: &[(PgType, PgValue)],
+) -> Result<i64, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let mut q = sqlx::query(sql);
+    for (ty, val) in params {
+        q = crate::store::bind_value(q, *ty, val);
+    }
+    q.fetch_one(ex).await?.try_get("n")
+}
+
+/// Jalankan SQL `SELECT EXISTS(…) AS e` pada executor `ex`.
+async fn fetch_exists<'e, E>(
+    ex: E,
+    sql: &str,
+    params: &[(PgType, PgValue)],
+) -> Result<bool, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let mut q = sqlx::query(sql);
+    for (ty, val) in params {
+        q = crate::store::bind_value(q, *ty, val);
+    }
+    q.fetch_one(ex).await?.try_get("e")
+}
+
 /// Ubah placeholder `?` berurutan menjadi `$1..$n` (dialek Postgres).
 fn renumber(sql: &str) -> String {
     let mut out = String::with_capacity(sql.len() + 8);
@@ -990,6 +1069,19 @@ mod tests {
         assert_eq!(
             count_sql(Health::TABLE, None),
             "SELECT COUNT(*) AS n FROM cmp_health"
+        );
+    }
+
+    #[test]
+    fn exists_sql_bentuk() {
+        let f = Health::hp().lt(20);
+        assert_eq!(
+            renumber(&exists_sql(Health::TABLE, Some(&f.sql))),
+            "SELECT EXISTS(SELECT 1 FROM cmp_health WHERE hp < $1) AS e"
+        );
+        assert_eq!(
+            exists_sql(Health::TABLE, None),
+            "SELECT EXISTS(SELECT 1 FROM cmp_health) AS e"
         );
     }
 
