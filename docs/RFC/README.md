@@ -68,3 +68,4 @@ Draft → Discussion → Accepted | Rejected | Superseded
 | [RFC-0033](RFC-0033-cache-adapter.md) | Cache adapter (read-through, Redis-compatible) untuk arke-postgres | Accepted |
 | [RFC-0034](RFC-0034-decoupled-persistent-id.md) | Identitas persisten (`pid`) decoupled dari indeks World | Accepted |
 | [RFC-0035](RFC-0035-arke-mongo-adapter.md) | `arke-mongo` — adapter MongoDB dokumen-per-entity | Accepted |
+| [RFC-0036](RFC-0036-audit-0.7-soundness-stability-security.md) | Audit 0.7.0 — soundness, stabilitas, keamanan, performa (gelombang breaking kedua) | Accepted |

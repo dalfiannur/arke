@@ -7,6 +7,10 @@
 > **DITOLAK (2026-07-29):** implementasi diukur; resolusi archetype bukan
 > bottleneck spawn (alokasi dominan; scan linear tak bite bahkan di 4096
 > archetype). Di-revert per YAGNI. Temuan di [RN-0003](../RN/RN-0003-competitive-benchmark.md).
+>
+> **Catatan 2026-09-15:** butir 1 (index lookup) diadopsi ulang dalam bentuk
+> tereduksi oleh [ADR-0036](ADR-0036-audit-0.7-soundness-stability-security.md)
+> berdasarkan pengukuran jalur *churn* (W6); butir 2 (edge transisi) tetap ditolak.
 
 ## Konteks
 

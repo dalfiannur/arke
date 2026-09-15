@@ -58,3 +58,4 @@ ADR bersifat **immutable** setelah Accepted: jangan menulis ulang isinya. Jika k
 | [ADR-0032](ADR-0032-nested-relations-recursive.md) | Relasi bersarang (nested) + rekursif | Accepted |
 | [ADR-0033](ADR-0033-cache-adapter.md) | Cache adapter read-through (Redis-compatible) | Accepted |
 | [ADR-0035](ADR-0035-arke-mongo-adapter.md) | Adapter MongoDB dokumen-per-entity (`arke-mongo`) | Accepted |
+| [ADR-0036](ADR-0036-audit-0.7-soundness-stability-security.md) | Gelombang breaking kedua (0.7.0): soundness by construction, satu store satu World, kolam thread persisten | Accepted (supersede sebagian ADR-0029) |
