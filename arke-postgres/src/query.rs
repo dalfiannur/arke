@@ -91,11 +91,30 @@ impl IntoPgValue for &str {
         PgValue::Text(self.to_string())
     }
 }
+/// Field array (`Vec<V>` → JSONB): nilai di-encode via `arke::Serialize` —
+/// representasi sama dengan yang ditulis `to_params`. Dipakai `set` massal.
+impl<T: arke::Serialize> IntoPgValue for Vec<T> {
+    fn into_pg_value(self) -> PgValue {
+        let list = arke::Value::List(self.iter().map(|v| v.to_value()).collect());
+        PgValue::Json(list.to_json())
+    }
+}
+/// Field nullable (`Option<V>`): `Some(v)` → nilai `v`, `None` → `NULL`.
+/// Ingat semantik SQL: `col = NULL` tak pernah benar — untuk WHERE pakai
+/// [`Field::is_null`]; `None` berguna untuk `set` (mengosongkan kolom).
+impl<T: IntoPgValue> IntoPgValue for Option<T> {
+    fn into_pg_value(self) -> PgValue {
+        match self {
+            Some(v) => v.into_pg_value(),
+            None => PgValue::Null,
+        }
+    }
+}
 
 /// Token field typed untuk komponen `C`, bertipe nilai `V` (di-generate derive).
 pub struct Field<C, V> {
-    column: &'static str,
-    ty: PgType,
+    pub(crate) column: &'static str,
+    pub(crate) ty: PgType,
     _pd: PhantomData<fn() -> (C, V)>,
 }
 
@@ -110,7 +129,7 @@ impl<C, V> Field<C, V> {
     }
 
     /// Cast placeholder yang dibutuhkan tipe kolom (`NUMERIC`/`JSONB` di-bind teks).
-    fn cast(&self) -> &'static str {
+    pub(crate) fn cast(&self) -> &'static str {
         match self.ty {
             PgType::Numeric => "::numeric",
             PgType::Jsonb => "::jsonb",
@@ -123,9 +142,9 @@ impl<C, V> Field<C, V> {
 /// gabung dengan [`Filter::and`]/[`Filter::or`]/[`Filter::not`].
 pub struct Filter<C> {
     /// Fragmen SQL dengan placeholder `?` (dinomori ulang jadi `$n` saat rakit).
-    sql: String,
+    pub(crate) sql: String,
     /// Nilai ter-bind, urut sesuai kemunculan `?`.
-    params: Vec<(PgType, PgValue)>,
+    pub(crate) params: Vec<(PgType, PgValue)>,
     _pd: PhantomData<fn() -> C>,
 }
 
@@ -232,6 +251,24 @@ impl<C: PgComponent, V: IntoPgValue> Field<C, V> {
             .join(", ");
         Filter::raw(format!("{} IN ({placeholders})", self.column), params)
     }
+
+    /// **Semi-join by value** (tanpa relasi Entity): `col IN (SELECT other FROM
+    /// cmp_R WHERE f)` — cocok bila nilai kolom ini ada di kolom `other` milik
+    /// komponen `R` yang memenuhi `f`. Kedua kolom bertipe `V` (dicek compiler).
+    /// Mis. booking yang `room_code`-nya menunjuk ruang berkapasitas > 10:
+    /// `Booking::room_code().in_where(Room::code(), Room::capacity().gt(10))`.
+    pub fn in_where<R: PgComponent>(self, other: Field<R, V>, f: Filter<R>) -> Filter<C> {
+        Filter::raw(
+            format!(
+                "{} IN (SELECT {} FROM {} WHERE {})",
+                self.column,
+                other.column,
+                R::TABLE,
+                f.sql
+            ),
+            f.params,
+        )
+    }
 }
 
 /// `LIKE` hanya untuk field teks (type-safety): `Health::hp().like(..)` (integer)
@@ -326,7 +363,7 @@ struct JoinClause {
 /// Builder query baca ber-filter (RFC-0030) + join antar-entity (RFC-0031).
 /// Dibuat oleh [`PgStore::query`].
 pub struct Query<'a, T: PgComponent> {
-    store: &'a mut PgStore,
+    pub(crate) store: &'a mut PgStore,
     filter: Option<Filter<T>>,
     joins: Vec<JoinClause>,
     order: Vec<(&'static str, Dir)>,
@@ -411,7 +448,7 @@ impl<'a, T: PgComponent> Query<'a, T> {
 
     /// Klausa `WHERE` (filter dasar + sub-query join) dengan placeholder `?` +
     /// nilai bind-nya. `None` bila tak ada kondisi.
-    fn where_clause(&self) -> (Option<String>, Vec<(PgType, PgValue)>) {
+    pub(crate) fn where_clause(&self) -> (Option<String>, Vec<(PgType, PgValue)>) {
         let mut conds: Vec<String> = Vec::new();
         let mut params: Vec<(PgType, PgValue)> = Vec::new();
         if let Some(f) = &self.filter {
@@ -522,6 +559,15 @@ impl<'a, T: PgComponent> Query<'a, T> {
     fn count_query(&self) -> (String, Vec<(PgType, PgValue)>) {
         let (where_opt, params) = self.where_clause();
         (renumber(&count_sql(T::TABLE, where_opt.as_deref())), params)
+    }
+
+    /// Kelompokkan atas satu kunci `key` → terminal `count()`/`sum()`/… per
+    /// kunci (lihat [`crate::aggregate`]).
+    pub fn group_by<K: crate::FromPgScalar>(
+        self,
+        key: Field<T, K>,
+    ) -> crate::aggregate::Grouped<'a, T, K> {
+        crate::aggregate::Grouped { query: self, key }
     }
 
     fn exists_query(&self) -> (String, Vec<(PgType, PgValue)>) {
@@ -829,6 +875,23 @@ where
     q.fetch_one(ex).await?.try_get("n")
 }
 
+/// Jalankan `sql` ter-parameterisasi pada `ex`, kembalikan semua baris mentah
+/// (dipakai agregasi).
+pub(crate) async fn fetch_scalar_rows<'e, E>(
+    ex: E,
+    sql: &str,
+    params: &[(PgType, PgValue)],
+) -> Result<Vec<sqlx::postgres::PgRow>, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let mut q = sqlx::query(sql);
+    for (ty, val) in params {
+        q = crate::store::bind_value(q, *ty, val);
+    }
+    q.fetch_all(ex).await
+}
+
 /// Jalankan SQL `SELECT EXISTS(…) AS e` pada executor `ex`.
 async fn fetch_exists<'e, E>(
     ex: E,
@@ -846,7 +909,7 @@ where
 }
 
 /// Ubah placeholder `?` berurutan menjadi `$1..$n` (dialek Postgres).
-fn renumber(sql: &str) -> String {
+pub(crate) fn renumber(sql: &str) -> String {
     let mut out = String::with_capacity(sql.len() + 8);
     let mut n = 1u32;
     for ch in sql.chars() {
@@ -1079,6 +1142,22 @@ mod tests {
         assert_eq!(
             count_sql(Health::TABLE, None),
             "SELECT COUNT(*) AS n FROM cmp_health"
+        );
+    }
+
+    #[test]
+    fn in_where_semi_join_by_value() {
+        // Tanpa relasi Entity: `hp IN (SELECT hp FROM cmp_health WHERE name LIKE ?)`.
+        // Kolom kanan bertipe sama (V) — dicek compiler.
+        let f = Health::hp().in_where(Health::hp(), Health::name().like("a%"));
+        let (sql, params) = built(Some(f), vec![], None, None);
+        assert_eq!(
+            sql,
+            "SELECT pid FROM cmp_health WHERE hp IN (SELECT hp FROM cmp_health WHERE name LIKE $1) ORDER BY pid"
+        );
+        assert_eq!(
+            params,
+            vec![(PgType::Text, PgValue::Text("a%".to_string()))]
         );
     }
 

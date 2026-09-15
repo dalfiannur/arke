@@ -151,6 +151,42 @@ Diff `save_incremental` relatif ke **working set yang dimuat** (`last`), bukan
 seluruh tabel: entity di luar subset tak tersentuh; yang di-`despawn` dari
 subset di-DELETE; yang di-`spawn` baru di-INSERT.
 
+### Semi-join by value, mutasi massal, agregasi
+
+Tiga terminal yang hasilnya **bukan** entity termuat, tetap typed & ter-parameterisasi:
+
+```rust,no_run
+# use arke_postgres::{PgComponent, PgStore};
+# #[derive(PgComponent)] struct Booking { room_code: String, status: String, minutes: i32, end_ts: i64 }
+# #[derive(PgComponent)] struct Room { code: String, capacity: i32 }
+# async fn f(store: &mut PgStore, now: i64) -> Result<(), sqlx::Error> {
+// Semi-join lewat nilai kolom (tanpa relasi Entity): booking di ruang berkapasitas > 10.
+let n = store.query::<Booking>()
+    .filter(Booking::room_code().in_where(Room::code(), Room::capacity().gt(10)))
+    .count().await?;
+
+// UPDATE/DELETE massal ber-filter — versi entity terdampak naik, cache di-invalidate.
+let expired = store.update_where::<Booking>()
+    .filter(Booking::end_ts().lt(now))
+    .set(Booking::status(), "expired".to_string())
+    .execute().await?;                                   // jumlah baris
+let purged = store.delete_where::<Booking>()
+    .filter(Booking::status().eq("expired".to_string()))
+    .execute().await?;                                   // menghapus ENTITY (cascade)
+
+// Agregasi: tipe hasil = cast SQL eksplisit (SUM(x)::bigint), None bila tak ada baris.
+let total: Option<i64> = store.query::<Booking>().sum::<i64>(Booking::minutes()).await?;
+let per_room: Vec<(String, u64)> = store.query::<Booking>()
+    .group_by(Booking::room_code()).count().await?;
+let avg_per_room: Vec<(String, Option<f64>)> = store.query::<Booking>()
+    .group_by(Booking::room_code()).avg::<f64>(Booking::minutes()).await?;
+# Ok(())
+# }
+```
+
+Yang sengaja **tidak** ada (tetap `load_where`/SQL): join berproyeksi kolom
+lintas tabel, `HAVING`, multi-kunci `GROUP BY`, window function, UPSERT massal.
+
 ### Transaksi milik pemanggil (cek-lalu-tulis atomik)
 
 Op per-entity (`commit_insert`/`commit_update`/`remove`) masing-masing

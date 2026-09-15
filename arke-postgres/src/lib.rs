@@ -82,6 +82,12 @@ pub use cache::ComponentCache;
 pub mod tx;
 pub use tx::PgTx;
 
+pub mod mutate;
+pub use mutate::{DeleteWhere, UpdateWhere};
+
+pub mod aggregate;
+pub use aggregate::{ColumnOf, FromPgScalar, Grouped};
+
 pub mod query;
 pub use query::{
     Dir, EntityRef, Field, Filter, IntoPgValue, PathLoad, PathQuery, Query, Recursive,

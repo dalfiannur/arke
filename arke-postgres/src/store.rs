@@ -383,6 +383,32 @@ impl PgStore {
         &self.pool
     }
 
+    /// **UPDATE massal ber-filter** atas kolom komponen `T` (lihat
+    /// [`crate::mutate`]): `.filter(..).set(T::col(), v).execute()`.
+    pub fn update_where<T: PgComponent>(&self) -> crate::UpdateWhere<'_, T> {
+        crate::UpdateWhere::new(self)
+    }
+
+    /// **DELETE massal ber-filter**: hapus **entity** (cascade seluruh
+    /// komponennya) yang komponen `T`-nya memenuhi filter (lihat [`crate::mutate`]).
+    pub fn delete_where<T: PgComponent>(&self) -> crate::DeleteWhere<'_, T> {
+        crate::DeleteWhere::new(self)
+    }
+
+    /// Invalidate cache `table` untuk `pids` (no-op tanpa cache / pids kosong).
+    pub(crate) async fn invalidate_cache(&self, table: &str, pids: &[i64]) {
+        if let Some(c) = &self.cache
+            && !pids.is_empty()
+        {
+            c.invalidate(table, pids).await;
+        }
+    }
+
+    /// Nama tabel semua komponen terdaftar (untuk invalidasi lintas-tabel).
+    pub(crate) fn tables(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.registered.iter().map(|r| r.table)
+    }
+
     /// Muat entity yang cocok `predicate` (fragmen `WHERE` atas tabel `T`) ke
     /// `world`; kembalikan pasangan `(pid, Entity)`. `predicate` = SQL tepercaya.
     ///

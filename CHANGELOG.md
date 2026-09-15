@@ -63,6 +63,18 @@ rilis juga ada di [GitHub Releases](https://github.com/dalfiannur/arke/releases)
   tanpa `load_where`. README: resep POST/GET/PATCH/DELETE dengan id publik
   kolom `#[pg(unique)]` dan `save_incremental` relatif ke working set.
 
+- **`arke-postgres`: semi-join by value, mutasi massal, agregasi.**
+  `Field::in_where(Field<R, V>, Filter<R>)` → `col IN (SELECT other FROM cmp_R
+  WHERE …)` untuk hubungan lewat nilai kolom tanpa `Ref`. `store.update_where::<T>()
+  .filter(..).set(T::col(), v).execute()` dan `delete_where::<T>()` (menghapus
+  entity, cascade) — transaksional, menaikkan `version` entity terdampak,
+  meng-invalidate cache, ada `execute_in(&mut tx)`. Terminal agregat
+  `sum/min/max/avg::<A>(T::col())` dan `group_by(T::key()).count()/sum()/…`
+  dengan `A: FromPgScalar` = cast SQL eksplisit (`::bigint`/`::float8`/`::text`);
+  nol baris → `None`. `IntoPgValue` kini juga untuk `Vec<T: Serialize>` (JSONB)
+  dan `Option<T>` — sehingga `set` bisa mengosongkan kolom dan field `Option<V>`
+  punya operator perbandingan (`col = NULL` tetap tak pernah benar; pakai `is_null`).
+
 ### Fixed
 
 - **`World::insert` atas komponen yang sudah dimiliki merusak archetype**
