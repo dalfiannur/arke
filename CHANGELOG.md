@@ -42,6 +42,17 @@ rilis juga ada di [GitHub Releases](https://github.com/dalfiannur/arke/releases)
 
 ### Added
 
+- **Format snapshot tahan-evolusi.** `Serialize::name()` = kunci komponen di
+  snapshot (default tetap `type_name`, yang Rust nyatakan **tak stabil** antar
+  versi/rename modul); `#[serialize(name = "game.hp")]` menetapkannya
+  eksplisit. `World::register_serializable_alias::<T>("nama::lama")` membaca
+  snapshot yang ditulis di bawah nama lama. `#[serialize(default)]` pada field:
+  kunci yang hilang (snapshot sebelum field ditambah) diisi `Default`, bukan
+  menggagalkan seluruh komponen. `World::try_load_snapshot` memvalidasi dulu
+  (versi skema, kunci terdaftar, decode) dan **all-or-nothing** — `EcsError`
+  varian baru `SchemaVersionUnsupported`/`UnknownComponent`/
+  `ComponentDecodeFailed` menyebut komponen & entity-nya; `load_snapshot` tetap
+  lunak. `EcsError` kini `#[non_exhaustive]`.
 - **`World::id()` / `WorldId`** — identitas unik per-proses sebuah World (bukan
   bagian keadaan/snapshot). Menjawab pertanyaan terbuka RFC-0035: adapter dapat
   mendeteksi World yang berganti alih-alih mencampur handle `Entity`

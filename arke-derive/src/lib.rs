@@ -66,6 +66,12 @@ fn expand(input: TokenStream) -> Result<String, String> {
         return Err("derive(Serialize): definisi struct/enum tak ditemukan".to_string());
     };
     let rename_all = type_attrs.rename_all;
+    // `fn name()` eksplisit (kunci snapshot stabil); tanpa atribut → default
+    // trait (`type_name`).
+    let name_const = match &type_attrs.name {
+        Some(n) => format!("    fn name() -> &'static str {{ {n:?} }}\n"),
+        None => String::new(),
+    };
 
     // Nama tipe.
     let name = match tokens.get(i) {
@@ -102,6 +108,18 @@ fn expand(input: TokenStream) -> Result<String, String> {
             _ => Err("derive(Serialize): badan enum tak ditemukan".to_string()),
         },
     }
+    .map(|code| with_name_const(code, &name_const))
+}
+
+/// Sisipkan `fn name()` (bila ada) tepat setelah header `impl … for T {`.
+fn with_name_const(code: String, name_const: &str) -> String {
+    if name_const.is_empty() {
+        return code;
+    }
+    match code.find("{\n") {
+        Some(pos) => format!("{}{{\n{}{}", &code[..pos], name_const, &code[pos + 2..]),
+        None => code,
+    }
 }
 
 enum Kind {
@@ -109,11 +127,13 @@ enum Kind {
     Enum,
 }
 
-/// Satu field bernama: nama Rust + rename eksplisit (bila ada) + apakah di-skip.
+/// Satu field bernama: nama Rust + rename eksplisit (bila ada) + apakah di-skip
+/// + apakah kunci yang hilang diisi `Default` (`#[serialize(default)]`).
 struct NamedField {
     name: String,
     rename: Option<String>,
     skip: bool,
+    default: bool,
 }
 
 impl NamedField {
@@ -268,6 +288,7 @@ fn parse_named_fields(stream: TokenStream) -> Result<Vec<NamedField>, String> {
             name,
             rename: attrs.rename,
             skip: attrs.skip,
+            default: attrs.default,
         });
         // Lewati `:` dan tipe hingga koma tingkat-atas (lacak kedalaman `<>`).
         let mut depth = 0i32;
@@ -294,11 +315,16 @@ fn parse_named_fields(stream: TokenStream) -> Result<Vec<NamedField>, String> {
 struct Attrs {
     rename: Option<String>,
     skip: bool,
+    /// Field: kunci hilang → `Default::default()` (evolusi format).
+    default: bool,
     rename_all: Option<Case>,
+    /// Tipe: kunci snapshot eksplisit (`Serialize::name`).
+    name: Option<String>,
 }
 
 /// Parse isi atribut `#[...]` ke dalam `attrs`; hanya
-/// `serialize(skip | rename = "..." | rename_all = "...")` yang diproses.
+/// `serialize(skip | default | rename = "..." | rename_all = "..." | name = "...")`
+/// yang diproses.
 fn parse_serialize_attr(stream: TokenStream, attrs: &mut Attrs) -> Result<(), String> {
     let toks: Vec<TokenTree> = stream.into_iter().collect();
     let Some(TokenTree::Ident(id)) = toks.first() else {
@@ -316,6 +342,11 @@ fn parse_serialize_attr(stream: TokenStream, attrs: &mut Attrs) -> Result<(), St
         if let TokenTree::Ident(key) = &inner[j] {
             match key.to_string().as_str() {
                 "skip" => attrs.skip = true,
+                "default" => attrs.default = true,
+                "name" => {
+                    attrs.name = Some(expect_str_value(&inner, j, "name")?);
+                    j += 2;
+                }
                 "rename" => {
                     attrs.rename = Some(expect_str_value(&inner, j, "rename")?);
                     j += 2;
@@ -447,6 +478,16 @@ fn gen_named(name: &str, fields: &[NamedField], rename_all: Option<Case>) -> Str
         .map(|f| {
             if f.skip {
                 format!("{}: ::core::default::Default::default(),", f.name)
+            } else if f.default {
+                // Kunci hilang (snapshot lama) → Default; kunci ada tapi gagal
+                // decode → tetap gagal (bentuk salah bukan "belum ada").
+                format!(
+                    "{}: match ::arke::Value::get(value, {:?}) {{ \
+                        ::core::option::Option::Some(v) => ::arke::Serialize::from_value(v)?, \
+                        ::core::option::Option::None => ::core::default::Default::default() }},",
+                    f.name,
+                    f.key(rename_all)
+                )
             } else {
                 format!(
                     "{}: ::arke::Serialize::from_value(::arke::Value::get(value, {:?})?)?,",

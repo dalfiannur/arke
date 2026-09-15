@@ -16,7 +16,7 @@ Dua pendirian yang membedakannya:
 > tuple generik (arity & mutabilitas campuran) + filter `With`/`Without`,
 > scheduler deterministik, iterasi data-parallel, sistem berbasis-tipe,
 > **resources**, snapshot/serialisasi berversi + `#[derive(Serialize)]` (enum,
-> `skip`/`rename`/`rename_all`), dan error berkonteks. **M-16…M-19**:
+> `skip`/`rename`/`rename_all`/`default`/`name`), dan error berkonteks. **M-16…M-19**:
 > **query cache** inkremental ([M-16](docs/MILESTONE_16.md)), **eksekutor
 > graf-ketergantungan** ([M-17](docs/MILESTONE_17.md)) menggantikan barrier stage,
 > **command buffer** untuk mutasi struktural tertunda ([M-18](docs/MILESTONE_18.md)),

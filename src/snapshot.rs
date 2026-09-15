@@ -19,6 +19,8 @@ pub(crate) const SCHEMA_VERSION: u32 = 1;
 type ToValueFn = fn(&dyn Column, usize) -> Value;
 /// Mendeserialisasi [`Value`] ke komponen lalu menyisipkannya; `false` bila gagal.
 type InserterFn = fn(&mut World, Entity, &Value) -> bool;
+/// Apakah [`Value`] dapat di-decode menjadi komponen (validasi tanpa mutasi).
+type ValidatorFn = fn(&Value) -> bool;
 
 /// Vtable serialisasi type-erased untuk satu tipe komponen terdaftar.
 struct SerdeInfo {
@@ -31,17 +33,19 @@ struct SerdeInfo {
 #[derive(Default)]
 pub(crate) struct SerdeRegistry {
     by_id: HashMap<ComponentId, SerdeInfo>,
-    inserter_by_name: HashMap<&'static str, InserterFn>,
+    /// Penyisip per kunci snapshot — termasuk alias nama lama
+    /// ([`World::register_serializable_alias`]).
+    inserter_by_name: HashMap<&'static str, (InserterFn, ValidatorFn)>,
 }
 
 impl SerdeRegistry {
-    /// Mendaftarkan vtable serialisasi untuk `T` (dengan `ComponentId` `cid`).
+    /// Mendaftarkan vtable serialisasi untuk `T` (dengan `ComponentId` `cid`)
+    /// di bawah kunci [`Serialize::name`].
     pub(crate) fn register<T: Serialize>(&mut self, cid: ComponentId) {
-        let type_name = std::any::type_name::<T>();
         self.by_id.insert(
             cid,
             SerdeInfo {
-                type_name,
+                type_name: T::name(),
                 to_value: |column, row| {
                     let typed = column
                         .as_any()
@@ -51,16 +55,25 @@ impl SerdeRegistry {
                 },
             },
         );
-        self.inserter_by_name
-            .insert(type_name, |world, entity, value| {
-                match T::from_value(value) {
+        self.alias::<T>(T::name());
+    }
+
+    /// Mendaftarkan `name` sebagai kunci **baca** tambahan untuk `T` (nama lama
+    /// di snapshot yang sudah tertulis). Tak memengaruhi kunci **tulis**.
+    pub(crate) fn alias<T: Serialize>(&mut self, name: &'static str) {
+        self.inserter_by_name.insert(
+            name,
+            (
+                |world, entity, value| match T::from_value(value) {
                     Some(component) => {
                         world.insert(entity, component);
                         true
                     }
                     None => false,
-                }
-            });
+                },
+                |value| T::from_value(value).is_some(),
+            ),
+        );
     }
 
     /// Nama tipe + serializer untuk komponen `cid`, bila terdaftar.
@@ -68,9 +81,14 @@ impl SerdeRegistry {
         self.by_id.get(&cid).map(|i| (i.type_name, i.to_value))
     }
 
-    /// Fungsi penyisip untuk `type_name`, bila terdaftar.
-    pub(crate) fn inserter(&self, type_name: &str) -> Option<InserterFn> {
-        self.inserter_by_name.get(type_name).copied()
+    /// Fungsi penyisip untuk kunci `name`, bila terdaftar.
+    pub(crate) fn inserter(&self, name: &str) -> Option<InserterFn> {
+        self.inserter_by_name.get(name).map(|(ins, _)| *ins)
+    }
+
+    /// Validator (decode tanpa mutasi) untuk kunci `name`, bila terdaftar.
+    pub(crate) fn validator(&self, name: &str) -> Option<ValidatorFn> {
+        self.inserter_by_name.get(name).map(|(_, val)| *val)
     }
 }
 

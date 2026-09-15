@@ -24,6 +24,19 @@ pub enum Value {
 
 /// Komponen yang dapat di-*snapshot* (opt-in, RFC-0007 §2).
 pub trait Serialize: Component + Sized {
+    /// **Kunci** komponen ini di dalam snapshot (nama tipe yang stabil).
+    ///
+    /// Default = `std::any::type_name::<Self>()` — praktis, tetapi Rust
+    /// **tidak menjamin** keluarannya stabil antar versi kompiler, dan ia ikut
+    /// berubah saat tipe dipindah modul/di-rename. Untuk format on-disk yang
+    /// harus tahan evolusi, tetapkan nama eksplisit: `#[serialize(name =
+    /// "game.hp")]` pada derive, atau override `fn name()` pada impl manual
+    /// (`type_name` belum `const fn` di stable → ini method, bukan `const`).
+    /// Nama lama tetap bisa dibaca lewat
+    /// [`World::register_serializable_alias`](crate::World::register_serializable_alias).
+    fn name() -> &'static str {
+        std::any::type_name::<Self>()
+    }
     /// Mengubah `self` menjadi [`Value`].
     fn to_value(&self) -> Value;
     /// Merekonstruksi dari [`Value`]; `None` bila bentuknya tak cocok.

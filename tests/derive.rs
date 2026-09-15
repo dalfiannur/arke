@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use arke::{Serialize, Snapshot, World};
+use arke::{Serialize, Snapshot, Value, World};
 
 #[derive(Serialize, PartialEq, Debug)]
 struct Position {
@@ -191,4 +191,87 @@ fn derive_bekerja_dengan_snapshot_world() {
     restored.load_snapshot(&snap);
 
     assert_eq!(restored.get::<Position>(e), Some(&Position { x: 1, y: 2 }));
+}
+
+// ── Evolusi format (audit 0.7.0): nama stabil & field default ──────────────
+
+/// Kunci snapshot eksplisit — tak bergantung `std::any::type_name` (yang Rust
+/// nyatakan tak stabil antar versi/rename modul).
+#[derive(Serialize, PartialEq, Debug)]
+#[serialize(name = "game.hp")]
+struct Hp(i64);
+
+/// Field baru `#[serialize(default)]`: snapshot lama tanpa kunci itu tetap
+/// termuat (nilai `Default`), bukan gagal seluruh komponen.
+#[derive(Serialize, PartialEq, Debug)]
+struct Stats {
+    level: i64,
+    #[serialize(default)]
+    xp: i64,
+    #[serialize(default)]
+    title: Option<String>,
+}
+
+#[test]
+fn serialize_name_eksplisit_dipakai_sebagai_kunci_snapshot() {
+    assert_eq!(<Hp as Serialize>::name(), "game.hp");
+    assert!(<Position as Serialize>::name().ends_with("Position")); // default: type_name
+
+    let mut w = World::new();
+    w.register_serializable::<Hp>();
+    let e = w.spawn();
+    w.insert(e, Hp(9));
+    let json = w.snapshot().to_json();
+    assert!(json.contains("\"game.hp\""), "{json}");
+    assert!(!json.contains("derive::Hp"), "{json}");
+
+    let mut w2 = World::new();
+    w2.register_serializable::<Hp>();
+    w2.try_load_snapshot(&Snapshot::from_json(&json).unwrap())
+        .unwrap();
+    assert_eq!(w2.get::<Hp>(e), Some(&Hp(9)));
+}
+
+#[test]
+fn alias_nama_lama_memuat_snapshot_lama() {
+    // Snapshot ditulis di bawah nama lama (mis. `type_name` versi sebelumnya).
+    let json = r#"{"schema_version":1,"entities":[
+        {"index":0,"generation":0,"components":{"legacy::Hp":[7]}}
+    ]}"#;
+    let snap = Snapshot::from_json(json).unwrap();
+
+    let mut w = World::new();
+    w.register_serializable::<Hp>();
+    assert!(matches!(
+        w.try_load_snapshot(&snap),
+        Err(arke::EcsError::UnknownComponent { .. })
+    ));
+
+    let mut w = World::new();
+    w.register_serializable::<Hp>();
+    w.register_serializable_alias::<Hp>("legacy::Hp");
+    w.try_load_snapshot(&snap).unwrap();
+    assert_eq!(w.get::<Hp>(arke::Entity::from_raw(0, 0)), Some(&Hp(7)));
+}
+
+#[test]
+fn field_default_mengisi_kunci_yang_hilang() {
+    let v = Value::Map(vec![("level".to_string(), Value::Int(3))]);
+    assert_eq!(
+        Stats::from_value(&v),
+        Some(Stats {
+            level: 3,
+            xp: 0,
+            title: None
+        })
+    );
+    // Kunci wajib yang hilang tetap gagal.
+    assert_eq!(Stats::from_value(&Value::Map(vec![])), None);
+    // Round-trip penuh tetap setia.
+    let s = Stats {
+        level: 1,
+        xp: 50,
+        title: Some("x".into()),
+    };
+    assert_eq!(Stats::from_value(&s.to_value()), Some(s));
 }

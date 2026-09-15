@@ -163,3 +163,64 @@ fn spawn_at_tak_menerbitkan_handle_duplikat_dan_membersihkan_slot() {
     assert_eq!(world.get::<Position>(restored), None);
     assert!(world.contains(again));
 }
+
+/// `try_load_snapshot` all-or-nothing: versi skema tak didukung, komponen tak
+/// terdaftar, atau nilai gagal decode → `Err` **tanpa** memutasi World.
+#[test]
+fn try_load_snapshot_menolak_tanpa_memutasi_world() {
+    use arke::EcsError;
+
+    let mut w = World::new();
+    w.register_serializable::<Position>();
+
+    // Versi skema masa depan.
+    let future = Snapshot::from_json(r#"{"schema_version":99,"entities":[]}"#).unwrap();
+    assert!(matches!(
+        w.try_load_snapshot(&future),
+        Err(EcsError::SchemaVersionUnsupported { found: 99, .. })
+    ));
+
+    // Komponen tak dikenal — menyebut namanya.
+    let unknown = Snapshot::from_json(
+        r#"{"schema_version":1,"entities":[{"index":0,"generation":0,"components":{"nope::X":1}}]}"#,
+    )
+    .unwrap();
+    match w.try_load_snapshot(&unknown) {
+        Err(EcsError::UnknownComponent { component }) => assert_eq!(component, "nope::X"),
+        other => panic!("harusnya UnknownComponent, dapat {other:?}"),
+    }
+
+    // Bentuk nilai salah untuk komponen terdaftar (entity ke-2) → seluruh muat
+    // ditolak, entity ke-1 pun tak dibuat.
+    let name = <Position as Serialize>::name();
+    let bad = Snapshot::from_json(&format!(
+        r#"{{"schema_version":1,"entities":[
+            {{"index":0,"generation":0,"components":{{"{name}":{{"x":1,"y":2}}}}}},
+            {{"index":1,"generation":0,"components":{{"{name}":"bukan-map"}}}}
+        ]}}"#
+    ))
+    .unwrap();
+    match w.try_load_snapshot(&bad) {
+        Err(EcsError::ComponentDecodeFailed { component, index }) => {
+            assert_eq!(component, name);
+            assert_eq!(index, 1);
+        }
+        other => panic!("harusnya ComponentDecodeFailed, dapat {other:?}"),
+    }
+    assert!(
+        !w.contains(arke::Entity::from_raw(0, 0)),
+        "tak ada mutasi parsial"
+    );
+    assert_eq!(w.query::<Position>().count(), 0);
+
+    // Snapshot valid → Ok, termuat.
+    let ok = Snapshot::from_json(&format!(
+        r#"{{"schema_version":1,"entities":[{{"index":0,"generation":0,"components":{{"{name}":{{"x":1,"y":2}}}}}}]}}"#
+    ))
+    .unwrap();
+    w.try_load_snapshot(&ok).unwrap();
+    assert_eq!(
+        w.get::<Position>(arke::Entity::from_raw(0, 0)),
+        Some(&Position { x: 1, y: 2 })
+    );
+}

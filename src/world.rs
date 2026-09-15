@@ -549,10 +549,21 @@ impl World {
         self.resources.contains_key(&TypeId::of::<T>())
     }
 
-    /// Mendaftarkan komponen `T` agar ikut dalam snapshot (opt-in, RFC-0007).
+    /// Mendaftarkan komponen `T` agar ikut dalam snapshot (opt-in, RFC-0007),
+    /// di bawah kunci [`Serialize::name`].
     pub fn register_serializable<T: Serialize>(&mut self) {
         let cid = self.registry.register::<T>();
         self.serde.register::<T>(cid);
+    }
+
+    /// Mendaftarkan `old_name` sebagai kunci **baca** tambahan untuk `T`
+    /// (migrasi nama): snapshot yang ditulis di bawah nama lama — mis.
+    /// `type_name` sebelum `#[serialize(name = "…")]` ditetapkan, atau sebelum
+    /// tipe dipindah modul — tetap termuat. Kunci **tulis** tetap
+    /// [`Serialize::name`]. Memanggil `register_serializable::<T>` juga bila belum.
+    pub fn register_serializable_alias<T: Serialize>(&mut self, old_name: &'static str) {
+        self.register_serializable::<T>();
+        self.serde.alias::<T>(old_name);
     }
 
     /// Menghasilkan [`Snapshot`] keadaan `World` saat ini.
@@ -609,9 +620,45 @@ impl World {
         Ok(self.snapshot())
     }
 
+    /// Seperti [`World::load_snapshot`], tetapi **memvalidasi dulu** dan
+    /// **all-or-nothing**: `schema_version` harus didukung, setiap kunci
+    /// komponen harus terdaftar ([`register_serializable`](Self::register_serializable)
+    /// / [`register_serializable_alias`](Self::register_serializable_alias)),
+    /// dan setiap nilai harus dapat di-decode. Pelanggaran → [`EcsError`] yang
+    /// menyebut komponen/entity-nya, dan `World` **tidak berubah** (STD-0008).
+    /// Pakai ini untuk snapshot dari luar proses; `load_snapshot` (lunak,
+    /// melewati yang tak dikenal) untuk data yang dipercaya.
+    pub fn try_load_snapshot(&mut self, snapshot: &Snapshot) -> Result<(), EcsError> {
+        if snapshot.schema_version != SCHEMA_VERSION {
+            return Err(EcsError::SchemaVersionUnsupported {
+                found: snapshot.schema_version,
+                supported: SCHEMA_VERSION,
+            });
+        }
+        for entity_snap in &snapshot.entities {
+            for (name, value) in &entity_snap.components {
+                let Some(valid) = self.serde.validator(name) else {
+                    return Err(EcsError::UnknownComponent {
+                        component: name.clone(),
+                    });
+                };
+                if !valid(value) {
+                    return Err(EcsError::ComponentDecodeFailed {
+                        component: name.clone(),
+                        index: entity_snap.index,
+                    });
+                }
+            }
+        }
+        self.load_snapshot(snapshot);
+        Ok(())
+    }
+
     /// Memuat `snapshot` ke `World` ini, merekonstruksi entity (dengan handle
     /// yang sama) dan komponennya. Tipe komponen harus sudah didaftarkan lewat
-    /// [`World::register_serializable`].
+    /// [`World::register_serializable`]. **Lunak**: komponen dengan kunci tak
+    /// dikenal atau nilai yang gagal decode dilewati diam-diam — pakai
+    /// [`World::try_load_snapshot`] bila itu harus menjadi error.
     pub fn load_snapshot(&mut self, snapshot: &Snapshot) {
         for entity_snap in &snapshot.entities {
             let entity = self.allocate_at(entity_snap.index, entity_snap.generation);
