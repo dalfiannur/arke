@@ -102,6 +102,15 @@ rilis juga ada di [GitHub Releases](https://github.com/dalfiannur/arke/releases)
   struktural; buffer id dipakai ulang (tanpa alokasi `Vec` per operasi). Bench
   baru W6 (64 archetype): **84 → 61 ns/op**; W4: 35 → 30 ns/op.
 
+### Security
+
+- **`cargo audit` di CI** (`.github/workflows/audit.yml`, RustSec
+  `audit-check`): tiap perubahan manifest/lockfile + terjadwal mingguan.
+  Pemasangan pertama langsung menemukan **RUSTSEC-2026-0285** (rustls 0.23.43,
+  medium — pesan handshake TLS 1.3 diterima lintas batas level enkripsi) di
+  pohon dependensi adapter (`mongodb`); `Cargo.lock` diperbarui ke rustls
+  0.23.45 (+ `chacha20` 0.10.2 menggantikan 0.10.1 yang di-yank).
+
 ### Fixed
 
 - **`arke-postgres`: `Option<i32>`/`Option<f32>` (kolom INTEGER/REAL nullable)

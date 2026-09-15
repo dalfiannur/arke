@@ -1,0 +1,42 @@
+# Audit advisori dependensi (RustSec) — temuan audit 0.7.0.
+#
+# Core `arke` 0-dependensi (STD-0003), tetapi crate adapter menarik sqlx/
+# mongodb/redis beserta pohon TLS-nya; advisori di sana (mis. RUSTSEC-2026-0285
+# pada rustls 0.23.43, ditemukan saat job ini pertama dipasang) harus terlihat
+# tanpa menunggu seseorang menjalankan `cargo audit` manual. Berjalan pada tiap
+# perubahan manifest/lockfile DAN terjadwal mingguan — advisori baru muncul
+# tanpa commit di repo ini.
+#
+# `Cargo.lock` di root mencakup seluruh workspace (arke, arke-derive,
+# arke-postgres, arke-postgres-derive, arke-cache, arke-mongo). Crate benchmark
+# yang di-`exclude` punya lockfile sendiri dan di luar rilis → tak diaudit.
+name: Audit
+
+on:
+  push:
+    paths:
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/audit.yml"
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/audit.yml"
+  schedule:
+    - cron: "17 3 * * 1" # Senin 03:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write # rustsec/audit-check membuka issue pada run terjadwal bila ada temuan
+  checks: write
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
