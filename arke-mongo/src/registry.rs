@@ -12,6 +12,7 @@ use crate::bson_map::{bson_to_value, validate_names, value_to_bson};
 use crate::{IndexDef, MongoComponent, MongoError};
 
 /// Operasi type-erased untuk satu tipe komponen terdaftar.
+#[derive(Clone)]
 struct Registered {
     name: &'static str,
     indexes: &'static [IndexDef],
@@ -59,8 +60,9 @@ fn debug_check_indexes(name: &'static str, indexes: &[IndexDef], value: &Value) 
     }
 }
 
-/// Kumpulan tipe komponen yang dipersist.
-#[derive(Default)]
+/// Kumpulan tipe komponen yang dipersist. `Clone` murah (fn-pointer + `&'static`)
+/// — dipakai `MongoStore::fork`.
+#[derive(Default, Clone)]
 pub struct Registry {
     registered: Vec<Registered>,
 }

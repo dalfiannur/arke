@@ -319,6 +319,13 @@ Penundaan ini **sadar**, bukan kelupaan: mengunci API query untuk model dokumen 
 - **Feature `sync`** (driver blocking) untuk pengguna non-async — pertanyaan yang sama masih terbuka di RFC-0021.
 - **Penjaga `WorldId` untuk pemetaan lintas-World.** `MongoStore::pid_of`/`entity_of` mengunci `Entity` — handle yang cuma bermakna di dalam satu `World` — ke `pid` persisten. Review kode blok store (Task 15b) menemukan bahwa ini bisa dilanggar tanpa pernah memanggil `save` dengan `World` kedua secara sengaja: `fetch` ke `World` sekali-pakai untuk inspeksi cukup merebut tautan `pid` dari entity aslinya (entity itu kehilangan tautannya, `save` berikutnya mencetak pid baru dan menghapus dokumen lama), dan dua `World` independen yang sama-sama men-spawn entity pertamanya menghasilkan `Entity` yang identik sehingga `save` yang kedua diam-diam menimpa dokumen milik yang pertama. Keduanya didokumentasikan sebagai bahaya pada rustdoc `MongoStore` dan dipatok oleh tes regresi (`bahaya_fetch_ke_world_scratch_merebut_pid`, `bahaya_entity_handle_bertabrakan_antar_world`) di `arke-mongo/tests/store.rs`, tapi tak ada penjaga runtime — mendeteksinya menuntut cara membedakan `World` satu dari `World` lain, yang tak ada di `arke` core hari ini. Penjaga yang sungguhan (mis. `store.bind_world(&world)` yang menolak `Entity` dari `World` lain) menuntut sebuah `WorldId` di **core `arke`** — perubahan `arke`, bukan perubahan adapter ini — sehingga keputusannya dicatat di sini, bukan hilang begitu saja.
 
+  **Diselesaikan (arke 0.7 / arke-mongo 0.1):** core `arke` kini menyediakan
+  `World::id()` (`WorldId`, unik per-proses). `MongoStore` menautkan diri ke
+  `World` pertama yang dilayaninya dan menolak `World` lain dengan
+  `MongoError::WorldMismatch`; `MongoStore::fork()` memberi store baru untuk
+  `World` lain. Dua tes yang dulu mematok bahayanya kini memverifikasi
+  penjaganya (`fetch_ke_world_scratch_ditolak_bukan_merebut_pid`,
+  `entity_handle_bertabrakan_antar_world_ditolak`).
 ## Keputusan
 
 **Diterima.** Lihat [ADR-0035](../ADR/ADR-0035-arke-mongo-adapter.md). M-32 diselesaikan lewat TDD dari pemetaan `Value` ↔ BSON (§7 Lapis 1, tanpa DB) hingga `MongoStore` penuh (CRUD per-operasi, `save`/`load` seluruh World). Dua amandemen lahir selama implementasi: Amandemen 1 mengganti `bulkWrite` dengan operasi per-dokumen berurutan untuk `save` (portabilitas ke `mongod` 7 standalone) dan memutuskan `NAME` bertabrakan → `panic` saat `register`; Amandemen 2 menambah validasi `NAME` sebagai nama field BSON saat `register` dan `MongoError::DuplicateField` untuk field yang saling menimpa diam-diam.

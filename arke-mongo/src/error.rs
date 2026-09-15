@@ -2,6 +2,7 @@
 //! komponen yang terlibat.
 
 use crate::Pid;
+use arke::WorldId;
 
 /// Kegagalan operasi `arke-mongo`.
 #[derive(Debug)]
@@ -54,6 +55,17 @@ pub enum MongoError {
         /// Entity yang dokumennya tak ditemukan.
         pid: Pid,
     },
+    /// Operasi memakai `World` yang **berbeda** dari `World` yang ditautkan
+    /// store ini. Handle `Entity` hanya bermakna di dalam satu `World`; store
+    /// menautkan diri ke `World` pertama yang dilayaninya dan menolak yang lain
+    /// alih-alih mencampur handle (dan merusak data) diam-diam. Untuk `World`
+    /// lain pakai [`crate::MongoStore::fork`].
+    WorldMismatch {
+        /// `World` yang ditautkan store.
+        bound: WorldId,
+        /// `World` yang diberikan pemanggil.
+        given: WorldId,
+    },
 }
 
 impl From<mongodb::error::Error> for MongoError {
@@ -96,6 +108,12 @@ impl std::fmt::Display for MongoError {
                 f,
                 "dokumen entity {pid:?} tak ditemukan — tulisan tak mengenai \
                  apa pun (entity mungkin sudah dihapus penulis lain)"
+            ),
+            MongoError::WorldMismatch { bound, given } => write!(
+                f,
+                "store ini tertaut ke World {bound:?}, tetapi operasi memakai \
+                 World {given:?} — handle Entity tak bermakna lintas-World; \
+                 pakai `MongoStore::fork()` untuk World lain"
             ),
         }
     }

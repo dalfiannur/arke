@@ -163,12 +163,12 @@ rilis juga ada di [GitHub Releases](https://github.com/dalfiannur/arke/releases)
   berurutan tanpa transaksi — atomik **per-entity**, bukan per-World, sehingga
   `mongod` standalone sudah cukup; kegagalan di tengah meninggalkan sebagian
   entity tertulis. Untuk `save` yang all-or-nothing, pakai `arke-postgres`.
-  Satu `MongoStore` harus melayani satu `World` — `pid_of`/`entity_of`
-  mengunci `Entity`, handle yang hanya bermakna di dalam satu `World`; tiga
-  mode kegagalan konkret didokumentasikan di rustdoc dan README serta dipatok
-  tes regresi, tapi belum ada penjaga runtime (butuh `WorldId` di core,
-  dicatat sebagai pertanyaan terbuka RFC-0035). `drop_database` sengaja tidak
-  ada di API publik. Query builder, relasi, cache, `save_incremental`, dan
+  Satu `MongoStore` melayani satu `World`: store menautkan diri ke `World`
+  pertama (`World::id()`) dan menolak `World` lain dengan
+  `MongoError::WorldMismatch` alih-alih mencampur handle `Entity` (tiga mode
+  kerusakan data yang dulu lolos didokumentasikan di rustdoc `MongoStore`);
+  `MongoStore::fork()` untuk `World` lain. `drop_database` sengaja tidak ada
+  di API publik. Query builder, relasi, cache, `save_incremental`, dan
   strategi evolusi skema ditunda ke RFC lanjutan.
 
 - **`arke-postgres`: `Query::count()` dan `contains`/`contains_all` untuk field

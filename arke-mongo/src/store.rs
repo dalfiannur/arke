@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use arke::{Entity, QueryData, World};
+use arke::{Entity, QueryData, World, WorldId};
 use futures_util::TryStreamExt;
 use mongodb::bson::{Document, doc};
 use mongodb::options::ReturnDocument;
@@ -30,42 +30,28 @@ const META: &str = "arke_meta";
 /// (`create`/`fetch`/`update`/`remove`) atau jalur seluruh World
 /// (`save`/`load`).
 ///
-/// # Peringatan: satu store, satu `World`
+/// # Satu store, satu `World`
 ///
 /// `pid_of`/`entity_of` mengunci `Entity` — handle yang cuma bermakna di
-/// dalam **satu** `World` — ke `pid` yang persisten (RFC-0035 §3). Satu
-/// `MongoStore` mengasumsikan seluruh panggilan `create`/`fetch`/`load`/
-/// `save`/`update`/`update_checked` di atasnya memakai `Entity` dari `World`
-/// yang **sama**. Melanggar asumsi ini tak terdeteksi di tipe maupun di
-/// runtime — RFC §3 memang menyebut pemetaan ini per-working-set, jadi ini
-/// salah pakai, bukan pelanggaran spek — tapi salah pakainya diam-diam dan
-/// merusak data. Tiga mode konkret:
+/// dalam **satu** `World` — ke `pid` yang persisten (RFC-0035 §3). Store
+/// **menautkan diri ke `World` pertama** yang dilayaninya
+/// (`create`/`fetch`/`load`/`save`/`update`/`update_checked`), dikenali lewat
+/// [`arke::World::id`]; operasi dengan `World` lain ditolak dengan
+/// [`MongoError::WorldMismatch`] alih-alih merusak data diam-diam. Tiga mode
+/// salah-pakai yang dulu lolos tanpa penjaga (v0.1 pra-`WorldId`):
 ///
-/// - **Mode A — `fetch` ke World scratch merebut `pid`.** `save(&w)` →
-///   `fetch(&mut scratch, pid1)` ke `World` sekali-pakai (mis. sekadar untuk
-///   inspeksi) → `save(&w)` lagi. `fetch` menaut ulang `pid1` ke entity di
-///   `scratch` (lewat [`Self::bind`], yang menjaga bijeksi `pid_of`/
-///   `entity_of`); `save` berikutnya atas `w` tak lagi melihat `pid1` sebagai
-///   milik entity `w`, memperlakukannya sebagai entity baru: dokumen lama
-///   terhapus, `pid` baru dicetak. Referensi eksternal mana pun ke `pid1`
-///   kini menggantung. Memeriksa satu entity di `World` sekali-pakai terasa
-///   seperti pembacaan yang sepenuhnya wajar — itulah yang membuat ini
-///   berbahaya.
-/// - **Mode B — handle `Entity` bertabrakan antar-`World`.** Dua `World`
-///   independen yang masing-masing men-spawn entity pertamanya menghasilkan
-///   `Entity` yang identik (indeks dense dimulai dari nol di tiap `World`).
-///   `save(&w2)` lantas diam-diam **menimpa** dokumen milik entity pertama
-///   `w1` dengan data dari `w2`; entity `w2` sendiri tak pernah punya
-///   dokumennya sendiri.
-/// - **Mode C (lebih ringan)** — memanggil `save` dengan `World` berbeda dari
-///   yang dipakai `save`/`create`/`fetch` sebelumnya pada `MongoStore` yang
-///   sama menghapus dokumen milik `World` lama: `entity_of` tak tahu batas
-///   antar-`World`, ia hanya tahu "pid yang tak terlihat di panggilan `save`
-///   ini" (didokumentasikan di [`Self::save`]).
+/// - **`fetch` ke World scratch merebut `pid`** — `fetch(&mut scratch, pid)`
+///   menaut ulang `pid` ke entity di `scratch`; `save` berikutnya atas World
+///   asli mencetak pid baru dan menghapus dokumen lama. Kini: `Err(WorldMismatch)`.
+/// - **Handle `Entity` bertabrakan antar-World** — dua World independen
+///   men-spawn `Entity` identik; `save(&w2)` menimpa dokumen entity `w1`.
+///   Kini: `Err(WorldMismatch)`.
+/// - **`save` dengan World berbeda** menghapus dokumen milik World lama. Kini:
+///   `Err(WorldMismatch)`.
 ///
-/// Tak ada penjaga runtime untuk ini di v1 — lih. RFC-0035 "Pertanyaan
-/// terbuka" untuk kenapa (butuh `WorldId` di core `arke`, perubahan di luar
-/// scope adapter ini).
+/// Untuk melayani `World` lain (mis. World sekali-pakai untuk inspeksi, atau
+/// pola World per-request), pakai [`Self::fork`]: store baru dengan
+/// klien/database/registry yang sama dan jembatan kosong.
 pub struct MongoStore {
     db: Database,
     entities: Collection<Document>,
@@ -74,6 +60,9 @@ pub struct MongoStore {
     pid_of: HashMap<Entity, Pid>,
     /// Jembatan `pid` → Entity (handle lokal working-set).
     entity_of: HashMap<Pid, Entity>,
+    /// `World` yang ditautkan (lihat "Satu store, satu `World`"); `None`
+    /// sebelum operasi ber-`&World` pertama.
+    world_id: Option<WorldId>,
 }
 
 impl MongoStore {
@@ -97,7 +86,44 @@ impl MongoStore {
             reg: Registry::new(),
             pid_of: HashMap::new(),
             entity_of: HashMap::new(),
+            world_id: None,
         })
+    }
+
+    /// Store baru dengan klien, database, dan registry yang **sama** tetapi
+    /// jembatan `pid_of`/`entity_of` **kosong** dan belum tertaut ke `World`
+    /// mana pun — untuk melayani `World` lain (World sekali-pakai, atau pola
+    /// World per-request). Murah: `Database` adalah handle ber-`Arc`.
+    pub fn fork(&self) -> Self {
+        Self {
+            db: self.db.clone(),
+            entities: self.entities.clone(),
+            reg: self.reg.clone(),
+            pid_of: HashMap::new(),
+            entity_of: HashMap::new(),
+            world_id: None,
+        }
+    }
+
+    /// `World` yang ditautkan store ini, bila sudah ada.
+    pub fn bound_world(&self) -> Option<WorldId> {
+        self.world_id
+    }
+
+    /// Menautkan store ke `world` (pada operasi pertama) atau menolak bila
+    /// `world` bukan `World` yang sudah ditautkan.
+    fn bind_world(&mut self, world: &World) -> Result<(), MongoError> {
+        match self.world_id {
+            None => {
+                self.world_id = Some(world.id());
+                Ok(())
+            }
+            Some(bound) if bound == world.id() => Ok(()),
+            Some(bound) => Err(MongoError::WorldMismatch {
+                bound,
+                given: world.id(),
+            }),
+        }
     }
 
     /// Mendaftarkan tipe komponen `T` untuk dipersist.
@@ -144,6 +170,7 @@ impl MongoStore {
     /// `pid` dialokasikan di sisi klien, jadi operasi ini cukup satu
     /// round-trip dan aman untuk multi-replica (RFC-0035 §3).
     pub async fn create(&mut self, world: &World, entity: Entity) -> Result<Pid, MongoError> {
+        self.bind_world(world)?;
         let cmp = self.reg.cmp_doc(world, entity)?;
         let pid = Pid::new();
         self.entities
@@ -157,15 +184,15 @@ impl MongoStore {
     /// tak ada.
     ///
     /// Lihat [`Self::materialize`] untuk perlakuan `cmp` absen vs. korup dan
-    /// jaminan despawn-on-error. **Peringatan:** memuat ke `World` yang
-    /// bukan `World` biasa dipakai bersama `MongoStore` ini (mis. `World`
-    /// sekali-pakai untuk inspeksi) menaut ulang `pid` — lihat "Peringatan:
-    /// satu store, satu `World`" pada [`MongoStore`].
+    /// jaminan despawn-on-error. `World` lain dari yang ditautkan store →
+    /// [`MongoError::WorldMismatch`] (pakai [`Self::fork`]) — lihat "Satu
+    /// store, satu `World`" pada [`MongoStore`].
     pub async fn fetch(
         &mut self,
         world: &mut World,
         pid: Pid,
     ) -> Result<Option<Entity>, MongoError> {
+        self.bind_world(world)?;
         let Some(document) = self.entities.find_one(doc! { "_id": pid.0 }).await? else {
             return Ok(None);
         };
@@ -180,9 +207,8 @@ impl MongoStore {
     /// Memuat **seluruh** koleksi tanpa paging; materialisasi parsial
     /// (`load_where`) ditunda ke RFC lanjutan.
     ///
-    /// **Peringatan:** sama seperti [`Self::fetch`], memuat ke `World` yang
-    /// bukan `World` biasa dipakai bersama `MongoStore` ini menaut ulang
-    /// `pid` — lihat "Peringatan: satu store, satu `World`" pada
+    /// `World` lain dari yang ditautkan store → [`MongoError::WorldMismatch`]
+    /// (pakai [`Self::fork`]) — lihat "Satu store, satu `World`" pada
     /// [`MongoStore`].
     ///
     /// **`load` menambah, bukan mengganti.** [`Self::materialize`] selalu
@@ -193,6 +219,7 @@ impl MongoStore {
     /// di `pid_of`/`entity_of`). `load` mengasumsikan `world` kosong atau
     /// berisi entity yang memang bukan milik store ini.
     pub async fn load(&mut self, world: &mut World) -> Result<(), MongoError> {
+        self.bind_world(world)?;
         let mut cursor = self.entities.find(doc! {}).sort(doc! { "_id": 1 }).await?;
         while let Some(document) = cursor.try_next().await? {
             let Ok(oid) = document.get_object_id("_id") else {
@@ -281,6 +308,7 @@ impl MongoStore {
         entity: Entity,
         pid: Pid,
     ) -> Result<(), MongoError> {
+        self.bind_world(world)?;
         let ops = self.reg.update_ops(world, entity)?;
         let result = self.entities.update_one(doc! { "_id": pid.0 }, ops).await?;
         if result.matched_count == 0 {
@@ -301,6 +329,7 @@ impl MongoStore {
         pid: Pid,
         expected: i64,
     ) -> Result<i64, MongoError> {
+        self.bind_world(world)?;
         let ops = self.reg.update_ops(world, entity)?;
         let updated = self
             .entities
@@ -381,15 +410,11 @@ impl MongoStore {
     /// yang belum sempat diproses tetap pada tautan lamanya (atau tanpa
     /// tautan bila baru).
     ///
-    /// Memanggil `save` dengan `world` yang berbeda dari yang dipakai
-    /// `save`/`create`/`fetch` sebelumnya pada `MongoStore` yang sama akan
-    /// menghapus dokumen milik `World` yang lama — `entity_of` tak tahu batas
-    /// antar-`World`, ia hanya tahu "pid yang tak terlihat di panggilan
-    /// `save` ini". Ini salah satu dari beberapa mode kegagalan lintas-World;
-    /// lihat "Peringatan: satu store, satu `World`" pada [`MongoStore`] untuk
-    /// daftar lengkapnya (termasuk dua mode yang lebih tajam dan tak
-    /// melibatkan `save` sama sekali).
+    /// `save` dengan `World` yang berbeda dari yang ditautkan store →
+    /// [`MongoError::WorldMismatch`] (dulu: menghapus dokumen milik `World`
+    /// lama) — lihat "Satu store, satu `World`" pada [`MongoStore`].
     pub async fn save(&mut self, world: &World) -> Result<(), MongoError> {
+        self.bind_world(world)?;
         // Kumpulkan dulu (sinkron) alih-alih menulis sambil mengiterasi:
         // `update_ops` bisa gagal dengan `InvalidName`/`DuplicateField`
         // (validasi nama field, RFC-0035 Am. 2), dan mengumpulkan semua

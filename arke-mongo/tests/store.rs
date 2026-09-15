@@ -146,9 +146,11 @@ async fn create_lalu_fetch_round_trip_setia() {
     w.insert(e, Health { hp: 77 });
     let pid = s.create(&w, e).await.unwrap();
 
-    // World baru: materialisasi dari MongoDB.
+    // World baru: materialisasi dari MongoDB lewat store `fork()` (satu store,
+    // satu World).
     let mut w2 = World::new();
     let e2 = s
+        .fork()
         .fetch(&mut w2, pid)
         .await
         .unwrap()
@@ -313,6 +315,7 @@ async fn fetch_dua_kali_pid_sama_menjaga_bijeksi_pid_of_entity_of() {
     w.insert(e, Position { x: 0.0, y: 0.0 });
     let pid = s.create(&w, e).await.unwrap();
 
+    let mut s = s.fork(); // pembaca untuk World lain
     let mut w2 = World::new();
     let e1 = s.fetch(&mut w2, pid).await.unwrap().expect("fetch pertama");
     let e2 = s.fetch(&mut w2, pid).await.unwrap().expect("fetch kedua");
@@ -343,7 +346,7 @@ async fn update_menulis_nilai_baru_dan_menaikkan_version() {
     assert_eq!(s.version_of(pid).await.unwrap(), Some(1));
 
     let mut w2 = World::new();
-    let e2 = s.fetch(&mut w2, pid).await.unwrap().unwrap();
+    let e2 = s.fork().fetch(&mut w2, pid).await.unwrap().unwrap();
     assert_eq!(w2.get::<Position>(e2), Some(&Position { x: 9.0, y: 9.0 }));
 }
 
@@ -509,7 +512,7 @@ async fn load_memuat_seluruh_koleksi() {
     s.save(&w).await.unwrap();
 
     let mut w2 = World::new();
-    s.load(&mut w2).await.unwrap();
+    s.fork().load(&mut w2).await.unwrap();
 
     let mut hps: Vec<i64> = Vec::new();
     <(arke::Entity, &Health)>::each_filtered_shared::<()>(&w2, |(_, h)| hps.push(h.hp));
@@ -623,9 +626,10 @@ async fn load_dua_kali_ke_world_yang_sama_menggandakan_entity() {
     }
     s.save(&w).await.unwrap();
 
+    let mut reader = s.fork();
     let mut w2 = World::new();
-    s.load(&mut w2).await.unwrap();
-    s.load(&mut w2).await.unwrap();
+    reader.load(&mut w2).await.unwrap();
+    reader.load(&mut w2).await.unwrap();
 
     let mut hps: Vec<i64> = Vec::new();
     <(arke::Entity, &Health)>::each_filtered_shared::<()>(&w2, |(_, h)| hps.push(h.hp));
@@ -639,76 +643,60 @@ async fn load_dua_kali_ke_world_yang_sama_menggandakan_entity() {
     );
 }
 
-// --- FIX 3: tes yang MEMATOK bahaya lintas-World, bukan mendokumentasikan
-// perilaku yang diinginkan. `MongoStore` mengasumsikan satu `World` per
-// store (lihat rustdoc pada `MongoStore`); dua tes berikut membuktikan dua
-// mode kerusakan data yang muncul begitu asumsi itu dilanggar, tanpa
-// `save` pernah dipanggil dengan `World` kedua secara eksplisit-sengaja —
-// keduanya lahir dari operasi yang terlihat wajar (`fetch` untuk inspeksi,
-// dua `World` independen). Bila perilaku ini berubah karena penjaga
-// `WorldId` ditambahkan (lih. RFC-0035, Pertanyaan terbuka), tes ini
-// SEHARUSNYA gagal dan perlu ditulis ulang untuk memverifikasi penjaga
-// barunya — kegagalannya bukan tanda regresi.
+// --- Penjaga `WorldId` (RFC-0035 "Pertanyaan terbuka", dijawab di arke 0.7):
+// satu `MongoStore` menautkan diri ke `World` pertama yang dilayaninya; setiap
+// operasi ber-`&World` dari `World` lain ditolak `MongoError::WorldMismatch`
+// alih-alih merusak data diam-diam. Dua tes di bawah dulunya MEMATOK bahayanya
+// (Mode A & B); kini memverifikasi penjaganya. `fork()` memberi store baru
+// (klien/registry sama, jembatan kosong) untuk `World` lain.
 
 #[tokio::test]
-async fn bahaya_fetch_ke_world_scratch_merebut_pid() {
+async fn fetch_ke_world_scratch_ditolak_bukan_merebut_pid() {
     let Some(mut s) = store("arke_test_bahaya_fetch_scratch").await else {
         eprintln!("MONGODB_URI tak diset — tes dilewati");
         return;
     };
 
     let mut w = World::new();
-    // Entity dummy disisip lebih dulu supaya `a` BUKAN `Entity::from_raw(0,
-    // 0)` — kalau `a` kebetulan sama dengan spawn pertama `scratch` di
-    // bawah, tes ini diam-diam berubah jadi menguji Mode B (tabrakan
-    // handle), bukan Mode A (rebind lewat fetch).
     let _dummy = w.spawn();
     let a = w.spawn();
     w.insert(a, Health { hp: 1 });
     s.save(&w).await.unwrap();
     let pid_asli = s.pid_of(a).expect("a harus punya pid setelah save");
 
-    // Pembacaan yang terlihat sepenuhnya wajar: inspeksi satu entity lewat
-    // World sekali-pakai (baru, jadi spawn pertamanya beda dari `a`).
+    // Mode A: inspeksi lewat World sekali-pakai pada store yang sama → ditolak.
     let mut scratch = World::new();
-    s.fetch(&mut scratch, pid_asli)
+    match s.fetch(&mut scratch, pid_asli).await {
+        Err(MongoError::WorldMismatch { bound, given }) => {
+            assert_eq!(bound, w.id());
+            assert_eq!(given, scratch.id());
+        }
+        other => panic!("harusnya WorldMismatch, dapat {other:?}"),
+    }
+    assert!(
+        !scratch.contains(Entity::from_raw(0, 0)),
+        "scratch tak disentuh"
+    );
+    assert_eq!(s.pid_of(a), Some(pid_asli), "tautan `a` utuh");
+
+    // Jalur yang benar: `fork()` untuk World lain.
+    let mut reader = s.fork();
+    let e = reader
+        .fetch(&mut scratch, pid_asli)
         .await
         .unwrap()
-        .expect("fetch entity yang baru disimpan");
+        .expect("fetch lewat fork");
+    assert_eq!(scratch.get::<Health>(e), Some(&Health { hp: 1 }));
+    assert_eq!(reader.pid_of(e), Some(pid_asli));
 
-    // `fetch` di atas menaut ulang `pid_asli` ke entity milik `scratch`
-    // (lewat `bind`, yang menjaga bijeksi) — `a` di `w` kehilangan tautannya.
-    assert_eq!(
-        s.pid_of(a),
-        None,
-        "fetch ke World scratch merebut tautan pid dari entity asal — ini \
-         bahayanya, bukan hasil yang diinginkan"
-    );
-
-    // `save` berikutnya atas `w` tak lagi mengenali `a` sebagai entity lama:
-    // ia mencetak pid baru dan menghapus dokumen lama.
+    // `save` atas `w` masih mengenali `a` → pid & dokumen sama, tak ada duplikat.
     s.save(&w).await.unwrap();
-    let pid_baru = s.pid_of(a).expect("a harus punya pid setelah save kedua");
-
-    assert_ne!(
-        pid_baru, pid_asli,
-        "save kedua seharusnya mencetak pid baru untuk `a` — pid lama sudah \
-         direbut scratch World"
-    );
-    assert_eq!(
-        s.version_of(pid_asli).await.unwrap(),
-        None,
-        "dokumen pid lama harus terhapus — referensi eksternal ke pid_asli \
-         kini menggantung, itulah bahayanya"
-    );
-    assert!(
-        s.version_of(pid_baru).await.unwrap().is_some(),
-        "dokumen pid baru harus ada"
-    );
+    assert_eq!(s.pid_of(a), Some(pid_asli));
+    assert_eq!(s.collection().count_documents(doc! {}).await.unwrap(), 1);
 }
 
 #[tokio::test]
-async fn bahaya_entity_handle_bertabrakan_antar_world() {
+async fn entity_handle_bertabrakan_antar_world_ditolak() {
     let Some(mut s) = store("arke_test_bahaya_tabrakan_world").await else {
         eprintln!("MONGODB_URI tak diset — tes dilewati");
         return;
@@ -721,48 +709,30 @@ async fn bahaya_entity_handle_bertabrakan_antar_world() {
     let mut w2 = World::new();
     let e2 = w2.spawn();
     w2.insert(e2, Health { hp: 2 });
-
-    // Dua World independen yang masing-masing men-spawn entity pertamanya
-    // menghasilkan handle `Entity` yang identik (indeks dense mulai dari nol
-    // di tiap World) — prasyarat bahaya ini, bukan sesuatu yang direkayasa.
-    assert_eq!(
-        e1, e2,
-        "prasyarat tes: spawn pertama pada dua World kosong harus \
-         menghasilkan Entity yang identik"
-    );
+    assert_eq!(e1, e2, "prasyarat: handle identik antar-World");
 
     s.save(&w1).await.unwrap();
     let pid1 = s.pid_of(e1).expect("e1 harus punya pid setelah save w1");
 
-    // `save(&w2)` memakai `pid_of.get(e2)` untuk memutuskan upsert vs create
-    // baru — karena `e2 == e1`, ia menemukan `pid1` dan MENIMPA dokumen
-    // milik entity w1 dengan data w2, bukan mencetak dokumen baru.
-    s.save(&w2).await.unwrap();
-    let pid2 = s.pid_of(e2).expect("e2 harus punya pid setelah save w2");
-
-    assert_eq!(
-        pid1, pid2,
-        "save w2 menimpa pid yang sama alih-alih mencetak pid baru — \
-         entity w2 tak pernah punya dokumennya sendiri, itulah bahayanya"
-    );
-
-    let count = s
-        .collection()
-        .count_documents(doc! {})
-        .await
-        .expect("count_documents");
-    assert_eq!(
-        count, 1,
-        "harusnya dua entity independen -> dua dokumen, tapi tabrakan \
-         handle membuat keduanya berbagi satu dokumen"
-    );
-
+    // Mode B/C: `save` dengan World lain → ditolak, dokumen w1 utuh.
+    assert!(matches!(
+        s.save(&w2).await,
+        Err(MongoError::WorldMismatch { .. })
+    ));
+    assert!(matches!(
+        s.update(&w2, e2, pid1).await,
+        Err(MongoError::WorldMismatch { .. })
+    ));
+    assert!(matches!(
+        s.create(&w2, e2).await,
+        Err(MongoError::WorldMismatch { .. })
+    ));
     let dokumen = s
         .collection()
         .find_one(doc! { "_id": pid1.0 })
         .await
         .unwrap()
-        .expect("dokumen harus ada");
+        .expect("dokumen w1 harus ada");
     let hp = dokumen
         .get_document("cmp")
         .unwrap()
@@ -770,8 +740,12 @@ async fn bahaya_entity_handle_bertabrakan_antar_world() {
         .unwrap()
         .get_i64("hp")
         .unwrap();
-    assert_eq!(
-        hp, 2,
-        "data w1 (hp: 1) harus sudah tertimpa diam-diam oleh data w2 (hp: 2)"
-    );
+    assert_eq!(hp, 1, "data w1 tak boleh tertimpa");
+
+    // Lewat `fork()`: w2 dapat dokumennya sendiri.
+    let mut s2 = s.fork();
+    s2.save(&w2).await.unwrap();
+    let pid2 = s2.pid_of(e2).expect("e2 punya pid lewat fork");
+    assert_ne!(pid1, pid2);
+    assert_eq!(s.collection().count_documents(doc! {}).await.unwrap(), 2);
 }

@@ -28,33 +28,28 @@ Query lintas-komponen cukup satu `find`, tanpa join:
 db.arke_entities.find({ "cmp.position.x": { $gt: 100 }, "cmp.health.hp": { $lt: 20 } })
 ```
 
-## Peringatan: satu store, satu `World`
+## Satu store, satu `World`
 
 `MongoStore` mengunci `Entity` — handle yang **hanya bermakna di dalam satu
-`World`** — ke `pid` yang persisten. Ini bekerja hanya bila seluruh
-`create`/`fetch`/`load`/`save`/`update`/`update_checked` di atas satu
-`MongoStore` memakai `Entity` dari **`World` yang sama**. Melanggar asumsi ini
-tak terdeteksi di tipe maupun di runtime, dan **merusak data secara diam-diam**.
-Tiga mode konkret:
+`World`** — ke `pid` yang persisten. Store **menautkan diri ke `World`
+pertama** yang dilayaninya (dikenali lewat `World::id()`); operasi
+`create`/`fetch`/`load`/`save`/`update`/`update_checked` dengan `World` lain
+ditolak dengan `MongoError::WorldMismatch` — bukan merusak data diam-diam.
+Untuk `World` lain (inspeksi lewat `World` sekali-pakai, atau pola World
+per-request) pakai **`store.fork()`**: klien, database, dan registry sama,
+jembatan `pid↔entity` kosong.
 
-- **`fetch` ke `World` sekali-pakai merebut `pid`.** Memuat satu entity ke
-  `World` sementara sekadar untuk inspeksi menaut ulang `pid`-nya. `save`
-  berikutnya atas `World` yang asli tak lagi mengenali `pid` itu sebagai
-  miliknya, memperlakukannya sebagai entity baru: dokumen lama **terhapus**,
-  `pid` baru dicetak. Referensi eksternal ke `pid` lama jadi menggantung.
-- **Handle `Entity` bertabrakan antar-`World`.** Dua `World` independen yang
-  masing-masing men-spawn entity pertamanya menghasilkan `Entity` yang
-  identik. `save` atas `World` kedua diam-diam **menimpa** dokumen milik
-  entity pertama `World` yang pertama.
-- **`save` dengan `World` yang berbeda dari panggilan sebelumnya** pada
-  `MongoStore` yang sama **menghapus** dokumen milik `World` lama —
-  `MongoStore` tak tahu batas antar-`World`, ia hanya tahu "pid yang tak
-  terlihat di panggilan `save` ini".
-
-Tak ada penjaga runtime untuk ini di v1 (butuh `WorldId` di core `arke`, di
-luar scope adapter ini) — lih. RFC-0035 "Pertanyaan terbuka". **Pakai satu
-`MongoStore` per `World` yang hidup lama, dan jangan pernah `fetch`/`load` ke
-`World` sekali-pakai memakai store yang sama.**
+```rust,no_run
+# use arke::World;
+# use arke_mongo::MongoStore;
+# async fn f(store: &mut MongoStore, pid: arke_mongo::Pid) -> Result<(), arke_mongo::MongoError> {
+let mut scratch = World::new();
+// store.fetch(&mut scratch, pid).await?;      // Err(WorldMismatch) bila store sudah tertaut World lain
+let mut reader = store.fork();
+reader.fetch(&mut scratch, pid).await?;        // OK: store sendiri untuk `scratch`
+# Ok(())
+# }
+```
 
 ## Pemakaian
 
