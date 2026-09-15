@@ -61,6 +61,16 @@ rilis juga ada di [GitHub Releases](https://github.com/dalfiannur/arke/releases)
   alokasi tabel slot sebelum `load_snapshot` dari sumber tak tepercaya (indeks
   `u32::MAX` = ~4 miliar slot).
 - **`arke::serialize::MAX_JSON_DEPTH`** (128) — batas kedalaman parser JSON.
+- **`arke-postgres`: `#[pg(table = "…")]`** — nama tabel kustom (dipakai
+  verbatim, di-quote); default tetap `cmp_<nama struct huruf kecil>`. Field
+  raw-ident (`r#type`) → kolom `type`.
+- **`arke-postgres`: identifier SQL di-quote bila perlu** (`quote_ident`,
+  publik): kata kunci reserved Postgres (`order`, `user`, `end`, `select`, …),
+  huruf besar/camelCase, atau karakter lain dibungkus `"…"` di seluruh SQL yang
+  dibangun (DDL `migrate`, insert/select, query builder, agregat, mutasi massal,
+  path/rekursif). Identifier polos huruf-kecil tak berubah (`cmp_x` ≡ `"cmp_x"`).
+  Sebelumnya field bernama `order` gagal SQL dan field camelCase tak pernah
+  cocok saat baca.
 - **`arke-postgres`: `PgStore::register` idempoten** (tabel yang sudah terdaftar
   dilewati); `migrate` merekonsiliasi **FK `pid → arke_entities ON DELETE
   CASCADE`** yang hilang (mis. setelah `DROP TABLE arke_entities CASCADE`) —
@@ -69,6 +79,13 @@ rilis juga ada di [GitHub Releases](https://github.com/dalfiannur/arke/releases)
 
 ### Performance
 
+- **`arke-postgres`: tulis batch (`UNNEST`).** `commit`/`commit_incremental`
+  kini mengalokasikan pid dalam satu `INSERT … generate_series … RETURNING`,
+  menghapus/menaikkan versi dengan `pid = ANY($1)`, dan menyisipkan baris
+  komponen per tabel lewat `INSERT … SELECT FROM UNNEST($1::int8[], …)` (≤ 2.000
+  baris per pernyataan) — round-trip `O(jumlah tabel)` alih-alih `O(entity ×
+  tabel)`. 10k entity × 2 komponen (lokal): `save` **3,0 s → 0,26 s**,
+  `save_incremental` **2,0 s → 0,29 s**.
 - **Kolam thread persisten** (`src/pool.rs`) untuk `Schedule::run_parallel` dan
   `World::par_for_each`: dulu `thread::scope` men-spawn thread OS tiap panggilan
   (thread-per-sistem; thread-per-chunk-per-archetype), ~15–20 µs per thread.
@@ -87,6 +104,12 @@ rilis juga ada di [GitHub Releases](https://github.com/dalfiannur/arke/releases)
 
 ### Fixed
 
+- **`arke-postgres`: `Option<i32>`/`Option<f32>` (kolom INTEGER/REAL nullable)
+  gagal ditulis setelah baris pertama** — `22P03 incorrect binary data format`.
+  `bind_value` mem-bind `NULL` sebagai `Option<i32>` tetapi nilai sebagai `i64`;
+  sqlx meng-cache prepared statement dengan tipe parameter eksekusi pertama.
+  Kini tipe Rust **tetap per tipe kolom** (`Integer` → `Option<i32>`, `Real` →
+  `Option<f32>`, …) untuk `NULL` maupun nilai.
 - **Panic di satu sistem `run_parallel` menggantung, bukan dipropagasi**
   (`src/schedule.rs`). Thread yang unwind tak pernah melepas penghitung
   suksesornya; suksesor menunggu `Condvar` selamanya dan `thread::scope` tak

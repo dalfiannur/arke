@@ -24,7 +24,7 @@ use sqlx::Row;
 use crate::query::{Field, Filter, IntoPgValue, renumber};
 use crate::store::bind_value;
 use crate::tx::PgTx;
-use crate::{PgComponent, PgStore, PgType, PgValue};
+use crate::{PgComponent, PgStore, PgType, PgValue, quote_ident};
 
 /// Builder `UPDATE … WHERE` atas komponen `T`. Lihat dokumentasi modul.
 pub struct UpdateWhere<'a, T: PgComponent> {
@@ -151,10 +151,10 @@ fn update_sql<C>(
         .iter()
         .map(|(col, cast, ty, v)| {
             params.push((*ty, v.clone()));
-            format!("{col} = ?{cast}")
+            format!("{} = ?{cast}", quote_ident(col))
         })
         .collect();
-    let mut sql = format!("UPDATE {table} SET {}", assigns.join(", "));
+    let mut sql = format!("UPDATE {} SET {}", quote_ident(table), assigns.join(", "));
     if let Some(f) = filter {
         sql.push_str(" WHERE ");
         sql.push_str(&f.sql);
@@ -172,7 +172,8 @@ fn delete_sql<C>(table: &str, filter: Option<&Filter<C>>) -> (String, Vec<(PgTyp
         None => (String::new(), Vec::new()),
     };
     let sql = format!(
-        "DELETE FROM arke_entities WHERE pid IN (SELECT pid FROM {table}{where_sql}) RETURNING pid"
+        "DELETE FROM arke_entities WHERE pid IN (SELECT pid FROM {}{where_sql}) RETURNING pid",
+        quote_ident(table)
     );
     (renumber(&sql), params)
 }

@@ -24,7 +24,10 @@ pub fn derive_pg_component(input: TokenStream) -> TokenStream {
 
 /// Satu field bernama + tipe (dinormalisasi ke string tanpa spasi) + atribut.
 struct Field {
+    /// Nama field Rust (bisa raw ident `r#type` — dipakai untuk akses `self.`).
     name: String,
+    /// Nama kolom SQL: `name` tanpa awalan `r#`.
+    col: String,
     ty: String,
     index: bool,
     unique: bool,
@@ -35,6 +38,7 @@ enum PgItem {
     Index,
     Unique,
     Check(String),
+    Table(String),
 }
 
 /// Parse isi bracket `#[pg(...)]` → daftar item. Bracket non-`pg` → kosong.
@@ -66,6 +70,21 @@ fn parse_pg_items(bracket_stream: TokenStream) -> Result<Vec<PgItem>, String> {
                     }
                     _ => return Err("pg(check = \"...\") tak valid".to_string()),
                 },
+                "table" => match (inner.get(j + 1), inner.get(j + 2)) {
+                    (Some(TokenTree::Punct(p)), Some(TokenTree::Literal(lit)))
+                        if p.as_char() == '=' =>
+                    {
+                        let name = unquote(&lit.to_string());
+                        if name.is_empty() || name.contains('"') || name.contains('\0') {
+                            return Err(
+                                "pg(table = \"...\"): nama tabel kosong / memuat `\"`".to_string()
+                            );
+                        }
+                        items.push(PgItem::Table(name));
+                        j += 2;
+                    }
+                    _ => return Err("pg(table = \"...\") tak valid".to_string()),
+                },
                 other => return Err(format!("atribut pg tak dikenal: `{other}`")),
             }
         }
@@ -83,9 +102,10 @@ fn expand(input: TokenStream) -> Result<String, String> {
     let tokens: Vec<TokenTree> = input.into_iter().collect();
     let mut i = 0;
     let mut checks: Vec<String> = Vec::new();
+    let mut table: Option<String> = None;
 
     // Lewati atribut & visibilitas; temukan `struct` (tolak enum/union).
-    // Atribut tipe `#[pg(check = "...")]` dikumpulkan.
+    // Atribut tipe `#[pg(check = "...")]` / `#[pg(table = "...")]` dikumpulkan.
     while i < tokens.len() {
         match &tokens[i] {
             TokenTree::Punct(p) if p.as_char() == '#' => {
@@ -93,8 +113,14 @@ fn expand(input: TokenStream) -> Result<String, String> {
                     && g.delimiter() == Delimiter::Bracket
                 {
                     for item in parse_pg_items(g.stream())? {
-                        if let PgItem::Check(expr) = item {
-                            checks.push(expr);
+                        match item {
+                            PgItem::Check(expr) => checks.push(expr),
+                            PgItem::Table(name) => table = Some(name),
+                            PgItem::Index | PgItem::Unique => {
+                                return Err(
+                                    "pg(index)/pg(unique) hanya valid di level-field".to_string()
+                                );
+                            }
                         }
                     }
                 }
@@ -145,7 +171,7 @@ fn expand(input: TokenStream) -> Result<String, String> {
         return Err("derive(PgComponent): struct tanpa field tak didukung".to_string());
     }
 
-    gen_impl(&name, &fields, &checks)
+    gen_impl(&name, table.as_deref(), &fields, &checks)
 }
 
 fn parse_named_fields(stream: TokenStream) -> Result<Vec<Field>, String> {
@@ -165,8 +191,8 @@ fn parse_named_fields(stream: TokenStream) -> Result<Vec<Field>, String> {
                     match item {
                         PgItem::Index => index = true,
                         PgItem::Unique => unique = true,
-                        PgItem::Check(_) => {
-                            return Err("pg(check) hanya valid di level-tipe".to_string());
+                        PgItem::Check(_) | PgItem::Table(_) => {
+                            return Err("pg(check)/pg(table) hanya valid di level-tipe".to_string());
                         }
                     }
                 }
@@ -211,8 +237,10 @@ fn parse_named_fields(stream: TokenStream) -> Result<Vec<Field>, String> {
             ty.push_str(&toks[i].to_string());
             i += 1;
         }
+        let col = name.strip_prefix("r#").unwrap_or(&name).to_string();
         fields.push(Field {
             name,
+            col,
             ty,
             index,
             unique,
@@ -309,6 +337,7 @@ fn column_def_ref(name: &str, nullable: bool) -> String {
 /// tipe non-skalar — kolom `JSONB` via `arke::Serialize` (fallback, RFC-0021 §2).
 fn field_sql(f: &Field, idx: usize) -> Result<FieldSql, String> {
     let name = &f.name;
+    let col = &f.col;
 
     // Relasi `Entity`/`Ref<T>` (+ `Option<…>`) → SATU kolom `<name>_id` menyimpan
     // **pid** entity yang dirujuk (RFC-0034 Am.3; kolom `_gen` dihapus). TANPA FK
@@ -319,7 +348,7 @@ fn field_sql(f: &Field, idx: usize) -> Result<FieldSql, String> {
     if is_entity_ty(&f.ty) || ref_target(&f.ty).is_some() {
         let nullable = f.ty.starts_with("Option<");
         let is_ref = ref_target(&f.ty).is_some();
-        let column = column_def_ref(&format!("{name}_id"), nullable);
+        let column = column_def_ref(&format!("{col}_id"), nullable);
         // Akses `Entity` dari nilai terikat `e` (`&Ref<T>` → `.entity()`; `&Entity` apa
         // adanya) & dari field `self.name`. Rekonstruksi: `unpack_entity` (indeks +
         // generation) → bungkus `Ref::new` bila relasi bertipe (RFC-0032).
@@ -374,7 +403,7 @@ fn field_sql(f: &Field, idx: usize) -> Result<FieldSql, String> {
     {
         return Ok(match inner_scalar(inner) {
             Some(s) => FieldSql {
-                column: column_def(name, s.pg_type, true),
+                column: column_def(col, s.pg_type, true),
                 to_param: format!(
                     "match &self.{name} {{ \
                         ::core::option::Option::Some(v) => ::arke_postgres::PgValue::{}({}), \
@@ -395,7 +424,7 @@ fn field_sql(f: &Field, idx: usize) -> Result<FieldSql, String> {
             },
             // Non-skalar → JSONB nullable via Serialize.
             None => FieldSql {
-                column: column_def(name, "Jsonb", true),
+                column: column_def(col, "Jsonb", true),
                 to_param: format!(
                     "match &self.{name} {{ \
                         ::core::option::Option::Some(v) => ::arke_postgres::PgValue::Json(::arke::Serialize::to_value(v).to_json()), \
@@ -411,7 +440,7 @@ fn field_sql(f: &Field, idx: usize) -> Result<FieldSql, String> {
     // Skalar biasa (non-null).
     if let Some(s) = inner_scalar(&f.ty) {
         return Ok(FieldSql {
-            column: column_def(name, s.pg_type, false),
+            column: column_def(col, s.pg_type, false),
             to_param: format!(
                 "::arke_postgres::PgValue::{}({{ let v = &self.{name}; {} }}), ",
                 s.value, s.to_ref
@@ -430,7 +459,7 @@ fn field_sql(f: &Field, idx: usize) -> Result<FieldSql, String> {
 
     // Fallback non-skalar → JSONB via Serialize.
     Ok(FieldSql {
-        column: column_def(name, "Jsonb", false),
+        column: column_def(col, "Jsonb", false),
         to_param: format!(
             "::arke_postgres::PgValue::Json(::arke::Serialize::to_value(&self.{name}).to_json()), "
         ),
@@ -469,8 +498,17 @@ fn from_jsonb(name: &str, idx: usize, ty: &str, optional: bool) -> String {
     }
 }
 
-fn gen_impl(name: &str, fields: &[Field], checks: &[String]) -> Result<String, String> {
-    let table = format!("cmp_{}", name.to_lowercase());
+fn gen_impl(
+    name: &str,
+    table: Option<&str>,
+    fields: &[Field],
+    checks: &[String],
+) -> Result<String, String> {
+    // Nama tabel: `#[pg(table = "…")]` (dipakai verbatim, di-quote oleh store —
+    // huruf besar/kata kunci aman) atau default `cmp_<nama struct huruf kecil>`.
+    let table = table
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("cmp_{}", name.to_lowercase()));
 
     let mut columns = String::new();
     let mut to_params = String::new();
@@ -489,9 +527,9 @@ fn gen_impl(name: &str, fields: &[Field], checks: &[String]) -> Result<String, S
         if f.index || f.unique {
             // Kolom indeks: relasi (Entity/Ref) → `<name>_id`, skalar → `<name>`.
             let col = if is_entity_ty(&f.ty) || ref_target(&f.ty).is_some() {
-                format!("{}_id", f.name)
+                format!("{}_id", f.col)
             } else {
-                f.name.clone()
+                f.col.clone()
             };
             indexes.push_str(&format!(
                 "::arke_postgres::IndexDef {{ column: {col:?}, unique: {} }}, ",
@@ -519,7 +557,7 @@ fn gen_impl(name: &str, fields: &[Field], checks: &[String]) -> Result<String, S
                      ::arke_postgres::Field::new({col:?}, ::arke_postgres::PgType::BigInt) }}\n",
                 field = f.name,
                 target = target,
-                col = format!("{}_id", f.name),
+                col = format!("{}_id", f.col),
             ));
         } else if is_entity_ty(&f.ty) {
             // Token relasi untyped (RFC-0031) → Field<Self, EntityRef> pada `<name>_id`.
@@ -527,7 +565,7 @@ fn gen_impl(name: &str, fields: &[Field], checks: &[String]) -> Result<String, S
                 "    pub fn {field}() -> ::arke_postgres::Field<Self, ::arke_postgres::EntityRef> {{ \
                      ::arke_postgres::Field::new({col:?}, ::arke_postgres::PgType::BigInt) }}\n",
                 field = f.name,
-                col = format!("{}_id", f.name),
+                col = format!("{}_id", f.col),
             ));
         } else if let Some(sc) = inner_scalar(inner) {
             tokens.push_str(&format!(
@@ -535,7 +573,7 @@ fn gen_impl(name: &str, fields: &[Field], checks: &[String]) -> Result<String, S
                      ::arke_postgres::Field::new({col:?}, ::arke_postgres::PgType::{pg}) }}\n",
                 field = f.name,
                 inner = inner,
-                col = f.name,
+                col = f.col,
                 pg = sc.pg_type,
             ));
         } else {
@@ -544,7 +582,7 @@ fn gen_impl(name: &str, fields: &[Field], checks: &[String]) -> Result<String, S
                      ::arke_postgres::Field::new({col:?}, ::arke_postgres::PgType::Jsonb) }}\n",
                 field = f.name,
                 ty = f.ty,
-                col = f.name,
+                col = f.col,
             ));
         }
     }

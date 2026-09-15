@@ -19,8 +19,8 @@
 use sqlx::postgres::PgRow;
 use sqlx::{Row, ValueRef};
 
-use crate::PgComponent;
 use crate::query::{Field, Query, fetch_scalar_rows, renumber};
+use crate::{PgComponent, quote_ident};
 
 /// Tipe hasil agregat/kunci grup yang dapat dibaca dari satu kolom hasil.
 pub trait FromPgScalar: Sized {
@@ -107,7 +107,12 @@ pub(crate) fn agg_sql(
     cast: &str,
 ) -> String {
     let w = where_sql.map(|w| format!(" WHERE {w}")).unwrap_or_default();
-    format!("SELECT {}({col}){cast} AS v FROM {table}{w}", agg.sql())
+    format!(
+        "SELECT {}({}){cast} AS v FROM {}{w}",
+        agg.sql(),
+        quote_ident(col),
+        quote_ident(table)
+    )
 }
 
 /// `SELECT key AS k, <expr> AS v FROM table [WHERE …] GROUP BY key ORDER BY key`.
@@ -120,6 +125,8 @@ pub(crate) fn group_sql(
     expr: &str,
 ) -> String {
     let w = where_sql.map(|w| format!(" WHERE {w}")).unwrap_or_default();
+    let key = quote_ident(key);
+    let table = quote_ident(table);
     format!(
         "SELECT {key}{key_cast} AS k, {expr} AS v FROM {table}{w} GROUP BY {key} ORDER BY {key}"
     )
@@ -224,7 +231,7 @@ impl<T: PgComponent, K: FromPgScalar> Grouped<'_, T, K> {
         self,
         field: impl ColumnOf<T>,
     ) -> Result<Vec<(K, Option<A>)>, sqlx::Error> {
-        self.run(format!("SUM({}){}", field.column(), A::CAST))
+        self.run(format!("SUM({}){}", quote_ident(field.column()), A::CAST))
             .await
     }
     /// `MIN(field)` per kunci.
@@ -232,7 +239,7 @@ impl<T: PgComponent, K: FromPgScalar> Grouped<'_, T, K> {
         self,
         field: impl ColumnOf<T>,
     ) -> Result<Vec<(K, Option<A>)>, sqlx::Error> {
-        self.run(format!("MIN({}){}", field.column(), A::CAST))
+        self.run(format!("MIN({}){}", quote_ident(field.column()), A::CAST))
             .await
     }
     /// `MAX(field)` per kunci.
@@ -240,7 +247,7 @@ impl<T: PgComponent, K: FromPgScalar> Grouped<'_, T, K> {
         self,
         field: impl ColumnOf<T>,
     ) -> Result<Vec<(K, Option<A>)>, sqlx::Error> {
-        self.run(format!("MAX({}){}", field.column(), A::CAST))
+        self.run(format!("MAX({}){}", quote_ident(field.column()), A::CAST))
             .await
     }
     /// `AVG(field)` per kunci; biasanya `A = f64`.
@@ -248,7 +255,7 @@ impl<T: PgComponent, K: FromPgScalar> Grouped<'_, T, K> {
         self,
         field: impl ColumnOf<T>,
     ) -> Result<Vec<(K, Option<A>)>, sqlx::Error> {
-        self.run(format!("AVG({}){}", field.column(), A::CAST))
+        self.run(format!("AVG({}){}", quote_ident(field.column()), A::CAST))
             .await
     }
 }

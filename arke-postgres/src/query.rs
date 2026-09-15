@@ -44,7 +44,7 @@ use arke::{Entity, World};
 use sqlx::Row;
 
 use crate::tx::PgTx;
-use crate::{PgComponent, PgStore, PgType, PgValue};
+use crate::{PgComponent, PgStore, PgType, PgValue, quote_ident};
 
 /// Konversi nilai skalar → [`PgValue`] untuk *bind* ter-parameterisasi.
 pub trait IntoPgValue {
@@ -128,6 +128,11 @@ impl<C, V> Field<C, V> {
         }
     }
 
+    /// Nama kolom ter-quote untuk SQL (kata kunci/huruf besar aman).
+    pub(crate) fn col(&self) -> std::borrow::Cow<'static, str> {
+        quote_ident(self.column)
+    }
+
     /// Cast placeholder yang dibutuhkan tipe kolom (`NUMERIC`/`JSONB` di-bind teks).
     pub(crate) fn cast(&self) -> &'static str {
         match self.ty {
@@ -190,7 +195,7 @@ impl<C> Filter<C> {
 impl<C: PgComponent, V: IntoPgValue> Field<C, V> {
     fn binop(self, op: &str, v: V) -> Filter<C> {
         Filter::raw(
-            format!("{} {} ?{}", self.column, op, self.cast()),
+            format!("{} {} ?{}", self.col(), op, self.cast()),
             vec![(self.ty, v.into_pg_value())],
         )
     }
@@ -224,14 +229,14 @@ impl<C: PgComponent, V: IntoPgValue> Field<C, V> {
     pub fn between(self, lo: V, hi: V) -> Filter<C> {
         let cast = self.cast();
         Filter::raw(
-            format!("{} BETWEEN ?{cast} AND ?{cast}", self.column),
+            format!("{} BETWEEN ?{cast} AND ?{cast}", self.col()),
             vec![(self.ty, lo.into_pg_value()), (self.ty, hi.into_pg_value())],
         )
     }
 
     /// `col IS NULL` (untuk field `Option<T>`).
     pub fn is_null(self) -> Filter<C> {
-        Filter::raw(format!("{} IS NULL", self.column), vec![])
+        Filter::raw(format!("{} IS NULL", self.col()), vec![])
     }
 
     /// `col IN (a, b, …)`. Iterator kosong → `1 = 0` (tak cocok apa pun).
@@ -249,7 +254,7 @@ impl<C: PgComponent, V: IntoPgValue> Field<C, V> {
             .map(|_| format!("?{cast}"))
             .collect::<Vec<_>>()
             .join(", ");
-        Filter::raw(format!("{} IN ({placeholders})", self.column), params)
+        Filter::raw(format!("{} IN ({placeholders})", self.col()), params)
     }
 
     /// **Semi-join by value** (tanpa relasi Entity): `col IN (SELECT other FROM
@@ -261,9 +266,9 @@ impl<C: PgComponent, V: IntoPgValue> Field<C, V> {
         Filter::raw(
             format!(
                 "{} IN (SELECT {} FROM {} WHERE {})",
-                self.column,
-                other.column,
-                R::TABLE,
+                self.col(),
+                other.col(),
+                quote_ident(R::TABLE),
                 f.sql
             ),
             f.params,
@@ -277,7 +282,7 @@ impl<C: PgComponent> Field<C, String> {
     /// `col LIKE pattern` (mis. `"a%"`).
     pub fn like(self, pattern: impl Into<String>) -> Filter<C> {
         Filter::raw(
-            format!("{} LIKE ?", self.column),
+            format!("{} LIKE ?", self.col()),
             vec![(PgType::Text, PgValue::Text(pattern.into()))],
         )
     }
@@ -300,7 +305,7 @@ macro_rules! jsonb_contains {
             pub fn contains_all<I: IntoIterator<Item = V>>(self, vals: I) -> Filter<C> {
                 let list = arke::Value::List(vals.into_iter().map(|v| v.to_value()).collect());
                 Filter::raw(
-                    format!("{} @> ?::jsonb", self.column),
+                    format!("{} @> ?::jsonb", self.col()),
                     vec![(PgType::Jsonb, PgValue::Json(list.to_json()))],
                 )
             }
@@ -472,7 +477,7 @@ impl<'a, T: PgComponent> Query<'a, T> {
     /// [`load`]: Self::load
     fn build(&self) -> (String, Vec<(PgType, PgValue)>) {
         let (where_opt, mut params) = self.where_clause();
-        let mut sql = format!("SELECT pid FROM {}", T::TABLE);
+        let mut sql = format!("SELECT pid FROM {}", quote_ident(T::TABLE));
         if let Some(w) = &where_opt {
             sql.push_str(" WHERE ");
             sql.push_str(w);
@@ -491,7 +496,7 @@ impl<'a, T: PgComponent> Query<'a, T> {
                         Dir::Asc => "ASC",
                         Dir::Desc => "DESC",
                     };
-                    format!("{c} {dir}")
+                    format!("{} {dir}", quote_ident(c))
                 })
                 .collect();
             sql.push_str(&parts.join(", "));
@@ -516,8 +521,8 @@ impl<'a, T: PgComponent> Query<'a, T> {
         let where_sql = where_opt.unwrap_or_else(|| "TRUE".to_string());
         let sql = format!(
             "SELECT DISTINCT {rel} AS pid FROM {tbl} WHERE ({where_sql}) AND {rel} IS NOT NULL",
-            rel = rel_column,
-            tbl = T::TABLE,
+            rel = quote_ident(rel_column),
+            tbl = quote_ident(T::TABLE),
         );
         (renumber(&sql), params)
     }
@@ -558,7 +563,10 @@ impl<'a, T: PgComponent> Query<'a, T> {
 
     fn count_query(&self) -> (String, Vec<(PgType, PgValue)>) {
         let (where_opt, params) = self.where_clause();
-        (renumber(&count_sql(T::TABLE, where_opt.as_deref())), params)
+        (
+            renumber(&count_sql(&quote_ident(T::TABLE), where_opt.as_deref())),
+            params,
+        )
     }
 
     /// Kelompokkan atas satu kunci `key` → terminal `count()`/`sum()`/… per
@@ -573,7 +581,7 @@ impl<'a, T: PgComponent> Query<'a, T> {
     fn exists_query(&self) -> (String, Vec<(PgType, PgValue)>) {
         let (where_opt, params) = self.where_clause();
         (
-            renumber(&exists_sql(T::TABLE, where_opt.as_deref())),
+            renumber(&exists_sql(&quote_ident(T::TABLE), where_opt.as_deref())),
             params,
         )
     }
@@ -722,7 +730,7 @@ impl<'a> PathLoad<'a> {
     /// yang cocok. Mengembalikan jumlah entity **root** dimuat.
     pub async fn load_all(self, world: &mut World) -> Result<usize, sqlx::Error> {
         let root_filter = self.root_filter();
-        let root_table = self.hops[0].from_table;
+        let root_table = quote_ident(self.hops[0].from_table);
 
         // Susun semua SQL (pinjam-baca) sebelum menyentuh store.
         let root_sql = renumber(&format!(
@@ -735,8 +743,8 @@ impl<'a> PathLoad<'a> {
             let targets = format!(
                 "SELECT DISTINCT {rel} AS pid FROM {from} \
                  WHERE pid IN ({matched_prev}) AND {rel} IS NOT NULL",
-                rel = hop.rel_column,
-                from = hop.from_table,
+                rel = quote_ident(hop.rel_column),
+                from = quote_ident(hop.from_table),
             );
             level_loads.push(renumber(&targets));
             matched_prev = targets; // level ini jadi "sebelumnya" utk hop berikut
@@ -818,6 +826,8 @@ impl<'a> RecursiveLoad<'a> {
 
 /// SQL `WITH RECURSIVE` untuk descendants/ancestors. Placeholder `?`: root id, max_depth.
 fn recursive_sql(table: &str, rel: &str, dir: RecurDir) -> String {
+    let table = quote_ident(table);
+    let rel = quote_ident(rel);
     match dir {
         RecurDir::Descendants => format!(
             "WITH RECURSIVE rec AS (\
@@ -843,7 +853,11 @@ fn recursive_sql(table: &str, rel: &str, dir: RecurDir) -> String {
 /// Kondisi join antar-entity (RFC-0031) sebagai sub-query (menghindari alias):
 /// `<rel> IN (SELECT entity_id FROM <tbl> WHERE <filter>)`.
 fn join_cond(rel_column: &str, related_table: &str, filter_sql: &str) -> String {
-    format!("{rel_column} IN (SELECT pid FROM {related_table} WHERE {filter_sql})")
+    format!(
+        "{} IN (SELECT pid FROM {} WHERE {filter_sql})",
+        quote_ident(rel_column),
+        quote_ident(related_table)
+    )
 }
 
 /// SQL `COUNT(*)` atas `table` dengan `WHERE` opsional (placeholder `?`, belum

@@ -234,6 +234,133 @@ pub trait PgComponent {
         Self: Sized;
 }
 
+/// Kata kunci **reserved** PostgreSQL (Appendix C, kolom PostgreSQL) yang tak
+/// boleh dipakai sebagai identifier tanpa kutip. Terurut & huruf kecil (untuk
+/// `binary_search`).
+const PG_RESERVED: &[&str] = &[
+    "all",
+    "analyse",
+    "analyze",
+    "and",
+    "any",
+    "array",
+    "as",
+    "asc",
+    "asymmetric",
+    "authorization",
+    "binary",
+    "both",
+    "case",
+    "cast",
+    "check",
+    "collate",
+    "collation",
+    "column",
+    "concurrently",
+    "constraint",
+    "create",
+    "cross",
+    "current_catalog",
+    "current_date",
+    "current_role",
+    "current_schema",
+    "current_time",
+    "current_timestamp",
+    "current_user",
+    "default",
+    "deferrable",
+    "desc",
+    "distinct",
+    "do",
+    "else",
+    "end",
+    "except",
+    "false",
+    "fetch",
+    "for",
+    "foreign",
+    "freeze",
+    "from",
+    "full",
+    "grant",
+    "group",
+    "having",
+    "ilike",
+    "in",
+    "initially",
+    "inner",
+    "intersect",
+    "into",
+    "is",
+    "isnull",
+    "join",
+    "lateral",
+    "leading",
+    "left",
+    "like",
+    "limit",
+    "localtime",
+    "localtimestamp",
+    "natural",
+    "not",
+    "notnull",
+    "null",
+    "offset",
+    "on",
+    "only",
+    "or",
+    "order",
+    "outer",
+    "overlaps",
+    "placing",
+    "primary",
+    "references",
+    "returning",
+    "right",
+    "select",
+    "session_user",
+    "similar",
+    "some",
+    "symmetric",
+    "system_user",
+    "table",
+    "tablesample",
+    "then",
+    "to",
+    "trailing",
+    "true",
+    "union",
+    "unique",
+    "user",
+    "using",
+    "variadic",
+    "verbose",
+    "when",
+    "where",
+    "window",
+    "with",
+];
+
+/// Meng-quote identifier SQL (tabel/kolom/indeks) **bila perlu**: identifier
+/// yang sudah "polos" (`[a-z_][a-z0-9_]*`, bukan kata kunci reserved) dikembalikan
+/// apa adanya — di Postgres `cmp_x` ≡ `"cmp_x"` — sehingga SQL yang dihasilkan
+/// tak berubah untuk kasus umum. Kata kunci (`order`, `user`, `end`, …), huruf
+/// besar (`startAt`, `Audit_Bookings` — jadi **case-sensitive**), atau karakter
+/// lain dibungkus `"…"` (kutip ganda di dalamnya digandakan).
+pub fn quote_ident(ident: &str) -> std::borrow::Cow<'_, str> {
+    let plain = !ident.is_empty()
+        && ident
+            .bytes()
+            .enumerate()
+            .all(|(i, b)| b == b'_' || b.is_ascii_lowercase() || (i > 0 && b.is_ascii_digit()))
+        && PG_RESERVED.binary_search(&ident).is_err();
+    if plain {
+        std::borrow::Cow::Borrowed(ident)
+    } else {
+        std::borrow::Cow::Owned(format!("\"{}\"", ident.replace('"', "\"\"")))
+    }
+}
+
 /// Membangun pernyataan `CREATE TABLE` untuk komponen `T` (pembangun `migrate`).
 ///
 /// Kolom `entity_id` merujuk `arke_entities` dengan `ON DELETE CASCADE`.
@@ -248,7 +375,7 @@ pub fn create_table_sql_from(table: &str, columns: &[ColumnDef]) -> String {
         String::from("pid BIGINT PRIMARY KEY REFERENCES arke_entities(pid) ON DELETE CASCADE");
     for col in columns {
         cols.push_str(", ");
-        cols.push_str(col.name);
+        cols.push_str(&quote_ident(col.name));
         cols.push(' ');
         cols.push_str(col.ty.sql());
         if !col.nullable {
@@ -261,5 +388,5 @@ pub fn create_table_sql_from(table: &str, columns: &[ColumnDef]) -> String {
             cols.push_str(target);
         }
     }
-    format!("CREATE TABLE IF NOT EXISTS {table} ({cols})")
+    format!("CREATE TABLE IF NOT EXISTS {} ({cols})", quote_ident(table))
 }

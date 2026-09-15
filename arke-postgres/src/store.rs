@@ -21,7 +21,7 @@ use crate::tx::PgTx;
 use crate::cache::{ComponentCache, decode_row, encode_row};
 use crate::{
     ColumnDef, IndexDef, PgComponent, PgType, PgValue, create_table_sql_from, pack_entity,
-    unpack_entity,
+    quote_ident, unpack_entity,
 };
 
 /// Satu baris komponen yang di-dump: `(entity, nilai-kolom)`.
@@ -415,10 +415,13 @@ impl PgStore {
             .await?;
         for (ci, params) in &staged.rows {
             let r = &self.registered[*ci];
-            sqlx::query(&format!("DELETE FROM {} WHERE pid = $1", r.table))
-                .bind(pid)
-                .execute(&mut *conn)
-                .await?;
+            sqlx::query(&format!(
+                "DELETE FROM {} WHERE pid = $1",
+                quote_ident(r.table)
+            ))
+            .bind(pid)
+            .execute(&mut *conn)
+            .await?;
             if let Some(params) = params {
                 self.insert_row(conn, *ci, pid, params).await?;
             }
@@ -526,7 +529,11 @@ impl PgStore {
         predicate: Option<&str>,
     ) -> Result<Vec<(i64, Entity)>, sqlx::Error> {
         let where_c = predicate.map(|p| format!(" WHERE {p}")).unwrap_or_default();
-        let sql = format!("SELECT pid FROM {}{} ORDER BY pid", T::TABLE, where_c);
+        let sql = format!(
+            "SELECT pid FROM {}{} ORDER BY pid",
+            quote_ident(T::TABLE),
+            where_c
+        );
         let pids: Vec<i64> = sqlx::query(&sql)
             .fetch_all(&self.pool)
             .await?
@@ -552,14 +559,16 @@ impl PgStore {
         sqlx::query(&format!(
             "DO $$ BEGIN \
                IF NOT EXISTS (SELECT 1 FROM pg_constraint \
-                              WHERE conname = '{table}_pid_fkey' \
-                                AND conrelid = '{table}'::regclass) THEN \
-                 DELETE FROM {table} WHERE pid NOT IN (SELECT pid FROM arke_entities); \
-                 ALTER TABLE {table} ADD CONSTRAINT {table}_pid_fkey \
+                              WHERE conname = '{fk}' \
+                                AND conrelid = '{qtable}'::regclass) THEN \
+                 DELETE FROM {qtable} WHERE pid NOT IN (SELECT pid FROM arke_entities); \
+                 ALTER TABLE {qtable} ADD CONSTRAINT {qfk} \
                    FOREIGN KEY (pid) REFERENCES arke_entities(pid) ON DELETE CASCADE; \
                END IF; \
              END $$;",
-            table = r.table
+            fk = format!("{}_pid_fkey", r.table).replace('\'', "''"),
+            qfk = quote_ident(&format!("{}_pid_fkey", r.table)),
+            qtable = quote_ident(r.table).replace('\'', "''"),
         ))
         .execute(&self.pool)
         .await?;
@@ -573,8 +582,8 @@ impl PgStore {
             };
             sqlx::query(&format!(
                 "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} {}{}",
-                r.table,
-                c.name,
+                quote_ident(r.table),
+                quote_ident(c.name),
                 c.ty.sql(),
                 constraint
             ))
@@ -597,7 +606,8 @@ impl PgStore {
             if !desired.contains(name.as_str()) {
                 sqlx::query(&format!(
                     "ALTER TABLE {} ALTER COLUMN {} DROP NOT NULL",
-                    r.table, name
+                    quote_ident(r.table),
+                    quote_ident(&name)
                 ))
                 .execute(&self.pool)
                 .await?;
@@ -631,15 +641,16 @@ impl PgStore {
                 if def.contains(&format!("USING {method} ")) {
                     continue;
                 }
-                sqlx::query(&format!("DROP INDEX {name}"))
+                sqlx::query(&format!("DROP INDEX {}", quote_ident(&name)))
                     .execute(&self.pool)
                     .await?;
             }
             let unique = if idx.unique { "UNIQUE " } else { "" };
             sqlx::query(&format!(
-                "CREATE {unique}INDEX {name} ON {table} USING {method} ({col})",
-                table = r.table,
-                col = idx.column
+                "CREATE {unique}INDEX {} ON {} USING {method} ({})",
+                quote_ident(&name),
+                quote_ident(r.table),
+                quote_ident(idx.column)
             ))
             .execute(&self.pool)
             .await?;
@@ -649,11 +660,13 @@ impl PgStore {
         for (i, expr) in r.checks.iter().enumerate() {
             sqlx::query(&format!(
                 "DO $$ BEGIN \
-                   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_{table}_{i}') THEN \
-                     ALTER TABLE {table} ADD CONSTRAINT chk_{table}_{i} CHECK ({expr}); \
+                   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = '{chk}') THEN \
+                     ALTER TABLE {qtable} ADD CONSTRAINT {qchk} CHECK ({expr}); \
                    END IF; \
                  END $$;",
-                table = r.table
+                chk = format!("chk_{}_{i}", r.table).replace('\'', "''"),
+                qchk = quote_ident(&format!("chk_{}_{i}", r.table)),
+                qtable = quote_ident(r.table),
             ))
             .execute(&self.pool)
             .await?;
@@ -700,31 +713,27 @@ impl PgStore {
             .execute(&mut *tx)
             .await?;
 
-        // Alokasi `pid` (BIGSERIAL) tiap entity ke jembatan **lokal**; jembatan
-        // store baru diganti setelah commit sukses — bila tx gagal, jembatan lama
-        // tetap konsisten dengan DB (yang tak berubah).
-        let mut bridge: HashMap<Entity, i64> = HashMap::with_capacity(staged.entities.len());
-        for &entity in &staged.entities {
-            let pid: i64 =
-                sqlx::query_scalar("INSERT INTO arke_entities (version) VALUES (0) RETURNING pid")
-                    .fetch_one(&mut *tx)
-                    .await?;
-            bridge.insert(entity, pid);
-        }
+        // Alokasi `pid` (BIGSERIAL) tiap entity — satu round-trip batch — ke
+        // jembatan **lokal**; jembatan store baru diganti setelah commit sukses
+        // (bila tx gagal, jembatan lama tetap konsisten dengan DB yang tak berubah).
+        // Pid terurut menaik dipasangkan dengan entity urut World → deterministik.
+        let pids = allocate_pids(&mut tx, staged.entities.len()).await?;
+        let bridge: HashMap<Entity, i64> = staged
+            .entities
+            .iter()
+            .copied()
+            .zip(pids.iter().copied())
+            .collect();
 
-        // Komponen ditulis di bawah `pid`. Semua pid working-set kini teralokasi →
-        // resolusi `Ref(entity)`→`pid` valid (RFC-0034 Am.3).
+        // Komponen ditulis di bawah `pid`, batch per tabel (`UNNEST`). Semua pid
+        // working-set kini teralokasi → resolusi `Ref(entity)`→`pid` valid
+        // (RFC-0034 Am.3).
         for (r, rows) in self.registered.iter().zip(&staged.components) {
-            let insert = insert_sql(r);
-            for (entity, params) in rows {
-                let pid = bridge[entity];
-                let params = resolve_refs_with(&bridge, params);
-                let mut q = sqlx::query(&insert).bind(pid);
-                for (value, col) in params.iter().zip(r.columns) {
-                    q = bind_value(q, col.ty, value);
-                }
-                q.execute(&mut *tx).await?;
-            }
+            let rows: Vec<(i64, Vec<PgValue>)> = rows
+                .iter()
+                .map(|(entity, params)| (bridge[entity], resolve_refs_with(&bridge, params)))
+                .collect();
+            batch_insert_rows(&mut tx, r, &rows).await?;
         }
 
         tx.commit().await?;
@@ -786,7 +795,7 @@ impl PgStore {
         self.bind_world(world);
         let sql = format!(
             "SELECT pid FROM {} WHERE {} ORDER BY pid",
-            T::TABLE,
+            quote_ident(T::TABLE),
             predicate
         );
         let rows = sqlx::query(&sql).fetch_all(&self.pool).await?;
@@ -1025,11 +1034,14 @@ impl PgStore {
 
         // Ganti komponen entity ini dengan keadaan `world` saat ini.
         for r in &self.registered {
-            sqlx::query(&format!("DELETE FROM {} WHERE pid = $1", r.table))
-                .bind(pid)
-                .execute(&mut *tx)
-                .await
-                .map_err(UpdateError::Db)?;
+            sqlx::query(&format!(
+                "DELETE FROM {} WHERE pid = $1",
+                quote_ident(r.table)
+            ))
+            .bind(pid)
+            .execute(&mut *tx)
+            .await
+            .map_err(UpdateError::Db)?;
             if let Some(params) = (r.dump_one)(world, entity) {
                 let insert = insert_sql(r);
                 let params = self.resolve_refs(&params);
@@ -1161,59 +1173,68 @@ impl PgStore {
         let mut affected: Vec<i64> = Vec::new();
         let mut bridge = self.pid_of.clone();
 
-        // Hilang → DELETE (cascade ke tabel komponen).
-        for entity in &staged.deletes {
-            if let Some(pid) = bridge.remove(entity) {
-                sqlx::query("DELETE FROM arke_entities WHERE pid = $1")
-                    .bind(pid)
-                    .execute(&mut *tx)
-                    .await?;
-                affected.push(pid);
-                stats.deleted += 1;
-            }
-        }
-
-        // Pass 1: alokasi `pid` untuk semua entity baru **sebelum** baris komponen
-        // ditulis, sehingga relasi ke entity baru se-batch me-resolve (bukan
-        // menggantung NULL).
-        for (entity, _) in &staged.upserts {
-            if !bridge.contains_key(entity) {
-                let pid: i64 = sqlx::query_scalar(
-                    "INSERT INTO arke_entities (version) VALUES (0) RETURNING pid",
-                )
-                .fetch_one(&mut *tx)
+        // Hilang → DELETE batch (cascade ke tabel komponen).
+        let deleted: Vec<i64> = staged
+            .deletes
+            .iter()
+            .filter_map(|e| bridge.remove(e))
+            .collect();
+        if !deleted.is_empty() {
+            sqlx::query("DELETE FROM arke_entities WHERE pid = ANY($1)")
+                .bind(&deleted)
+                .execute(&mut *tx)
                 .await?;
-                bridge.insert(*entity, pid);
-            }
+            stats.deleted = deleted.len();
+            affected.extend_from_slice(&deleted);
         }
 
-        // Pass 2: UPSERT (versi naik untuk yang sudah ada) + ganti baris komponen.
-        for (entity, state) in &staged.upserts {
-            let pid = bridge[entity];
-            if self.pid_of.contains_key(entity) {
-                sqlx::query("UPDATE arke_entities SET version = version + 1 WHERE pid = $1")
-                    .bind(pid)
-                    .execute(&mut *tx)
-                    .await?;
-            }
-            for (ci, r) in self.registered.iter().enumerate() {
-                sqlx::query(&format!("DELETE FROM {} WHERE pid = $1", r.table))
-                    .bind(pid)
-                    .execute(&mut *tx)
-                    .await?;
-                if let Some(params) = &state[ci] {
-                    let insert = insert_sql(r);
-                    let params = resolve_refs_with(&bridge, params);
-                    let mut q = sqlx::query(&insert).bind(pid);
-                    for (value, col) in params.iter().zip(r.columns) {
-                        q = bind_value(q, col.ty, value);
-                    }
-                    q.execute(&mut *tx).await?;
-                }
-            }
-            affected.push(pid);
-            stats.written += 1;
+        // Pass 1: alokasi `pid` (satu batch) untuk semua entity baru **sebelum**
+        // baris komponen ditulis, sehingga relasi ke entity baru se-batch
+        // me-resolve (bukan menggantung NULL). Entity terurut → pid terurut.
+        let fresh: Vec<Entity> = staged
+            .upserts
+            .iter()
+            .map(|(e, _)| *e)
+            .filter(|e| !bridge.contains_key(e))
+            .collect();
+        let existing: Vec<i64> = staged
+            .upserts
+            .iter()
+            .filter_map(|(e, _)| bridge.get(e).copied())
+            .collect();
+        let new_pids = allocate_pids(&mut tx, fresh.len()).await?;
+        bridge.extend(fresh.iter().copied().zip(new_pids.iter().copied()));
+
+        // Pass 2: versi naik (batch) untuk yang sudah ada; ganti baris komponen
+        // per tabel: DELETE semua pid terdampak (batch) lalu INSERT batch.
+        if !existing.is_empty() {
+            sqlx::query("UPDATE arke_entities SET version = version + 1 WHERE pid = ANY($1)")
+                .bind(&existing)
+                .execute(&mut *tx)
+                .await?;
         }
+        let upsert_pids: Vec<i64> = staged.upserts.iter().map(|(e, _)| bridge[e]).collect();
+        for (ci, r) in self.registered.iter().enumerate() {
+            sqlx::query(&format!(
+                "DELETE FROM {} WHERE pid = ANY($1)",
+                quote_ident(r.table)
+            ))
+            .bind(&upsert_pids)
+            .execute(&mut *tx)
+            .await?;
+            let rows: Vec<(i64, Vec<PgValue>)> = staged
+                .upserts
+                .iter()
+                .filter_map(|(e, state)| {
+                    state[ci]
+                        .as_ref()
+                        .map(|params| (bridge[e], resolve_refs_with(&bridge, params)))
+                })
+                .collect();
+            batch_insert_rows(&mut tx, r, &rows).await?;
+        }
+        affected.extend_from_slice(&upsert_pids);
+        stats.written = staged.upserts.len();
 
         tx.commit().await?;
         self.invalidate_all_tables(&affected).await;
@@ -1306,12 +1327,14 @@ fn insert_sql(r: &Registered) -> String {
     let mut placeholders = String::from("$1");
     for (i, col) in r.columns.iter().enumerate() {
         cols.push_str(", ");
-        cols.push_str(col.name);
+        cols.push_str(&quote_ident(col.name));
         placeholders.push_str(&format!(", ${}{}", i + 2, insert_cast(col.ty)));
     }
     format!(
         "INSERT INTO {} ({}) VALUES ({})",
-        r.table, cols, placeholders
+        quote_ident(r.table),
+        cols,
+        placeholders
     )
 }
 
@@ -1322,10 +1345,11 @@ fn select_sql(r: &Registered, filter: Option<&str>) -> String {
     let mut cols = String::from("pid");
     for col in r.columns {
         cols.push_str(", ");
+        let name = quote_ident(col.name);
         if read_as_text(col.ty) {
-            cols.push_str(&format!("{name}::text AS {name}", name = col.name));
+            cols.push_str(&format!("{name}::text AS {name}"));
         } else {
-            cols.push_str(col.name);
+            cols.push_str(&name);
         }
     }
     let where_clause = match filter {
@@ -1334,38 +1358,203 @@ fn select_sql(r: &Registered, filter: Option<&str>) -> String {
     };
     format!(
         "SELECT {} FROM {}{} ORDER BY pid",
-        cols, r.table, where_clause
+        cols,
+        quote_ident(r.table),
+        where_clause
     )
 }
 
-/// Bind satu [`PgValue`] ke query. `col_ty` menentukan tipe `NULL` yang benar.
+/// Nilai satu kolom dalam tipe Rust **tetap per tipe kolom** — `Integer` selalu
+/// `Option<i32>`, `Real` selalu `Option<f32>`, dst., baik `NULL` maupun tidak.
+/// Penting: sqlx meng-cache prepared statement per teks SQL dengan tipe
+/// parameter dari eksekusi **pertama**; bila `NULL` di-bind sebagai `Option<i32>`
+/// lalu nilai berikutnya sebagai `i64`, Postgres menolak (`22P03 incorrect
+/// binary data format`). Dipakai `bind_value` (per-baris) dan jalur batch
+/// (`UNNEST` per-kolom).
+enum Typed {
+    I32(Option<i32>),
+    I64(Option<i64>),
+    F32(Option<f32>),
+    F64(Option<f64>),
+    Bool(Option<bool>),
+    /// TEXT / JSONB / NUMERIC (dua terakhir di-cast di SQL).
+    Text(Option<String>),
+}
+
+fn typed(col_ty: PgType, value: &PgValue) -> Typed {
+    match col_ty {
+        PgType::Integer => Typed::I32(match value {
+            PgValue::Int(i) | PgValue::Ref(i) => i32::try_from(*i).ok(),
+            _ => None,
+        }),
+        PgType::BigInt => Typed::I64(match value {
+            PgValue::Int(i) | PgValue::Ref(i) => Some(*i),
+            _ => None,
+        }),
+        PgType::Real => Typed::F32(match value {
+            PgValue::Float(f) => Some(*f as f32),
+            _ => None,
+        }),
+        PgType::DoublePrecision => Typed::F64(match value {
+            PgValue::Float(f) => Some(*f),
+            _ => None,
+        }),
+        PgType::Boolean => Typed::Bool(match value {
+            PgValue::Bool(b) => Some(*b),
+            _ => None,
+        }),
+        PgType::Text | PgType::Jsonb | PgType::Numeric => Typed::Text(match value {
+            PgValue::Text(s) | PgValue::Json(s) | PgValue::Numeric(s) => Some(s.clone()),
+            _ => None,
+        }),
+    }
+}
+
+/// Bind satu [`PgValue`] ke query dengan tipe Rust tetap per tipe kolom
+/// (lihat [`Typed`]).
 pub(crate) fn bind_value<'q>(
     q: Query<'q, Postgres, PgArguments>,
     col_ty: PgType,
     value: &PgValue,
 ) -> Query<'q, Postgres, PgArguments> {
-    match value {
-        PgValue::Int(i) => q.bind(*i),
-        PgValue::Float(f) => q.bind(*f),
-        PgValue::Bool(b) => q.bind(*b),
-        PgValue::Text(s) => q.bind(s.clone()),
-        // JSON/NUMERIC di-bind sebagai teks; placeholder `$n::jsonb`/`::numeric` meng-cast.
-        PgValue::Json(s) => q.bind(s.clone()),
-        PgValue::Numeric(s) => q.bind(s.clone()),
-        // Relasi (RFC-0034 Am.3): mestinya sudah di-resolve `Ref(index)`→`Int(pid)`
-        // sebelum bind; jaga ekshaustif dengan mem-bind nilai mentah.
-        PgValue::Ref(i) => q.bind(*i),
-        // `NULL` di-bind dengan tipe kolom yang benar (protokol Postgres).
-        PgValue::Null => match col_ty {
-            PgType::Integer => q.bind(Option::<i32>::None),
-            PgType::BigInt => q.bind(Option::<i64>::None),
-            PgType::Real => q.bind(Option::<f32>::None),
-            PgType::DoublePrecision => q.bind(Option::<f64>::None),
-            PgType::Boolean => q.bind(Option::<bool>::None),
-            // JSONB/NUMERIC NULL di-bind sebagai teks NULL; `::jsonb`/`::numeric` meng-cast.
-            PgType::Text | PgType::Jsonb | PgType::Numeric => q.bind(Option::<String>::None),
-        },
+    match typed(col_ty, value) {
+        Typed::I32(v) => q.bind(v),
+        Typed::I64(v) => q.bind(v),
+        Typed::F32(v) => q.bind(v),
+        Typed::F64(v) => q.bind(v),
+        Typed::Bool(v) => q.bind(v),
+        Typed::Text(v) => q.bind(v),
     }
+}
+
+/// Kolom-kolom sebuah batch baris sebagai array per-kolom (untuk `UNNEST`).
+enum TypedVec {
+    I32(Vec<Option<i32>>),
+    I64(Vec<Option<i64>>),
+    F32(Vec<Option<f32>>),
+    F64(Vec<Option<f64>>),
+    Bool(Vec<Option<bool>>),
+    Text(Vec<Option<String>>),
+}
+
+impl TypedVec {
+    fn new(col_ty: PgType) -> Self {
+        match col_ty {
+            PgType::Integer => TypedVec::I32(Vec::new()),
+            PgType::BigInt => TypedVec::I64(Vec::new()),
+            PgType::Real => TypedVec::F32(Vec::new()),
+            PgType::DoublePrecision => TypedVec::F64(Vec::new()),
+            PgType::Boolean => TypedVec::Bool(Vec::new()),
+            PgType::Text | PgType::Jsonb | PgType::Numeric => TypedVec::Text(Vec::new()),
+        }
+    }
+
+    fn push(&mut self, col_ty: PgType, value: &PgValue) {
+        match (self, typed(col_ty, value)) {
+            (TypedVec::I32(v), Typed::I32(x)) => v.push(x),
+            (TypedVec::I64(v), Typed::I64(x)) => v.push(x),
+            (TypedVec::F32(v), Typed::F32(x)) => v.push(x),
+            (TypedVec::F64(v), Typed::F64(x)) => v.push(x),
+            (TypedVec::Bool(v), Typed::Bool(x)) => v.push(x),
+            (TypedVec::Text(v), Typed::Text(x)) => v.push(x),
+            _ => unreachable!("TypedVec dibuat dari tipe kolom yang sama"),
+        }
+    }
+
+    /// Tipe array SQL untuk placeholder `UNNEST($n::<tipe>[])`.
+    fn array_sql(col_ty: PgType) -> &'static str {
+        match col_ty {
+            PgType::Integer => "int4[]",
+            PgType::BigInt => "int8[]",
+            PgType::Real => "float4[]",
+            PgType::DoublePrecision => "float8[]",
+            PgType::Boolean => "bool[]",
+            PgType::Text | PgType::Jsonb | PgType::Numeric => "text[]",
+        }
+    }
+
+    fn bind<'q>(self, q: Query<'q, Postgres, PgArguments>) -> Query<'q, Postgres, PgArguments> {
+        match self {
+            TypedVec::I32(v) => q.bind(v),
+            TypedVec::I64(v) => q.bind(v),
+            TypedVec::F32(v) => q.bind(v),
+            TypedVec::F64(v) => q.bind(v),
+            TypedVec::Bool(v) => q.bind(v),
+            TypedVec::Text(v) => q.bind(v),
+        }
+    }
+}
+
+/// Batas baris per pernyataan batch (`UNNEST`) — membatasi ukuran satu pesan
+/// bind & memori array di server.
+const BATCH_ROWS: usize = 2_000;
+
+/// `INSERT INTO cmp_x (pid, c1, c2, …) SELECT u.pid, u.c1, u.c2::jsonb, … FROM
+/// UNNEST($1::int8[], $2::…[], …) AS u(pid, c1, c2, …)` — satu round-trip per
+/// ≤ `BATCH_ROWS` baris, bukan per baris.
+fn batch_insert_sql(r: &Registered) -> String {
+    let mut cols = String::from("pid");
+    let mut selects = String::from("u.pid");
+    let mut arrays = String::from("$1::int8[]");
+    let mut aliases = String::from("pid");
+    for (i, col) in r.columns.iter().enumerate() {
+        let name = quote_ident(col.name);
+        cols.push_str(", ");
+        cols.push_str(&name);
+        // Alias kolom UNNEST memakai nama posisi (`c1`, …) — bebas kata kunci.
+        selects.push_str(&format!(", u.c{i}{}", insert_cast(col.ty)));
+        arrays.push_str(&format!(", ${}::{}", i + 2, TypedVec::array_sql(col.ty)));
+        aliases.push_str(&format!(", c{i}"));
+    }
+    format!(
+        "INSERT INTO {} ({cols}) SELECT {selects} FROM UNNEST({arrays}) AS u({aliases})",
+        quote_ident(r.table)
+    )
+}
+
+/// Sisipkan `rows` (`(pid, params)`) ke tabel `r` secara batch di `conn`.
+async fn batch_insert_rows(
+    conn: &mut PgConnection,
+    r: &Registered,
+    rows: &[(i64, Vec<PgValue>)],
+) -> Result<(), sqlx::Error> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let sql = batch_insert_sql(r);
+    for chunk in rows.chunks(BATCH_ROWS) {
+        let pids: Vec<Option<i64>> = chunk.iter().map(|(pid, _)| Some(*pid)).collect();
+        let mut cols: Vec<TypedVec> = r.columns.iter().map(|c| TypedVec::new(c.ty)).collect();
+        for (_, params) in chunk {
+            for ((col, def), value) in cols.iter_mut().zip(r.columns).zip(params) {
+                col.push(def.ty, value);
+            }
+        }
+        let mut q = sqlx::query(&sql).bind(pids);
+        for col in cols {
+            q = col.bind(q);
+        }
+        q.execute(&mut *conn).await?;
+    }
+    Ok(())
+}
+
+/// Alokasi `n` pid baru di `arke_entities` (satu round-trip), terurut menaik.
+async fn allocate_pids(conn: &mut PgConnection, n: usize) -> Result<Vec<i64>, sqlx::Error> {
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+    let mut pids: Vec<i64> = sqlx::query_scalar(
+        "INSERT INTO arke_entities (version) SELECT 0 FROM generate_series(1, $1) RETURNING pid",
+    )
+    .bind(n as i64)
+    .fetch_all(&mut *conn)
+    .await?;
+    // Urutan RETURNING tak dijamin spesifikasi → urutkan agar penetapan pid ke
+    // entity deterministik (STD-0005).
+    pids.sort_unstable();
+    debug_assert_eq!(pids.len(), n);
+    Ok(pids)
 }
 
 /// Baca satu kolom baris menjadi [`PgValue`] sesuai tipenya (`NULL` → `Null`).

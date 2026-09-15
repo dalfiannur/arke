@@ -18,8 +18,9 @@ Lihat [RFC-0021](../docs/RFC/RFC-0021-arke-postgres-adapter.md) untuk desain len
 - **`World` = *working set* in-memory**; Postgres memegang data otoritatif.
 - Sinkronisasi terjadi di **titik terkendali** (muat saat mulai, tulis-balik saat
   checkpoint) — **bukan** per-tick (ECS in-memory tak cocok disinkronkan tiap frame).
-- Tiap tipe komponen `#[derive(PgComponent)]` → **satu tabel** `cmp_<nama>`, tiap
-  field → **kolom SQL nyata ber-tipe**.
+- Tiap tipe komponen `#[derive(PgComponent)]` → **satu tabel** `cmp_<nama>` (atau
+  `#[pg(table = "…")]`), tiap field → **kolom SQL nyata ber-tipe**. Identifier
+  di-quote bila perlu: field bernama `order`/`user`/`end` atau camelCase aman.
 
 ## Contoh singkat
 
@@ -268,6 +269,7 @@ Atribut `#[pg(...)]` → `migrate` membuat indeks/constraint (idempoten):
 ```rust,no_run
 # use arke_postgres::PgComponent;
 #[derive(PgComponent)]
+#[pg(table = "enemies")]           // nama tabel kustom (default `cmp_enemy`)
 #[pg(check = "hp >= 0")]           // constraint CHECK level-tabel
 struct Enemy {
     #[pg(index)]  kind: i32,       // btree index (mempercepat load_where)
@@ -282,6 +284,9 @@ struct Enemy {
   kolom JSONB dengan GIN. `#[pg(unique)]` selalu btree (GIN tak mendukung UNIQUE).
 - `#[pg(unique)]` → `CREATE UNIQUE INDEX`.
 - `#[pg(check = "…")]` (level-tipe, boleh banyak) → constraint `CHECK`.
+- `#[pg(table = "…")]` (level-tipe) → nama tabel, dipakai **verbatim** (di-quote:
+  huruf besar jadi case-sensitive). Dua struct bernama sama di modul berbeda
+  butuh ini agar tak bertabrakan di `cmp_<nama>`.
 
 ## Menjalankan uji
 
