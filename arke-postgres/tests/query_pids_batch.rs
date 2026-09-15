@@ -45,8 +45,19 @@ async fn query_pids_memuat_banyak_entity_sekaligus() {
     let mut pids = Vec::new();
     for i in 0..3 {
         let e = seed.spawn();
-        seed.insert(e, QpMark { tag: tag.clone(), level: i });
-        seed.insert(e, QpSide { note: format!("n{i}") });
+        seed.insert(
+            e,
+            QpMark {
+                tag: tag.clone(),
+                level: i,
+            },
+        );
+        seed.insert(
+            e,
+            QpSide {
+                note: format!("n{i}"),
+            },
+        );
         let staged = store.stage_insert(&seed, e);
         pids.push(store.commit_insert(staged).await.unwrap());
     }
@@ -54,7 +65,10 @@ async fn query_pids_memuat_banyak_entity_sekaligus() {
 
     let mut world = World::new();
     let pred = format!("tag = '{tag}'");
-    let pairs = store.query_pids::<QpMark>(&mut world, Some(&pred)).await.unwrap();
+    let pairs = store
+        .query_pids::<QpMark>(&mut world, Some(&pred))
+        .await
+        .unwrap();
 
     assert_eq!(pairs.len(), 3, "semua baris yang cocok ikut termuat");
     let got: Vec<i64> = pairs.iter().map(|(pid, _)| *pid).collect();
@@ -64,17 +78,33 @@ async fn query_pids_memuat_banyak_entity_sekaligus() {
     // mudah rusak saat baris banyak pid datang dari satu query bersama.
     for (i, (pid, e)) in pairs.iter().enumerate() {
         let mark = world.get::<QpMark>(*e).expect("QpMark termuat");
-        assert_eq!(mark.level, i as i32, "pid {pid} membawa QpMark miliknya sendiri");
-        let side = world.get::<QpSide>(*e).expect("komponen kedua ikut termuat");
-        assert_eq!(side.note, format!("n{i}"), "pid {pid} membawa QpSide miliknya sendiri");
+        assert_eq!(
+            mark.level, i as i32,
+            "pid {pid} membawa QpMark miliknya sendiri"
+        );
+        let side = world
+            .get::<QpSide>(*e)
+            .expect("komponen kedua ikut termuat");
+        assert_eq!(
+            side.note,
+            format!("n{i}"),
+            "pid {pid} membawa QpSide miliknya sendiri"
+        );
     }
 
     // Pid tanpa baris `arke_entities` dilewati, sama seperti jalur `fetch` lama.
     store.remove(pids[1]).await.unwrap();
     let mut world2 = World::new();
-    let after = store.query_pids::<QpMark>(&mut world2, Some(&pred)).await.unwrap();
+    let after = store
+        .query_pids::<QpMark>(&mut world2, Some(&pred))
+        .await
+        .unwrap();
     let got2: Vec<i64> = after.iter().map(|(pid, _)| *pid).collect();
-    assert_eq!(got2, vec![pids[0], pids[2]], "pid yang sudah dihapus tidak ikut");
+    assert_eq!(
+        got2,
+        vec![pids[0], pids[2]],
+        "pid yang sudah dihapus tidak ikut"
+    );
 
     // Predikat tanpa hasil tidak boleh error (jalur `ids` kosong).
     let mut world3 = World::new();

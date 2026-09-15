@@ -218,9 +218,8 @@ pub fn create_table_sql<T: PgComponent>() -> String {
 /// Seperti [`create_table_sql`] tetapi dari nama tabel + kolom (dipakai runtime,
 /// mis. oleh `PgStore` yang menyimpan skema type-erased).
 pub fn create_table_sql_from(table: &str, columns: &[ColumnDef]) -> String {
-    let mut cols = String::from(
-        "pid BIGINT PRIMARY KEY REFERENCES arke_entities(pid) ON DELETE CASCADE",
-    );
+    let mut cols =
+        String::from("pid BIGINT PRIMARY KEY REFERENCES arke_entities(pid) ON DELETE CASCADE");
     for col in columns {
         cols.push_str(", ");
         cols.push_str(col.name);
