@@ -4,7 +4,7 @@
 //! menyentuh constraint. Dilewati bila `DATABASE_URL` tak diset.
 
 use arke::World;
-use arke_postgres::{PgComponent, PgStore};
+use arke_postgres::PgStore;
 use sqlx::PgPool;
 
 mod v1 {
