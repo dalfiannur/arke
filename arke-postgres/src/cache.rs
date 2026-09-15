@@ -78,7 +78,9 @@ fn push_str(out: &mut Vec<u8>, s: &str) {
 pub(crate) fn decode_row(bytes: &[u8]) -> Option<Vec<PgValue>> {
     let mut p = 0usize;
     let n = read_u32(bytes, &mut p)? as usize;
-    let mut row = Vec::with_capacity(n);
+    // Kapasitas dibatasi: `n` datang dari byte cache (bisa korup) — tiap nilai
+    // butuh ≥ 1 byte, jadi `n` yang wajar ≤ sisa byte.
+    let mut row = Vec::with_capacity(n.min(bytes.len().saturating_sub(p)));
     for _ in 0..n {
         let tag = *bytes.get(p)?;
         p += 1;
@@ -112,7 +114,7 @@ fn read_arr<const N: usize>(b: &[u8], p: &mut usize) -> Option<[u8; N]> {
 }
 fn read_str(b: &[u8], p: &mut usize) -> Option<String> {
     let len = read_u32(b, p)? as usize;
-    let s = b.get(*p..*p + len)?;
+    let s = b.get(*p..p.checked_add(len)?)?;
     *p += len;
     String::from_utf8(s.to_vec()).ok()
 }

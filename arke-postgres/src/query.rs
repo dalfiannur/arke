@@ -927,17 +927,34 @@ where
     q.fetch_one(ex).await?.try_get("e")
 }
 
-/// Ubah placeholder `?` berurutan menjadi `$1..$n` (dialek Postgres).
+/// Ubah placeholder `?` berurutan menjadi `$1..$n` (dialek Postgres). `?` di
+/// dalam identifier ter-quote (`"a?b"`) atau literal string (`'?'`) dibiarkan —
+/// nama tabel/kolom kustom boleh memuat karakter apa pun, dan operator JSONB
+/// `?`/`?|` (bila kelak ditambahkan) harus ditulis di luar kutip.
 pub(crate) fn renumber(sql: &str) -> String {
     let mut out = String::with_capacity(sql.len() + 8);
     let mut n = 1u32;
+    let mut quote: Option<char> = None;
     for ch in sql.chars() {
-        if ch == '?' {
-            out.push('$');
-            out.push_str(&n.to_string());
-            n += 1;
-        } else {
-            out.push(ch);
+        match quote {
+            Some(q) => {
+                if ch == q {
+                    quote = None;
+                }
+                out.push(ch);
+            }
+            None => match ch {
+                '"' | '\'' => {
+                    quote = Some(ch);
+                    out.push(ch);
+                }
+                '?' => {
+                    out.push('$');
+                    out.push_str(&n.to_string());
+                    n += 1;
+                }
+                _ => out.push(ch),
+            },
         }
     }
     out
@@ -947,6 +964,14 @@ pub(crate) fn renumber(sql: &str) -> String {
 mod tests {
     use super::*;
     use crate::ColumnDef;
+
+    #[test]
+    fn renumber_mengabaikan_tanda_tanya_di_dalam_kutip() {
+        assert_eq!(
+            renumber(r#"SELECT pid FROM "t?b" WHERE "c?" = ? AND x = '?' AND y = ?"#),
+            r#"SELECT pid FROM "t?b" WHERE "c?" = $1 AND x = '?' AND y = $2"#
+        );
+    }
 
     // Komponen uji manual (tanpa derive) — cukup untuk menguji generasi SQL.
     struct Health {

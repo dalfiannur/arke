@@ -34,3 +34,20 @@ fn sistem_gerak_membaca_resource_delta_saat_iterasi_query() {
     // Resource tetap ada setelah dipakai berkali-kali.
     assert!(world.contains_resource::<DeltaTime>());
 }
+
+/// `System::each_res` melepas resource sementara selama iterasi; panic di
+/// dalam closure tak boleh menghilangkan resource dari World.
+#[test]
+fn each_res_mengembalikan_resource_walau_closure_panic() {
+    struct Cfg(i32);
+    struct N;
+    let mut w = World::new();
+    w.insert_resource(Cfg(5));
+    let e = w.spawn();
+    w.insert(e, N);
+    let mut s = Schedule::new();
+    s.add(System::each_res::<Cfg, &N>(|_cfg, _n| panic!("boom")));
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.run(&mut w)));
+    assert!(r.is_err());
+    assert_eq!(w.resource::<Cfg>().map(|c| c.0), Some(5));
+}

@@ -224,3 +224,69 @@ fn try_load_snapshot_menolak_tanpa_memutasi_world() {
         Some(&Position { x: 1, y: 2 })
     );
 }
+
+// ── Audit 0.7.0: kasus tepi serialisasi ──────────────────────────────────
+
+#[test]
+fn u64_di_atas_i64_max_round_trip_tanpa_wrap() {
+    let big = u64::MAX - 3;
+    let v = big.to_value();
+    assert_eq!(u64::from_value(&v), Some(big));
+    // Lewat JSON pun setia (dan JSON-nya valid: string desimal).
+    let json = v.to_json();
+    assert_eq!(
+        u64::from_value(&Value::from_json(&json).unwrap()),
+        Some(big)
+    );
+    // Nilai kecil tetap Int biasa; tipe bertanda menolak nilai di luar jangkauan.
+    assert_eq!(7u64.to_value(), Value::Int(7));
+    assert_eq!(i64::from_value(&v), None);
+    assert_eq!(
+        usize::from_value(&(usize::MAX).to_value()),
+        Some(usize::MAX)
+    );
+}
+
+#[test]
+fn json_string_kontrol_dan_surrogate_pair() {
+    // Karakter kontrol < 0x20 di-escape → JSON valid; round-trip setia.
+    let s = String::from("a\u{1}b\u{8}c\u{c}d\u{1f}e");
+    let json = s.to_value().to_json();
+    assert!(json.contains("\\u0001"), "{json}");
+    assert!(!json.bytes().any(|b| b < 0x20), "{json}");
+    assert_eq!(
+        String::from_value(&Value::from_json(&json).unwrap()),
+        Some(s)
+    );
+    // Surrogate pair `😀` (😀) diterima; surrogate tunggal ditolak.
+    assert_eq!(
+        Value::from_json(r#""😀""#),
+        Some(Value::Text("😀".to_string()))
+    );
+    assert_eq!(Value::from_json(r#""\ud83d""#), None);
+    assert_eq!(Value::from_json(r#""\ude00""#), None);
+}
+
+#[test]
+fn float_non_finite_jadi_null_json_valid() {
+    let json = Value::Float(f64::NAN).to_json();
+    assert_eq!(json, "null");
+    assert_eq!(Value::from_json(&json), Some(Value::Null));
+    assert_eq!(Value::Float(f64::INFINITY).to_json(), "null");
+    // Float finit tetap angka.
+    assert_eq!(Value::Float(2.5).to_json(), "2.5");
+}
+
+#[test]
+fn slot_dengan_generation_maksimum_dipensiunkan() {
+    let mut w = World::new();
+    let e = w.spawn_at(0, u32::MAX);
+    w.despawn(e);
+    let next = w.spawn();
+    assert_ne!(
+        next.index(),
+        0,
+        "slot 0 tak boleh didaur ulang (generation habis)"
+    );
+    assert!(!w.contains(e));
+}

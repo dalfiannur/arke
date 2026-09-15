@@ -7,9 +7,12 @@
 # perubahan manifest/lockfile DAN terjadwal mingguan — advisori baru muncul
 # tanpa commit di repo ini.
 #
-# `Cargo.lock` di root mencakup seluruh workspace (arke, arke-derive,
-# arke-postgres, arke-postgres-derive, arke-cache, arke-mongo). Crate benchmark
-# yang di-`exclude` punya lockfile sendiri dan di luar rilis → tak diaudit.
+# `Cargo.lock` **tidak** di-commit (konvensi library, lihat `.gitignore`), jadi
+# job ini membangkitkannya dulu (`cargo generate-lockfile`) → yang diaudit
+# adalah resolusi **terbaru yang kompatibel** untuk seluruh workspace (arke,
+# arke-derive, arke-postgres, arke-postgres-derive, arke-cache, arke-mongo) —
+# persis yang akan didapat pengguna saat `cargo add`. Crate benchmark yang
+# di-`exclude` di luar rilis → tak diaudit.
 name: Audit
 
 on:
@@ -37,6 +40,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Bangkitkan Cargo.lock (tidak di-commit)
+        run: cargo generate-lockfile
       - uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}

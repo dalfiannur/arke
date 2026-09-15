@@ -146,8 +146,15 @@ impl System {
         Self::with(
             Runner::Exclusive(Box::new(move |world: &mut World| {
                 if let Some(r) = world.remove_resource::<R>() {
-                    Q::each(world, |item| f(&r, item));
+                    // Resource dilepas sementara (butuh `&mut World` untuk query);
+                    // panic di `f` tak boleh menghilangkannya dari World.
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        Q::each(world, |item| f(&r, item))
+                    }));
                     world.insert_resource(r);
+                    if let Err(payload) = result {
+                        std::panic::resume_unwind(payload);
+                    }
                 }
             })),
             Q::access().with_resource_read::<R>(),

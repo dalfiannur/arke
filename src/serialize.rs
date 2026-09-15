@@ -58,7 +58,32 @@ macro_rules! impl_serialize_int {
         }
     )*};
 }
-impl_serialize_int!(i8, i16, i32, i64, u8, u16, u32, u64, usize, isize);
+impl_serialize_int!(i8, i16, i32, i64, u8, u16, u32, isize);
+
+/// `u64`/`usize`: [`Value::Int`] bila muat di `i64`; di atas `i64::MAX` menjadi
+/// [`Value::Text`] desimal (JSON string) — bukan `as i64` yang wrap negatif lalu
+/// gagal dibaca. JSON tetap valid & portabel (JS pun tak merepresentasikan > 2⁵³
+/// sebagai angka); `from_value` menerima kedua bentuk.
+macro_rules! impl_serialize_uint {
+    ($($t:ty),*) => {$(
+        impl Serialize for $t {
+            fn to_value(&self) -> Value {
+                match i64::try_from(*self) {
+                    Ok(i) => Value::Int(i),
+                    Err(_) => Value::Text(self.to_string()),
+                }
+            }
+            fn from_value(value: &Value) -> Option<Self> {
+                match value {
+                    Value::Int(i) => (*i).try_into().ok(),
+                    Value::Text(t) => t.parse::<u64>().ok()?.try_into().ok(),
+                    _ => None,
+                }
+            }
+        }
+    )*};
+}
+impl_serialize_uint!(u64, usize);
 
 macro_rules! impl_serialize_float {
     ($($t:ty),*) => {$(
@@ -154,11 +179,17 @@ impl Value {
             Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
             Value::Int(i) => out.push_str(&i.to_string()),
             Value::Float(f) => {
+                // JSON tak punya NaN/Infinity → `null` (seperti serde_json),
+                // bukan teks `NaN` yang membuat seluruh dokumen tak valid.
+                if !f.is_finite() {
+                    out.push_str("null");
+                    return;
+                }
                 let s = f.to_string();
                 out.push_str(&s);
                 // Pastikan float selalu punya penanda pecahan agar round-trip
                 // tak salah dibaca sebagai Int.
-                if !s.contains(['.', 'e', 'E', 'n', 'i']) {
+                if !s.contains(['.', 'e', 'E']) {
                     out.push_str(".0");
                 }
             }
@@ -239,6 +270,7 @@ impl Value {
 }
 
 fn write_json_string(s: &str, out: &mut String) {
+    use std::fmt::Write as _;
     out.push('"');
     for c in s.chars() {
         match c {
@@ -247,6 +279,10 @@ fn write_json_string(s: &str, out: &mut String) {
             '\n' => out.push_str("\\n"),
             '\t' => out.push_str("\\t"),
             '\r' => out.push_str("\\r"),
+            // RFC 8259: semua karakter kontrol < 0x20 wajib di-escape.
+            c if (c as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
             c => out.push(c),
         }
     }
@@ -326,17 +362,39 @@ impl Parser {
                     'b' => s.push('\u{8}'),
                     'f' => s.push('\u{c}'),
                     'u' => {
-                        let mut code = 0u32;
-                        for _ in 0..4 {
-                            code = code * 16 + self.bump()?.to_digit(16)?;
-                        }
-                        s.push(char::from_u32(code)?);
+                        let code = self.parse_hex4()?;
+                        // Surrogate pair (`\ud83d\ude00`) → satu karakter astral;
+                        // surrogate tunggal bukan skalar Unicode → tolak.
+                        let cp = match code {
+                            0xD800..=0xDBFF => {
+                                if self.bump()? != '\\' || self.bump()? != 'u' {
+                                    return None;
+                                }
+                                let low = self.parse_hex4()?;
+                                if !(0xDC00..=0xDFFF).contains(&low) {
+                                    return None;
+                                }
+                                0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00)
+                            }
+                            0xDC00..=0xDFFF => return None,
+                            c => c,
+                        };
+                        s.push(char::from_u32(cp)?);
                     }
                     _ => return None,
                 },
                 c => s.push(c),
             }
         }
+    }
+
+    /// Empat digit heksadesimal setelah `\u`.
+    fn parse_hex4(&mut self) -> Option<u32> {
+        let mut code = 0u32;
+        for _ in 0..4 {
+            code = code * 16 + self.bump()?.to_digit(16)?;
+        }
+        Some(code)
     }
 
     fn parse_number(&mut self) -> Option<Value> {

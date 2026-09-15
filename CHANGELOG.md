@@ -106,13 +106,32 @@ rilis juga ada di [GitHub Releases](https://github.com/dalfiannur/arke/releases)
 
 - **`cargo audit` di CI** (`.github/workflows/audit.yml`, RustSec
   `audit-check`): tiap perubahan manifest/lockfile + terjadwal mingguan.
-  Pemasangan pertama langsung menemukan **RUSTSEC-2026-0285** (rustls 0.23.43,
-  medium — pesan handshake TLS 1.3 diterima lintas batas level enkripsi) di
-  pohon dependensi adapter (`mongodb`); `Cargo.lock` diperbarui ke rustls
-  0.23.45 (+ `chacha20` 0.10.2 menggantikan 0.10.1 yang di-yank).
+  `Cargo.lock` tidak di-commit, jadi job membangkitkannya dulu — yang diaudit
+  resolusi terbaru yang kompatibel. Pemasangan pertama (lokal) langsung
+  menemukan **RUSTSEC-2026-0285** (rustls 0.23.43, medium — pesan handshake
+  TLS 1.3 diterima lintas batas level enkripsi) di pohon dependensi adapter
+  (`mongodb`); resolusi terbaru sudah rustls 0.23.45 (+ `chacha20` 0.10.2
+  menggantikan 0.10.1 yang di-yank).
 
 ### Fixed
 
+- **Kasus tepi serialisasi (audit).** `u64`/`usize` di atas `i64::MAX`
+  dulu di-`as i64` (wrap negatif → gagal dibaca); kini `Value::Text` desimal
+  (JSON string valid, round-trip setia). JSON: semua karakter kontrol < 0x20
+  di-escape (`\u00XX`, RFC 8259), surrogate pair `\uD83D\uDE00` diterima
+  (surrogate tunggal ditolak), `NaN`/`Infinity` ditulis `null` alih-alih teks
+  yang membuat dokumen tak valid.
+- **Slot entity dengan `generation == u32::MAX` dipensiunkan** saat `despawn`
+  (tak masuk free-list) — `+= 1` dulu wrap diam di rilis (ABA setelah 2³² daur
+  ulang). `spawn` melewati 2³² slot kini panic eksplisit, bukan truncate.
+- **`System::each_res` kehilangan resource bila closure panic** — resource
+  dilepas sementara selama iterasi; kini dikembalikan lewat `catch_unwind`
+  lalu panic dipropagasi ulang.
+- **`arke-postgres`: `decode_row` mengalokasikan kapasitas dari byte cache
+  tanpa batas** (cache korup → OOM/`capacity overflow`); kini dibatasi sisa
+  byte, dan panjang string dijumlah dengan `checked_add`. `renumber` tak lagi
+  mengganti `?` di dalam identifier/literal ter-quote (nama tabel kustom
+  `"a?b"` aman).
 - **`arke-postgres`: `Option<i32>`/`Option<f32>` (kolom INTEGER/REAL nullable)
   gagal ditulis setelah baris pertama** — `22P03 incorrect binary data format`.
   `bind_value` mem-bind `NULL` sebagai `Option<i32>` tetapi nilai sebagai `i64`;

@@ -139,7 +139,8 @@ impl World {
             meta.location = None;
             Entity::new(index, meta.generation)
         } else {
-            let index = self.entities.len() as u32;
+            let index = u32::try_from(self.entities.len())
+                .expect("World: jumlah slot entity melampaui u32::MAX");
             self.entities.push(EntityMeta {
                 generation: 0,
                 alive: true,
@@ -163,9 +164,14 @@ impl World {
         }
         let meta = &mut self.entities[index as usize];
         meta.alive = false;
-        meta.generation += 1;
         meta.location = None;
-        self.free.push(index);
+        // Generation habis (2³² daur ulang satu slot) → slot **dipensiunkan**
+        // (tak masuk free-list) agar handle lama tak pernah hidup kembali lewat
+        // wrap-around; `+= 1` polos akan wrap diam di rilis (ABA).
+        if let Some(next) = meta.generation.checked_add(1) {
+            meta.generation = next;
+            self.free.push(index);
+        }
     }
 
     /// Mengembalikan `true` bila `entity` masih hidup di `World` ini.
