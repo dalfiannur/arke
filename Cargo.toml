@@ -33,7 +33,7 @@ harness = false
 # crates.io (proc-macro tulis-tangan). Integrasi eksternal lain, bila ada nanti,
 # hidup di crate/feature adapter terpisah.
 [dependencies]
-arke-derive = { version = "0.3.0", path = "arke-derive" }
+arke-derive = { version = "0.4.0", path = "arke-derive" }
 
 [dev-dependencies]
 

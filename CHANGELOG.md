@@ -7,6 +7,10 @@ rilis juga ada di [GitHub Releases](https://github.com/dalfiannur/arke/releases)
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-09-15
+
+Rilis gelombang breaking kedua menuju 1.0 ([RFC-0036](docs/RFC/RFC-0036-audit-0.7-soundness-stability-security.md), [ADR-0036](docs/ADR/ADR-0036-audit-0.7-soundness-stability-security.md), [Milestone 33](docs/MILESTONE_33.md)). Crate pendamping: `arke-derive` 0.4.0 (`#[serialize(name/default)]`; kode hasil derive butuh `arke` ≥ 0.7), `arke-postgres` 0.16.0, `arke-postgres-derive` 0.8.0, `arke-cache` 0.4.0, `arke-mongo` 0.1.0 (rilis pertama).
+
 ### Changed (BREAKING — audit 0.7.0: soundness, stabilitas, keamanan)
 
 - **`Component` kini `'static + Send + Sync`** (dulu hanya `Send`). Eksekutor
@@ -330,7 +334,8 @@ eksekutor graf-ketergantungan, command buffer, `Entity` sebagai term query. Adap
 [`arke-postgres`](arke-postgres/) diperkenalkan pada era 0.4.x. Detail per rilis:
 [GitHub Releases](https://github.com/dalfiannur/arke/releases).
 
-[Unreleased]: https://github.com/dalfiannur/arke/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/dalfiannur/arke/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/dalfiannur/arke/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/dalfiannur/arke/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/dalfiannur/arke/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/dalfiannur/arke/compare/v0.5.1...v0.5.2
