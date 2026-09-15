@@ -139,10 +139,35 @@ impl Snapshot {
             .iter()
             .map(EntitySnapshot::from_value)
             .collect::<Option<Vec<_>>>()?;
+        // Dua entity di satu slot tak mungkin direkonstruksi tanpa korupsi
+        // (`allocate_at` kedua menimpa yang pertama) → tolak di gerbang parse.
+        let mut seen = std::collections::HashSet::with_capacity(entities.len());
+        if !entities.iter().all(|e| seen.insert(e.index)) {
+            return None;
+        }
         Some(Self {
             schema_version,
             entities,
         })
+    }
+
+    /// Jumlah entity dalam snapshot.
+    pub fn len(&self) -> usize {
+        self.entities.len()
+    }
+
+    /// Apakah snapshot tak memuat entity.
+    pub fn is_empty(&self) -> bool {
+        self.entities.is_empty()
+    }
+
+    /// Indeks slot **tertinggi** yang akan dialokasikan [`World::load_snapshot`]
+    /// (`None` bila kosong). Memuat snapshot mengalokasikan tabel slot sebesar
+    /// `max_index + 1` — untuk snapshot dari sumber **tak tepercaya**, periksa
+    /// nilai ini terhadap batas aplikasi sebelum memuat (indeks `u32::MAX`
+    /// berarti ~4 miliar slot).
+    pub fn max_index(&self) -> Option<u32> {
+        self.entities.iter().map(|e| e.index).max()
     }
 
     /// Versi format snapshot ini.

@@ -113,3 +113,53 @@ fn try_snapshot_ok_bila_semua_terdaftar() {
 
     assert!(world.try_snapshot().is_ok());
 }
+
+/// Parser JSON menolak sarang terlalu dalam alih-alih meledakkan stack
+/// (input tak tepercaya → DoS).
+#[test]
+fn json_bersarang_terlalu_dalam_ditolak() {
+    let deep = "[".repeat(100_000) + &"]".repeat(100_000);
+    assert_eq!(Value::from_json(&deep), None);
+    // Kedalaman wajar tetap diterima.
+    let ok = "[".repeat(32) + &"]".repeat(32);
+    assert!(Value::from_json(&ok).is_some());
+}
+
+/// Snapshot dengan `index` entity duplikat ditolak — dua entity di satu slot
+/// tak mungkin direkonstruksi tanpa korupsi.
+#[test]
+fn snapshot_index_duplikat_ditolak() {
+    let json = r#"{"schema_version":1,"entities":[
+        {"index":0,"generation":0,"components":{}},
+        {"index":0,"generation":1,"components":{}}
+    ]}"#;
+    assert!(Snapshot::from_json(json).is_none());
+}
+
+/// `spawn_at` ke slot yang sedang ada di free-list mengeluarkannya dari
+/// free-list, sehingga `spawn` berikutnya tak menerbitkan handle duplikat;
+/// bila slot masih hidup, komponen lamanya dibersihkan (tanpa baris yatim).
+#[test]
+fn spawn_at_tak_menerbitkan_handle_duplikat_dan_membersihkan_slot() {
+    let mut world = World::new();
+    let a = world.spawn();
+    world.despawn(a); // index 0 → free-list, generation 1
+
+    let restored = world.spawn_at(0, 1);
+    world.insert(restored, Position { x: 7, y: 7 });
+    let b = world.spawn();
+    assert_ne!(
+        b, restored,
+        "spawn tak boleh mendaur-ulang slot yang baru direstorasi"
+    );
+    assert_eq!(
+        world.get::<Position>(restored),
+        Some(&Position { x: 7, y: 7 })
+    );
+
+    // Timpa slot hidup: baris lama harus hilang, bukan jadi yatim.
+    let again = world.spawn_at(0, 5);
+    assert_eq!(world.query::<Position>().count(), 0);
+    assert_eq!(world.get::<Position>(restored), None);
+    assert!(world.contains(again));
+}

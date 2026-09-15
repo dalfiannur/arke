@@ -7,7 +7,93 @@ rilis juga ada di [GitHub Releases](https://github.com/dalfiannur/arke/releases)
 
 ## [Unreleased]
 
+### Changed (BREAKING — audit 0.7.0: soundness, stabilitas, keamanan)
+
+- **`Component` kini `'static + Send + Sync`** (dulu hanya `Send`). Eksekutor
+  paralel (`Schedule::run_parallel`) menjalankan dua sistem yang sama-sama
+  *membaca* `T` **bersamaan** di thread berbeda lewat `&T` — hanya sound bila
+  `T: Sync`. Tipe `Send + !Sync` (mis. `Cell<u32>`) sebelumnya lolos sebagai
+  komponen dan menjadi **data race** di jalur itu (dibuktikan: dua
+  `System::each::<&Cell<u64>>` dinilai tak-konflik). Kini gagal kompilasi.
+- **`QueryData`: jalur `&World` berbagi dibatasi query baca-saja.**
+  `each_filtered_shared`/`each_cached_shared` kini mensyaratkan
+  `Self: ReadOnlyQuery` (trait penanda baru, tertutup: `&T`, `Entity`, dan
+  tuple yang seluruh termnya baca-saja). Sebelumnya kode **aman** dapat
+  membentuk `&mut T` dari `&World` yang beralias dengan `&T` hasil
+  `World::get` yang masih hidup (UB tanpa `unsafe` — melanggar STD-0004).
+  `each_cached` kini menerima `&mut World`; implementasi inti menjadi
+  `unsafe fn each_cached_unchecked` (`#[doc(hidden)]`) dengan kontrak
+  eksplisit, hanya dipanggil `System`/`Schedule` yang menjamin disjoint lewat
+  graf-konflik. Migrasi: query dengan term `&mut T` pakai `each`/`each_filtered`
+  /`each_cached` (`&mut World`); query baca-saja tak berubah.
+- **`arke-postgres` 0.16 / `arke-postgres-derive` 0.8 / `arke-cache` 0.4.**
+  `PgStore::fetch` kini `&mut self` (mengisi jembatan pid↔entity, melayani
+  cache, me-refresh pid yang sudah termuat). `PgValue::Ref` membawa `Entity`
+  utuh (`generation << 32 | index`, `pack_entity`/`unpack_entity`) — bukan
+  indeks saja — sehingga relasi ke slot terdaur-ulang basi, bukan menunjuk
+  entity baru; dan `Ref` me-resolve di World yang slotnya pernah dipakai
+  (dulu direkonstruksi dengan `generation 0`). Satu `PgStore` melayani
+  **satu `World`**: World lain yang datang (dideteksi via `World::id()`)
+  me-reset jembatan & rekam `save_incremental` — dulu jembatan ber-kunci
+  indeks diam-diam mencampur handle lintas-World; pakai `fork()` per World
+  (README sudah begitu). `Query::load*` kini **aditif** (tak me-reset jembatan):
+  beberapa `load` ke satu World saling melengkapi, pid yang sudah termuat
+  di-refresh di tempat.
+
 ### Added
+
+- **`World::id()` / `WorldId`** — identitas unik per-proses sebuah World (bukan
+  bagian keadaan/snapshot). Menjawab pertanyaan terbuka RFC-0035: adapter dapat
+  mendeteksi World yang berganti alih-alih mencampur handle `Entity`
+  lintas-World.
+- **`Snapshot::len`/`is_empty`/`max_index`** — `max_index` untuk membatasi
+  alokasi tabel slot sebelum `load_snapshot` dari sumber tak tepercaya (indeks
+  `u32::MAX` = ~4 miliar slot).
+- **`arke::serialize::MAX_JSON_DEPTH`** (128) — batas kedalaman parser JSON.
+- **`arke-postgres`: `PgStore::register` idempoten** (tabel yang sudah terdaftar
+  dilewati); `migrate` merekonsiliasi **FK `pid → arke_entities ON DELETE
+  CASCADE`** yang hilang (mis. setelah `DROP TABLE arke_entities CASCADE`) —
+  tanpanya `save` meninggalkan baris komponen yatim; `commit_update`/`remove`
+  kini meng-invalidate cache.
+
+### Fixed
+
+- **Panic di satu sistem `run_parallel` menggantung, bukan dipropagasi**
+  (`src/schedule.rs`). Thread yang unwind tak pernah melepas penghitung
+  suksesornya; suksesor menunggu `Condvar` selamanya dan `thread::scope` tak
+  pernah selesai. Kini guard `Drop` melepas suksesor saat unwind (mutex
+  terracuni ditoleransi) dan `scope` me-re-panic ke pemanggil.
+- **`World::spawn_at` di slot yang ada di free-list menerbitkan handle
+  duplikat** (`src/world.rs`): `spawn` berikutnya mem-pop slot yang sama dan
+  mengembalikan `Entity` **identik** dengan hasil `spawn_at`, sementara baris
+  komponen entity yang direstorasi menjadi yatim di archetype (masih ter-query,
+  `get` → `None`). Slot kini dikeluarkan dari free-list; slot hidup yang
+  ditimpa dibersihkan baris komponennya dulu. Memengaruhi `load_snapshot` ke
+  World yang pernah `despawn`.
+- **Parser JSON rekursif tanpa batas kedalaman** (`src/serialize.rs`): input
+  `[[[[…` ribuan tingkat meledakkan stack (abort proses) — DoS dari snapshot
+  tak tepercaya. Kini `None` di atas `MAX_JSON_DEPTH`. `Snapshot::from_json`
+  juga menolak `index` entity duplikat (dua entity di satu slot tak mungkin
+  direkonstruksi tanpa korupsi).
+- **`arke-postgres`: cache read-through + evolusi skema = kehilangan data.**
+  Baris cache dari deploy lama (kolom lebih sedikit) membuat `from_params`
+  gagal diam-diam → komponen tak termuat → `save_incremental` berikutnya
+  **menghapus barisnya**. Namespace cache kini `table@fingerprint(kolom)`
+  (FNV-1a atas nama/tipe/nullable), sehingga skema yang berubah otomatis
+  memakai namespace baru.
+- **`arke-postgres`: `stage_incremental` non-deterministik & jembatan
+  dimutasi sebelum commit.** Upsert/delete diiterasi dari `HashMap` (urutan
+  acak → alokasi pid & urutan kunci baris acak, melanggar STD-0005); `pid_of`
+  di-clear/diisi **sebelum** `tx.commit()`, sehingga tx yang gagal
+  meninggalkan pid hantu. Kini terurut (indeks, generation), jembatan dimutasi
+  pada salinan lokal dan dipromosikan setelah commit; pid entity baru
+  dialokasikan **dua-pass** sehingga relasi ke entity baru se-batch me-resolve
+  (dulu: NULL menggantung).
+- **`arke-postgres`: slot World terdaur-ulang mewarisi `pid` lama.** Jembatan
+  ber-kunci indeks: `despawn` + `spawn` di indeks sama membuat entity baru
+  menulis di atas baris DB entity lama (dan `Ref` di tabel lain kini menunjuk
+  entity yang salah). Jembatan & rekam kini ber-kunci `Entity` utuh.
+
 
 - **Crate baru `arke-mongo` 0.1.0** — adapter MongoDB dengan pemetaan **satu
   dokumen per entity** (komponen sebagai sub-dokumen di bawah `cmp`);

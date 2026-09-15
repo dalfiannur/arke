@@ -71,6 +71,23 @@ impl<T> From<arke::Entity> for Ref<T> {
     }
 }
 
+/// Mengemas sebuah [`arke::Entity`] (indeks + generation) menjadi satu `i64`
+/// untuk [`PgValue::Ref`]: `generation << 32 | index`. Dipakai kode hasil
+/// `#[derive(PgComponent)]`; store membongkarnya kembali saat memetakan
+/// Entity↔`pid`. Membawa generation membuat relasi ke entity yang sudah
+/// di-despawn (slot terdaur-ulang) tetap **basi**, bukan menunjuk entity baru
+/// di indeks yang sama.
+#[doc(hidden)]
+pub fn pack_entity(e: arke::Entity) -> i64 {
+    (i64::from(e.generation()) << 32) | i64::from(e.index())
+}
+
+/// Kebalikan [`pack_entity`].
+#[doc(hidden)]
+pub fn unpack_entity(packed: i64) -> arke::Entity {
+    arke::Entity::from_raw(packed as u32, (packed >> 32) as u32)
+}
+
 mod store;
 pub use store::{
     PgStore, StagedIncremental, StagedInsert, StagedSave, StagedUpdate, SyncStats, UpdateError,

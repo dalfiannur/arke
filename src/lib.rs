@@ -92,6 +92,10 @@ pub(crate) mod sealed {
     pub trait QueryTermSealed {}
     /// Penanda: hanya `arke` yang mengimpl [`crate::QueryFilter`].
     pub trait QueryFilterSealed {}
+    /// Penanda: hanya `arke` yang mengimpl [`crate::query::ReadOnlyQuery`].
+    pub trait ReadOnlyQuerySealed {}
+    /// Penanda term query baca-saja (`&T`/`Entity`), penyusun `ReadOnlyQuery`.
+    pub trait ReadOnlyTerm {}
 }
 
 pub use bundle::Bundle;
@@ -99,11 +103,11 @@ pub use command::{CommandBuffer, EntityCommands};
 pub use component::{Component, ComponentId};
 pub use entity::Entity;
 pub use error::EcsError;
-pub use query::{Access, QueryData, QueryFilter, QueryState, With, Without};
+pub use query::{Access, QueryData, QueryFilter, QueryState, ReadOnlyQuery, With, Without};
 pub use schedule::{Schedule, System};
 pub use serialize::{Serialize, Value};
 pub use snapshot::Snapshot;
-pub use world::World;
+pub use world::{World, WorldId};
 
 /// Derive macro `#[derive(Serialize)]` (RFC-0009). Berbagi nama dengan trait
 /// [`Serialize`]; `use arke::Serialize;` membawa keduanya.

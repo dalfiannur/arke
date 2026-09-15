@@ -1,18 +1,30 @@
 //! Komponen dan identitasnya (RFC-0002 §2).
 //!
-//! Setiap tipe `'static + Send` otomatis memenuhi syarat sebagai komponen —
-//! tidak ada derive atau registrasi manual yang diperlukan (invarian
+//! Setiap tipe `'static + Send + Sync` otomatis memenuhi syarat sebagai
+//! komponen — tidak ada derive atau registrasi manual yang diperlukan (invarian
 //! *ergonomis = cepat*). Identitas internal sebuah tipe komponen diwakili
 //! [`ComponentId`], yang diberikan otomatis saat komponen di-*insert* pertama
 //! kali ke sebuah `World`.
 
 /// Penanda untuk tipe yang dapat dipakai sebagai komponen.
 ///
-/// Diterapkan secara *blanket* ke semua tipe `'static + Send`. Batas `Send`
-/// menyiapkan paralelisme (Milestone M-2) tanpa perlu mengubah API kelak.
-pub trait Component: 'static + Send {}
+/// Diterapkan secara *blanket* ke semua tipe `'static + Send + Sync`. `Send`
+/// dibutuhkan `par_for_each` (chunk `&mut T` pindah thread); `Sync` dibutuhkan
+/// eksekutor paralel tingkat-sistem: dua sistem yang sama-sama **membaca** `T`
+/// tak berkonflik dan berjalan **bersamaan** di thread berbeda lewat `&T`, yang
+/// hanya sound bila `T: Sync`. Tipe `Send + !Sync` (mis. `Cell<u32>`) sengaja
+/// **bukan** komponen — interior-mutability tanpa sinkronisasi akan menjadi
+/// data race di jalur itu:
+///
+/// ```compile_fail
+/// use std::cell::Cell;
+/// let mut world = arke::World::new();
+/// let e = world.spawn();
+/// world.insert(e, Cell::new(0u32)); // Cell<u32>: !Sync → bukan Component
+/// ```
+pub trait Component: 'static + Send + Sync {}
 
-impl<T: 'static + Send> Component for T {}
+impl<T: 'static + Send + Sync> Component for T {}
 
 /// Identitas internal-proses sebuah tipe komponen (RFC-0002 §2).
 ///

@@ -56,8 +56,9 @@ struct EntityMeta {
 /// world.despawn(e);
 /// assert_eq!(world.get::<Health>(e), None);
 /// ```
-#[derive(Default)]
 pub struct World {
+    /// Identitas unik per-proses (lihat [`WorldId`]).
+    id: WorldId,
     entities: Vec<EntityMeta>,
     /// Indeks slot bebas, dikelola sebagai tumpukan LIFO agar alokasi
     /// deterministik (STD-0005).
@@ -69,10 +70,47 @@ pub struct World {
     resources: HashMap<TypeId, Box<dyn Any + Send>>,
 }
 
+/// Identitas **unik per-proses** sebuah [`World`] (RFC-0035 "pertanyaan
+/// terbuka"): handle [`Entity`] hanya bermakna di dalam World penerbitnya —
+/// dua World independen menerbitkan handle identik (`index` dense dari nol).
+/// Adapter persistensi memakai id ini untuk mendeteksi World yang berganti dan
+/// mereset jembatan `Entity↔pid`-nya, alih-alih diam-diam mencampur handle
+/// lintas-World. Bukan bagian keadaan (tak masuk snapshot); nilainya monoton
+/// naik per pembuatan World dan tak pernah dipakai ulang dalam satu proses.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
+pub struct WorldId(u64);
+
+impl WorldId {
+    fn next() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        WorldId(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+impl Default for World {
+    fn default() -> Self {
+        Self {
+            id: WorldId::next(),
+            entities: Vec::new(),
+            free: Vec::new(),
+            registry: ComponentRegistry::default(),
+            archetypes: Vec::new(),
+            serde: SerdeRegistry::default(),
+            resources: HashMap::new(),
+        }
+    }
+}
+
 impl World {
     /// Membuat `World` kosong.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Identitas unik per-proses World ini (lihat [`WorldId`]).
+    pub fn id(&self) -> WorldId {
+        self.id
     }
 
     /// Membuat sebuah entity baru tanpa komponen dan mengembalikan handle-nya.
@@ -591,14 +629,18 @@ impl World {
     /// Primitif *restore* untuk adapter persistensi (mis. `arke-postgres`):
     /// memungkinkan memuat kembali entity dengan **handle yang identik** dengan
     /// saat disimpan. Ditujukan untuk `World` kosong/segar — bila slot `index`
-    /// sudah terisi entity hidup, isinya **ditimpa**. Untuk pemakaian normal
-    /// gunakan [`World::spawn`].
+    /// sudah terisi entity hidup, entity lama itu **di-despawn** dulu (komponennya
+    /// dibuang, handle lamanya basi) lalu slot dipakai dengan `generation` yang
+    /// diminta. Slot yang sedang ada di free-list dikeluarkan darinya, sehingga
+    /// `spawn` berikutnya tak pernah menerbitkan handle yang sama. Untuk
+    /// pemakaian normal gunakan [`World::spawn`].
     pub fn spawn_at(&mut self, index: u32, generation: u32) -> Entity {
         self.allocate_at(index, generation)
     }
 
     /// Membuat entity pada slot `index` dengan `generation` tertentu (untuk
-    /// restore). Slot antara diisi placeholder mati.
+    /// restore). Slot antara diisi placeholder mati (**tidak** masuk free-list:
+    /// snapshot berikutnya bisa saja mengisinya — sama seperti sebelumnya).
     fn allocate_at(&mut self, index: u32, generation: u32) -> Entity {
         let idx = index as usize;
         while self.entities.len() <= idx {
@@ -607,6 +649,19 @@ impl World {
                 alive: false,
                 location: None,
             });
+        }
+        // Slot hidup → bersihkan baris komponennya dulu; tanpa ini baris lama
+        // menjadi yatim di archetype (masih ter-query, `fix_swapped` bisa
+        // menautkannya ke entity lain).
+        if let Some(loc) = self.entities[idx].location.take() {
+            let moved = self.archetypes[loc.archetype].swap_remove_row(loc.row);
+            self.fix_swapped(moved, loc.archetype, loc.row);
+        }
+        // Slot mati bekas despawn ada di free-list; keluarkan agar `spawn` tak
+        // mendaur-ulangnya menjadi handle duplikat. O(free) — jalur restore, bukan
+        // jalur panas.
+        if !self.entities[idx].alive {
+            self.free.retain(|&i| i != index);
         }
         self.entities[idx] = EntityMeta {
             generation,

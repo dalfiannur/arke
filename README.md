@@ -37,7 +37,12 @@ Dua pendirian yang membedakannya:
 > trait ekstensi **di-*seal*** ([RFC-0026](docs/RFC/RFC-0026-seal-extension-traits.md)),
 > `query_pair`/`query_pair_ref` **usang** → `QueryData` generik
 > ([RFC-0027](docs/RFC/RFC-0027-deprecate-query-pair.md)), kebijakan **MSRV/semver**
-> + CHANGELOG ([RFC-0028](docs/RFC/RFC-0028-changelog-msrv-semver-policy.md)). Lihat
+> + CHANGELOG ([RFC-0028](docs/RFC/RFC-0028-changelog-msrv-semver-policy.md)).
+> **0.7.0 (audit soundness/stabilitas/keamanan)**: `Component` kini
+> `Send + Sync` (dua sistem pembaca berjalan bersamaan lewat `&T`), jalur
+> `&World` berbagi dibatasi query **baca-saja** (`ReadOnlyQuery` — tak ada lagi
+> `&mut T` dari `&World` di kode aman), panic sistem paralel dipropagasi (bukan
+> hang), parser JSON berbatas kedalaman, `World::id()`. Lihat
 > [`CHANGELOG.md`](CHANGELOG.md).
 > **Jalur pengguna bebas `unsafe`** (STD-0004); `unsafe` internal **terkurung &
 > diverifikasi miri** di CI (menopang paralelisme tingkat-sistem, hasil identik

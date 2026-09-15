@@ -109,11 +109,16 @@ let n = store.query::<Meeting>().filter(f)
 ### World per-request (REST/axum)
 
 `PgStore` memegang jembatan pid↔entity dan rekam `save_incremental` yang
-**per-World**, sehingga metode baca/tulisnya `&mut self`. Jangan dibagi lewat
-`Mutex` antar-handler: simpan satu store **template** (sudah `register` +
-`migrate`) di state, lalu **`fork()`** per request — pool (`Arc`), registry, dan
-cache dibagi, jembatannya kosong. Id publik = kolom `#[pg(unique)]` (mis. UUID
-string), bukan `Entity` (ephemeral) maupun `pid` (integer sekuensial).
+**per-World**, sehingga metode baca/tulisnya `&mut self`. Satu store melayani
+**satu `World`**: bila `World` lain datang (dikenali lewat `World::id()`),
+jembatan dan rekamnya di-reset — handle `Entity` tak bermakna lintas-World.
+Jangan dibagi lewat `Mutex` antar-handler: simpan satu store **template**
+(sudah `register` + `migrate`) di state, lalu **`fork()`** per request — pool
+(`Arc`), registry, dan cache dibagi, jembatannya kosong. Beberapa
+`query().load*()` ke satu `World` bersifat **aditif** (pid yang sudah termuat
+di-refresh di tempat, bukan digandakan). Id publik = kolom `#[pg(unique)]`
+(mis. UUID string), bukan `Entity` (ephemeral) maupun `pid` (integer
+sekuensial).
 
 ```rust,no_run
 # use arke::World;

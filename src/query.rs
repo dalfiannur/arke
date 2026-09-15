@@ -112,13 +112,31 @@ pub struct QueryState {
 ///     fn access() -> arke::Access {
 ///         arke::Access::new()
 ///     }
-///     fn each_cached<F: arke::QueryFilter>(
+///     unsafe fn each_cached_unchecked<F: arke::QueryFilter>(
 ///         _world: &arke::World,
 ///         _state: &mut arke::QueryState,
 ///         _f: impl FnMut(()),
 ///     ) {
 ///     }
 /// }
+/// ```
+///
+/// # Jalur `&World` hanya untuk query baca-saja
+///
+/// Metode yang menerima `&World` **berbagi** (`each_filtered_shared`,
+/// `each_cached_shared`) dibatasi `Self: ReadOnlyQuery` — tanpa itu, kode aman
+/// dapat membentuk `&mut T` dari `&World` yang beralias dengan `&T` yang masih
+/// hidup. Query dengan term `&mut T` hanya punya jalur `&mut World`:
+///
+/// ```compile_fail
+/// use arke::{QueryData, World};
+/// struct Pos(i32);
+/// let mut world = World::new();
+/// let e = world.spawn();
+/// world.insert(e, Pos(1));
+/// let r: &Pos = world.get::<Pos>(e).unwrap();
+/// <&mut Pos>::each_filtered_shared::<()>(&world, |p| p.0 = 99); // ditolak
+/// assert_eq!(r.0, 99);
 /// ```
 pub trait QueryData: crate::sealed::QueryDataSealed {
     /// Item yang dihasilkan per entity yang cocok, meminjam dari `World`.
@@ -129,29 +147,74 @@ pub trait QueryData: crate::sealed::QueryDataSealed {
 
     /// Menerapkan `f` pada setiap entity yang cocok **dan** lolos filter `F`,
     /// memakai `state` sebagai cache archetype yang di-scan **inkremental**
-    /// (RFC-0017). Ini implementasi inti.
+    /// (RFC-0017), lewat `&World` **berbagi**. Ini implementasi inti; jalur
+    /// publik yang aman adalah [`Self::each_cached`] (`&mut World`) dan
+    /// [`Self::each_cached_shared`] (`&World`, baca-saja).
     ///
     /// Alur: resolve `ComponentId` (bila komponen fetch/`With` belum terdaftar,
     /// return tanpa memajukan `scanned`) → scan `archetype[state.scanned..]`,
     /// tambahkan yang cocok ke `state.matched` → iterasi **hanya**
     /// `state.matched`.
-    fn each_cached<F: QueryFilter>(
+    ///
+    /// # Safety
+    ///
+    /// Untuk setiap term `&mut T` pada `Self`, **tak boleh ada** akses lain
+    /// (baca maupun tulis) ke kolom `T` yang hidup selama pemanggilan — termasuk
+    /// `&T` hasil [`World::get`] yang masih dipegang, atau query lain yang
+    /// berjalan bersamaan di thread lain. Penjadwal ([`crate::Schedule`])
+    /// memenuhinya lewat graf-konflik (RFC-0016/0018); `&mut World` memenuhinya
+    /// lewat eksklusivitas. Query tanpa term `&mut` selalu aman (lihat
+    /// [`ReadOnlyQuery`]).
+    #[doc(hidden)]
+    unsafe fn each_cached_unchecked<F: QueryFilter>(
         world: &World,
         state: &mut QueryState,
         f: impl FnMut(Self::Item<'_>),
     );
 
     /// Menerapkan `f` pada setiap entity yang cocok **dan** lolos filter `F`,
-    /// lewat `&World` **berbagi** (RFC-0016). Wrapper sekali-pakai atas
-    /// [`Self::each_cached`] dengan [`QueryState`] baru (memindai semua).
-    fn each_filtered_shared<F: QueryFilter>(world: &World, f: impl FnMut(Self::Item<'_>)) {
-        let mut state = QueryState::default();
-        Self::each_cached::<F>(world, &mut state, f);
+    /// memakai `state` sebagai cache archetype inkremental (RFC-0017), dari
+    /// `&mut World` eksklusif.
+    fn each_cached<F: QueryFilter>(
+        world: &mut World,
+        state: &mut QueryState,
+        f: impl FnMut(Self::Item<'_>),
+    ) {
+        // SAFETY: `&mut World` eksklusif → tak ada akses lain ke kolom mana pun.
+        unsafe { Self::each_cached_unchecked::<F>(&*world, state, f) }
     }
 
-    /// Seperti [`Self::each_filtered_shared`] tetapi dari `&mut World` eksklusif.
+    /// Seperti [`Self::each_cached`] tetapi lewat `&World` **berbagi** — hanya
+    /// untuk query **baca-saja** ([`ReadOnlyQuery`]).
+    fn each_cached_shared<F: QueryFilter>(
+        world: &World,
+        state: &mut QueryState,
+        f: impl FnMut(Self::Item<'_>),
+    ) where
+        Self: ReadOnlyQuery,
+    {
+        // SAFETY: `ReadOnlyQuery` menjamin tak ada term `&mut T` → hanya
+        // membentuk `&T`, yang selalu boleh beralias.
+        unsafe { Self::each_cached_unchecked::<F>(world, state, f) }
+    }
+
+    /// Menerapkan `f` pada setiap entity yang cocok **dan** lolos filter `F`,
+    /// lewat `&World` **berbagi** (RFC-0016) — hanya untuk query **baca-saja**
+    /// ([`ReadOnlyQuery`]). Wrapper sekali-pakai atas
+    /// [`Self::each_cached_shared`] dengan [`QueryState`] baru (memindai semua).
+    fn each_filtered_shared<F: QueryFilter>(world: &World, f: impl FnMut(Self::Item<'_>))
+    where
+        Self: ReadOnlyQuery,
+    {
+        let mut state = QueryState::default();
+        Self::each_cached_shared::<F>(world, &mut state, f);
+    }
+
+    /// Seperti [`Self::each_filtered_shared`] tetapi dari `&mut World` eksklusif
+    /// (tersedia untuk query dengan term `&mut T` juga).
     fn each_filtered<F: QueryFilter>(world: &mut World, f: impl FnMut(Self::Item<'_>)) {
-        Self::each_filtered_shared::<F>(&*world, f);
+        let mut state = QueryState::default();
+        Self::each_cached::<F>(world, &mut state, f);
     }
 
     /// Menerapkan `f` pada setiap entity yang cocok (tanpa filter).
@@ -159,6 +222,17 @@ pub trait QueryData: crate::sealed::QueryDataSealed {
         Self::each_filtered::<()>(world, f);
     }
 }
+
+/// Penanda: query **tanpa term `&mut T`** — semua term `&T`/[`Entity`]
+/// (RFC-0016). Hanya query seperti ini yang boleh berjalan lewat `&World`
+/// berbagi dari kode aman ([`QueryData::each_filtered_shared`]). Tertutup;
+/// diimpl `arke` untuk `&T`, `Entity`, dan tuple yang seluruh termnya baca-saja.
+pub trait ReadOnlyQuery: QueryData + crate::sealed::ReadOnlyQuerySealed {}
+
+impl<T: Component> crate::sealed::ReadOnlyQuerySealed for &T {}
+impl<T: Component> ReadOnlyQuery for &T {}
+impl crate::sealed::ReadOnlyQuerySealed for Entity {}
+impl ReadOnlyQuery for Entity {}
 
 impl<T: Component> crate::sealed::QueryDataSealed for &T {}
 impl<T: Component> QueryData for &T {
@@ -168,7 +242,11 @@ impl<T: Component> QueryData for &T {
         Access::new().with_read::<T>()
     }
 
-    fn each_cached<F: QueryFilter>(world: &World, state: &mut QueryState, mut f: impl FnMut(&T)) {
+    unsafe fn each_cached_unchecked<F: QueryFilter>(
+        world: &World,
+        state: &mut QueryState,
+        mut f: impl FnMut(&T),
+    ) {
         let Some(cid) = world.component_id::<T>() else {
             return;
         };
@@ -202,7 +280,7 @@ impl<T: Component> QueryData for &mut T {
         Access::new().with_write::<T>()
     }
 
-    fn each_cached<F: QueryFilter>(
+    unsafe fn each_cached_unchecked<F: QueryFilter>(
         world: &World,
         state: &mut QueryState,
         mut f: impl FnMut(&mut T),
@@ -240,7 +318,7 @@ impl QueryData for Entity {
         Access::new() // handle entity: tak baca/tulis komponen (RFC-0020)
     }
 
-    fn each_cached<F: QueryFilter>(
+    unsafe fn each_cached_unchecked<F: QueryFilter>(
         world: &World,
         state: &mut QueryState,
         mut f: impl FnMut(Entity),
@@ -307,6 +385,7 @@ pub trait QueryTerm: crate::sealed::QueryTermSealed {
 }
 
 impl<T: Component> crate::sealed::QueryTermSealed for &T {}
+impl<T: Component> crate::sealed::ReadOnlyTerm for &T {}
 #[allow(private_interfaces)]
 impl<T: Component> QueryTerm for &T {
     type Item<'w> = &'w T;
@@ -354,9 +433,9 @@ impl<T: Component> QueryTerm for &mut T {
             .as_any()
             .downcast_ref::<TypedColumn<T>>()
             .expect("tipe kolom tak cocok");
-        // SAFETY: term query mengakses kolom distinct (cek-alias) dan penjadwal
-        // menjamin akses disjoint → tak ada peminjaman lain ke data kolom ini
-        // (RFC-0016). Diverifikasi miri.
+        // SAFETY: hanya dipanggil dari `each_cached_unchecked`, yang kontraknya
+        // menjamin tak ada akses lain ke kolom `T` selama pemanggilan; term query
+        // sendiri mengakses kolom distinct (cek-alias). Diverifikasi miri.
         unsafe { typed.data_mut_shared() }.as_mut_slice()
     }
     fn get<'a>(fetch: &'a mut &mut [T], i: usize) -> &'a mut T {
@@ -365,6 +444,7 @@ impl<T: Component> QueryTerm for &mut T {
 }
 
 impl crate::sealed::QueryTermSealed for Entity {}
+impl crate::sealed::ReadOnlyTerm for Entity {}
 #[allow(private_interfaces)]
 impl QueryTerm for Entity {
     type Item<'w> = Entity;
@@ -514,6 +594,8 @@ fn filter_matches(archetype: &Archetype, with: &[ComponentId], without: &[Compon
 macro_rules! impl_query_tuple {
     ($($T:ident $req:ident $var:ident),+) => {
         impl<$($T: QueryTerm),+> crate::sealed::QueryDataSealed for ($($T,)+) {}
+        impl<$($T: QueryTerm + crate::sealed::ReadOnlyTerm),+> crate::sealed::ReadOnlyQuerySealed for ($($T,)+) {}
+        impl<$($T: QueryTerm + crate::sealed::ReadOnlyTerm),+> ReadOnlyQuery for ($($T,)+) {}
         impl<$($T: QueryTerm),+> QueryData for ($($T,)+) {
             type Item<'w> = ($($T::Item<'w>,)+);
 
@@ -523,7 +605,7 @@ macro_rules! impl_query_tuple {
                 access
             }
 
-            fn each_cached<Fil: QueryFilter>(
+            unsafe fn each_cached_unchecked<Fil: QueryFilter>(
                 world: &World,
                 state: &mut QueryState,
                 mut f: impl FnMut(Self::Item<'_>),
@@ -640,7 +722,7 @@ mod tests {
 
         let mut state = QueryState::default();
         let mut sum = 0;
-        <&Pos>::each_cached::<()>(&world, &mut state, |p| sum += p.0);
+        <&Pos>::each_cached::<()>(&mut world, &mut state, |p| sum += p.0);
         assert_eq!(sum, 1);
 
         // Entity baru dengan komponen berbeda → archetype {Pos, Vel} baru.
@@ -649,7 +731,7 @@ mod tests {
         world.insert(e2, Vel(0));
 
         let mut sum = 0;
-        <&Pos>::each_cached::<()>(&world, &mut state, |p| sum += p.0);
+        <&Pos>::each_cached::<()>(&mut world, &mut state, |p| sum += p.0);
         assert_eq!(sum, 11); // archetype baru tertangkap scan inkremental
     }
 
@@ -669,13 +751,13 @@ mod tests {
 
         let mut lewat_cache = Vec::new();
         let mut state = QueryState::default();
-        <&Pos>::each_cached::<()>(&world, &mut state, |p| lewat_cache.push(p.0));
+        <&Pos>::each_cached::<()>(&mut world, &mut state, |p| lewat_cache.push(p.0));
 
         assert_eq!(lewat_each, lewat_cache);
 
         // Memakai ulang QueryState yang sama → hasil identik & konsisten.
         let mut lagi = Vec::new();
-        <&Pos>::each_cached::<()>(&world, &mut state, |p| lagi.push(p.0));
+        <&Pos>::each_cached::<()>(&mut world, &mut state, |p| lagi.push(p.0));
         assert_eq!(lewat_each, lagi);
     }
 

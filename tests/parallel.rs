@@ -50,3 +50,29 @@ fn par_for_each_deterministik_antar_run() {
     }
     assert_eq!(run(), run());
 }
+
+/// Panic di satu sistem paralel harus **dipropagasi** ke pemanggil
+/// `run_parallel`, bukan menggantung: suksesor yang menunggu pendahulunya
+/// selesai wajib dibangunkan meski pendahulu itu unwind.
+#[test]
+fn panic_sistem_paralel_dipropagasi_bukan_hang() {
+    use arke::{Schedule, System};
+    use std::time::Duration;
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut world = World::new();
+        let e = world.spawn();
+        world.insert(e, N(0));
+        let mut s = Schedule::new();
+        s.add(System::each::<&mut N>(|_| panic!("boom")));
+        s.add(System::each::<&N>(|_| {})); // berkonflik → menunggu sistem #0
+        let r =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.run_parallel(&mut world)));
+        let _ = tx.send(r.is_err());
+    });
+    match rx.recv_timeout(Duration::from_secs(10)) {
+        Ok(panicked) => assert!(panicked, "run_parallel harus re-panic"),
+        Err(_) => panic!("run_parallel menggantung setelah panic di sistem"),
+    }
+}

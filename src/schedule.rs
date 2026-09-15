@@ -79,7 +79,12 @@ impl System {
         let mut state = QueryState::default();
         Self::with(
             Runner::Shared(Box::new(move |world: &World| {
-                Q::each_cached::<()>(world, &mut state, &mut f);
+                // SAFETY: runner `Shared` hanya dijalankan (a) serial dari
+                // `&mut World` eksklusif, atau (b) oleh `run_graph_shared`, yang
+                // menjamin sistem berkonflik (berbagi komponen yang ditulis) tak
+                // pernah berjalan bersamaan (RFC-0018) — memenuhi kontrak
+                // `each_cached_unchecked`.
+                unsafe { Q::each_cached_unchecked::<()>(world, &mut state, &mut f) };
             })),
             Q::access(),
         )
@@ -94,7 +99,8 @@ impl System {
         let mut state = QueryState::default();
         Self::with(
             Runner::Shared(Box::new(move |world: &World| {
-                Q::each_cached::<F>(world, &mut state, &mut f);
+                // SAFETY: lihat `System::each`.
+                unsafe { Q::each_cached_unchecked::<F>(world, &mut state, &mut f) };
             })),
             Q::access(),
         )
@@ -111,7 +117,8 @@ impl System {
         let mut state = QueryState::default();
         Self::with(
             Runner::SharedCmd(Box::new(move |world: &World, cmds: &mut CommandBuffer| {
-                Q::each_cached::<()>(world, &mut state, |item| f(item, cmds));
+                // SAFETY: lihat `System::each`.
+                unsafe { Q::each_cached_unchecked::<()>(world, &mut state, |item| f(item, cmds)) };
             })),
             Q::access(),
         )
@@ -214,6 +221,32 @@ fn run_graph_shared(systems: &mut [System], world: &World) {
     let pending = Mutex::new(pending);
     let signal = Condvar::new();
 
+    /// Melepas suksesor sistem `i` saat drop — **termasuk saat unwind**. Tanpa
+    /// ini, panic di satu sistem membuat suksesornya menunggu `Condvar` selamanya
+    /// dan `thread::scope` tak pernah selesai (deadlock alih-alih propagasi).
+    struct ReleaseOnDrop<'a> {
+        i: usize,
+        pending: &'a Mutex<Vec<usize>>,
+        signal: &'a Condvar,
+        successors: &'a [Vec<usize>],
+    }
+    impl Drop for ReleaseOnDrop<'_> {
+        fn drop(&mut self) {
+            // Mutex bisa terracuni oleh thread lain yang panic saat memegangnya;
+            // datanya (penghitung) tetap konsisten karena tiap kritikal-seksi
+            // hanya aritmetika tanpa titik panic.
+            let mut guard = self
+                .pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for &s in &self.successors[self.i] {
+                guard[s] -= 1;
+            }
+            drop(guard);
+            self.signal.notify_all();
+        }
+    }
+
     std::thread::scope(|scope| {
         for (i, system) in systems.iter_mut().enumerate() {
             let pending = &pending;
@@ -223,21 +256,25 @@ fn run_graph_shared(systems: &mut [System], world: &World) {
             scope.spawn(move || {
                 // Tunggu semua pendahulu berkonflik selesai.
                 {
-                    let mut guard = pending.lock().unwrap();
+                    let mut guard = pending
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     while guard[i] > 0 {
-                        guard = signal.wait(guard).unwrap();
+                        guard = signal
+                            .wait(guard)
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
                     }
                 }
+                // Suksesor dilepas saat guard ini drop — juga bila `run_shared`
+                // panic, sehingga panic dipropagasi oleh `scope`, bukan menggantung.
+                let _release = ReleaseOnDrop {
+                    i,
+                    pending,
+                    signal,
+                    successors,
+                };
                 // Jalankan sistem (thread ini pemilik tunggal `&mut System`).
                 system.run_shared(sync_world.0);
-                // Tandai selesai; rilis penghitung suksesor.
-                {
-                    let mut guard = pending.lock().unwrap();
-                    for &s in &successors[i] {
-                        guard[s] -= 1;
-                    }
-                }
-                signal.notify_all();
             });
         }
     });

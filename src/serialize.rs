@@ -213,6 +213,7 @@ impl Value {
         let mut parser = Parser {
             chars: text.chars().collect(),
             pos: 0,
+            depth: 0,
         };
         let value = parser.parse_value()?;
         parser.skip_ws();
@@ -239,9 +240,17 @@ fn write_json_string(s: &str, out: &mut String) {
     out.push('"');
 }
 
+/// Batas kedalaman sarang `[`/`{` yang diterima [`Value::from_json`]. Parser
+/// bersifat rekursif; tanpa batas, input tak tepercaya berupa `[[[[…` ribuan
+/// tingkat meledakkan stack (abort proses) — DoS. 128 jauh melampaui kebutuhan
+/// snapshot (`entities[].components{}` = 3–4 tingkat + kedalaman komponen).
+pub const MAX_JSON_DEPTH: usize = 128;
+
 struct Parser {
     chars: Vec<char>,
     pos: usize,
+    /// Kedalaman sarang saat ini (list/map), dibatasi [`MAX_JSON_DEPTH`].
+    depth: usize,
 }
 
 impl Parser {
@@ -351,7 +360,27 @@ impl Parser {
         }
     }
 
+    /// Masuk satu tingkat sarang; `None` bila melampaui [`MAX_JSON_DEPTH`].
+    fn enter(&mut self) -> Option<()> {
+        if self.depth >= MAX_JSON_DEPTH {
+            return None;
+        }
+        self.depth += 1;
+        Some(())
+    }
+
+    fn leave(&mut self) {
+        self.depth -= 1;
+    }
+
     fn parse_list(&mut self) -> Option<Value> {
+        self.enter()?;
+        let out = self.parse_list_inner();
+        self.leave();
+        out
+    }
+
+    fn parse_list_inner(&mut self) -> Option<Value> {
         self.bump(); // '['
         let mut items = Vec::new();
         self.skip_ws();
@@ -371,6 +400,13 @@ impl Parser {
     }
 
     fn parse_map(&mut self) -> Option<Value> {
+        self.enter()?;
+        let out = self.parse_map_inner();
+        self.leave();
+        out
+    }
+
+    fn parse_map_inner(&mut self) -> Option<Value> {
         self.bump(); // '{'
         let mut entries = Vec::new();
         self.skip_ws();

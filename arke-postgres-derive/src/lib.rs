@@ -313,23 +313,23 @@ fn field_sql(f: &Field, idx: usize) -> Result<FieldSql, String> {
     // Relasi `Entity`/`Ref<T>` (+ `Option<…>`) → SATU kolom `<name>_id` menyimpan
     // **pid** entity yang dirujuk (RFC-0034 Am.3; kolom `_gen` dihapus). TANPA FK
     // (marker `entity_ref`): integritas by-construction; ref menggantung → NULL saat
-    // baca. `PgValue::Ref(index)` di-map store: index↔pid di batas DB. `from_params`
-    // murni — world hasil-muat selalu segar (`generation == 0`). `Ref<T>` = relasi
-    // bertipe (token `RelRef<T>`).
+    // baca. `PgValue::Ref(packed)` membawa `Entity` utuh (indeks + generation,
+    // lihat `arke_postgres::pack_entity`) — store memetakan Entity↔pid di batas
+    // DB; `from_params` murni. `Ref<T>` = relasi bertipe (token `RelRef<T>`).
     if is_entity_ty(&f.ty) || ref_target(&f.ty).is_some() {
         let nullable = f.ty.starts_with("Option<");
         let is_ref = ref_target(&f.ty).is_some();
         let column = column_def_ref(&format!("{name}_id"), nullable);
         // Akses `Entity` dari nilai terikat `e` (`&Ref<T>` → `.entity()`; `&Entity` apa
-        // adanya) & dari field `self.name`. Rekonstruksi: `Entity` lokal (gen 0) →
-        // bungkus `Ref::new` bila relasi bertipe (RFC-0032).
-        let acc_e = if is_ref { "e.entity()" } else { "e" };
+        // adanya) & dari field `self.name`. Rekonstruksi: `unpack_entity` (indeks +
+        // generation) → bungkus `Ref::new` bila relasi bertipe (RFC-0032).
+        let acc_e = if is_ref { "e.entity()" } else { "*e" };
         let acc_self = if is_ref {
             format!("self.{name}.entity()")
         } else {
             format!("self.{name}")
         };
-        let ent = "::arke::Entity::from_raw(*i as u32, 0)";
+        let ent = "::arke_postgres::unpack_entity(*i)";
         let mk = if is_ref {
             format!("::arke_postgres::Ref::new({ent})")
         } else {
@@ -338,7 +338,7 @@ fn field_sql(f: &Field, idx: usize) -> Result<FieldSql, String> {
         let (to_param, from_field) = if nullable {
             (
                 format!(
-                    "match &self.{name} {{ ::core::option::Option::Some(e) => ::arke_postgres::PgValue::Ref({acc_e}.index() as i64), ::core::option::Option::None => ::arke_postgres::PgValue::Null }}, "
+                    "match &self.{name} {{ ::core::option::Option::Some(e) => ::arke_postgres::PgValue::Ref(::arke_postgres::pack_entity({acc_e})), ::core::option::Option::None => ::arke_postgres::PgValue::Null }}, "
                 ),
                 format!(
                     "{name}: match values.get({idx}) {{ \
@@ -349,7 +349,9 @@ fn field_sql(f: &Field, idx: usize) -> Result<FieldSql, String> {
             )
         } else {
             (
-                format!("::arke_postgres::PgValue::Ref({acc_self}.index() as i64), "),
+                format!(
+                    "::arke_postgres::PgValue::Ref(::arke_postgres::pack_entity({acc_self})), "
+                ),
                 format!(
                     "{name}: match values.get({idx}) {{ \
                         ::core::option::Option::Some(::arke_postgres::PgValue::Ref(i)) => {mk}, \

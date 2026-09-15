@@ -599,7 +599,11 @@ impl<'a, T: PgComponent> Query<'a, T> {
             .collect();
 
         let store = self.store;
-        store.reset_world_bridge();
+        // Muat **aditif**: jembatan pid↔entity tidak di-reset, sehingga beberapa
+        // `load` ke satu World (pola per-request: `fork()` → beberapa query →
+        // `save_incremental`) saling melengkapi; pid yang sudah termuat di-refresh
+        // di tempat (`materialize`). Satu store ↔ satu World; untuk World baru
+        // pakai `fork()`.
         // Target dulu (RFC-0034 Am.3): entity utama me-resolve relasinya ke target
         // yang sudah ter-materialize di `entity_of`. Filter-saja (tanpa target) →
         // relasi utama menggantung (handle sentinel), entity tetap termuat.
@@ -739,7 +743,7 @@ impl<'a> PathLoad<'a> {
         }
 
         let store = self.store;
-        store.reset_world_bridge();
+        // Muat aditif (jembatan tak di-reset) — lihat `Query::load_pids`.
         // Muat **terdalam-dulu** (RFC-0034 Am.3): tiap entity me-resolve relasi ke
         // hop berikutnya yang sudah ter-materialize di `entity_of`; root dimuat
         // terakhir agar `leader`/dst me-resolve. `n` = jumlah entity **root**.
@@ -778,7 +782,7 @@ impl<'a> Recursive<'a> {
     pub fn max_depth(self, depth: u32) -> RecursiveLoad<'a> {
         // Seed = `pid` root (RFC-0034 Am.3); root harus ada di working-set. Hitung
         // sebelum memindah `self.store` ke struct.
-        let root_pid = self.store.pid_for_index(self.root.index()).unwrap_or(0);
+        let root_pid = self.store.pid_of(self.root).unwrap_or(0);
         let sql = renumber(&recursive_sql(self.table, self.rel_column, self.dir));
         RecursiveLoad {
             store: self.store,
@@ -802,7 +806,8 @@ impl<'a> RecursiveLoad<'a> {
     /// Jalankan CTE `WITH RECURSIVE` & materialisasi entity hasil ke `world`.
     /// Mengembalikan jumlah entity dimuat.
     pub async fn load(self, world: &mut World) -> Result<usize, sqlx::Error> {
-        self.store.reset_world_bridge();
+        // Muat aditif: root sudah ada di working-set (seed pid diambil dari
+        // jembatan) dan di-refresh di tempat, bukan digandakan.
         Ok(self
             .store
             .load_by_query(self.sql, self.params, world)

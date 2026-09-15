@@ -284,14 +284,18 @@ fn ref_bertipe_kolom_token_dan_round_trip() {
     let _: Field<RefHolder, RelRef<RefTarget>> = RefHolder::a();
     let _: Field<RefHolder, RelRef<RefTarget>> = RefHolder::b();
 
-    // Round-trip tanpa DB: `Ref` menyimpan **indeks** (5); generasi hilang → gen 0.
+    // Round-trip tanpa DB: `Ref` mengemas **indeks + generation** (`generation
+    // << 32 | index`) → handle utuh kembali, relasi ke slot terdaur-ulang basi.
     let e = arke::Entity::from_raw(5, 2);
     let h = RefHolder {
         a: arke_postgres::Ref::new(e),
         b: None,
     };
-    assert_eq!(h.to_params(), vec![PgValue::Ref(5), PgValue::Null]);
+    assert_eq!(
+        h.to_params(),
+        vec![PgValue::Ref((2i64 << 32) | 5), PgValue::Null]
+    );
     let back = RefHolder::from_params(&h.to_params()).unwrap();
-    assert_eq!(back.a.entity(), arke::Entity::from_raw(5, 0));
+    assert_eq!(back.a.entity(), e);
     assert_eq!(back.b, None);
 }

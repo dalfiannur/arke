@@ -80,7 +80,7 @@ fn arke_iter2() {
     let mut state = QueryState::default();
     bench("arke", N as u64, || {
         let mut sum = 0u64;
-        <(&mut Position, &Velocity)>::each_cached::<()>(&w, &mut state, |(p, v)| {
+        <(&mut Position, &Velocity)>::each_cached::<()>(&mut w, &mut state, |(p, v)| {
             p.0 += v.0;
             sum = sum.wrapping_add(p.0 as u64);
         });

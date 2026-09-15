@@ -14,7 +14,7 @@ include = ["/src", "/Cargo.toml", "/README.md", "/LICENSE-MIT"]
 
 # Adapter: BOLEH punya dependensi (di luar STD-0003 yang mengikat core `arke`).
 [dependencies]
-arke = { version = "0.6.1", path = ".." }
+arke = { version = "0.7.0", path = ".." }
 # `bson` dipakai lewat re-export `mongodb::bson` agar versi tak pernah skew.
 mongodb = "3.8"
 # `TryStreamExt` untuk iterasi `Cursor` pada `load`.

@@ -79,9 +79,14 @@ async fn read_through_hit_dan_invalidasi_tak_basi() {
         .collect();
     store.save(&world).await.unwrap(); // clear cache (kosong)
 
+    // Pembaca memakai `fork()` (pool + cache sama, jembatan sendiri): `store`
+    // tetap tertaut ke `world` untuk `save_incremental` di bawah — satu store
+    // melayani satu World (0.16: World lain → jembatan & rekam di-reset).
+    let mut reader = store.fork();
+
     // Muat #1 → semua miss (isi cache).
     let mut w1 = World::new();
-    store.load(&mut w1).await.unwrap();
+    reader.load(&mut w1).await.unwrap();
     assert_eq!(cache.hits.load(Ordering::Relaxed), 0);
     assert!(cache.misses.load(Ordering::Relaxed) >= 3);
     assert_eq!(w1.get::<Coin>(ids[1]), Some(&Coin { value: 10 }));
@@ -89,7 +94,7 @@ async fn read_through_hit_dan_invalidasi_tak_basi() {
     // Muat #2 → semua HIT (dari cache), data tetap benar.
     let h0 = cache.hits.load(Ordering::Relaxed);
     let mut w2 = World::new();
-    store.load(&mut w2).await.unwrap();
+    reader.load(&mut w2).await.unwrap();
     assert!(
         cache.hits.load(Ordering::Relaxed) >= h0 + 3,
         "muat kedua harus hit"
@@ -105,7 +110,7 @@ async fn read_through_hit_dan_invalidasi_tak_basi() {
     }
     store.save_incremental(&world).await.unwrap();
     let mut w3 = World::new();
-    store.load(&mut w3).await.unwrap();
+    reader.load(&mut w3).await.unwrap();
     assert_eq!(
         w3.get::<Coin>(ids[1]),
         Some(&Coin { value: 999 }),

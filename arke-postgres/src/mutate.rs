@@ -128,9 +128,7 @@ impl<'a, T: PgComponent> DeleteWhere<'a, T> {
         let (sql, params) = self.build();
         let pids = run_returning_pids(tx, &sql, &params).await?;
         // Entity hilang seluruhnya → invalidate di tiap tabel komponen.
-        for table in self.store.tables() {
-            self.store.invalidate_cache(table, &pids).await;
-        }
+        self.store.invalidate_all_tables(&pids).await;
         Ok(pids.len() as u64)
     }
 }

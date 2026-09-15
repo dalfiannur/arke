@@ -10,7 +10,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use arke::{Component, Entity, QueryData, World};
+use arke::{Component, Entity, QueryData, World, WorldId};
 use sqlx::{
     PgConnection, PgPool, Postgres, Row, postgres::PgArguments, postgres::PgPoolOptions,
     query::Query,
@@ -19,10 +19,13 @@ use sqlx::{
 use crate::tx::PgTx;
 
 use crate::cache::{ComponentCache, decode_row, encode_row};
-use crate::{ColumnDef, IndexDef, PgComponent, PgType, PgValue, create_table_sql_from};
+use crate::{
+    ColumnDef, IndexDef, PgComponent, PgType, PgValue, create_table_sql_from, pack_entity,
+    unpack_entity,
+};
 
-/// Satu baris komponen yang di-dump: `(entity_id, nilai-kolom)`.
-type ComponentRow = (i64, Vec<PgValue>);
+/// Satu baris komponen yang di-dump: `(entity, nilai-kolom)`.
+type ComponentRow = (Entity, Vec<PgValue>);
 
 /// Indeks sentinel untuk relasi **menggantung** (target tak ikut ter-muat, RFC-0034
 /// Am.3): handle `Entity::from_raw(DANGLING_INDEX, 0)` tak akan me-resolve di World
@@ -30,14 +33,21 @@ type ComponentRow = (i64, Vec<PgValue>);
 /// target tak dimuat" dari "field None" (NULL).
 const DANGLING_INDEX: i64 = u32::MAX as i64;
 
-/// Keadaan tersimpan satu entity untuk diff inkremental: `generation` + nilai
-/// tiap komponen terdaftar (`None` bila entity tak punya komponen itu).
-type EntityState = (i64, Vec<Option<Vec<PgValue>>>);
+/// Keadaan tersimpan satu entity untuk diff inkremental: nilai tiap komponen
+/// terdaftar (`None` bila entity tak punya komponen itu). Kunci peta = `Entity`
+/// utuh (indeks + generation), jadi slot terdaur-ulang = entity baru.
+type EntityState = Vec<Option<Vec<PgValue>>>;
 
 /// Operasi type-erased untuk satu tipe komponen terdaftar.
 #[derive(Clone)]
 struct Registered {
     table: &'static str,
+    /// Namespace cache (RFC-0033): `table@fingerprint(kolom)`. Skema yang berubah
+    /// (field ditambah/diganti tipe) otomatis memakai namespace baru, sehingga
+    /// baris cache dari deploy lama — yang bentuknya tak lagi cocok dengan
+    /// `from_params` — tak pernah disajikan (dulu: komponen hilang diam-diam,
+    /// lalu `save_incremental` menghapus barisnya).
+    cache_ns: String,
     columns: &'static [ColumnDef],
     indexes: &'static [IndexDef],
     checks: &'static [&'static str],
@@ -47,14 +57,40 @@ struct Registered {
     dump_one: fn(&World, Entity) -> Option<Vec<PgValue>>,
     /// Rekonstruksi komponen dari nilai-kolom lalu sisipkan ke `entity`.
     apply: fn(&mut World, Entity, &[PgValue]),
+    /// Lepas komponen dari `entity` (refresh entity yang sudah termuat dan
+    /// barisnya kini tiada di DB).
+    remove: fn(&mut World, Entity),
+}
+
+/// Fingerprint deterministik definisi kolom (FNV-1a 64-bit atas `nama:tipe:null`)
+/// — bukan `DefaultHasher`, yang algoritmanya boleh berubah antar rilis Rust.
+fn schema_fingerprint(columns: &[ColumnDef]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut feed = |bytes: &[u8]| {
+        for &b in bytes {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    for c in columns {
+        feed(c.name.as_bytes());
+        feed(b":");
+        feed(c.ty.sql().as_bytes());
+        feed(if c.nullable { b":n;" } else { b":;" });
+    }
+    h
 }
 
 fn dump_of<T: PgComponent + Component>(world: &World) -> Vec<ComponentRow> {
     let mut out = Vec::new();
     <(Entity, &T)>::each_filtered_shared::<()>(world, |(e, c)| {
-        out.push((i64::from(e.index()), c.to_params()));
+        out.push((e, c.to_params()));
     });
     out
+}
+
+fn remove_of<T: PgComponent + Component>(world: &mut World, entity: Entity) {
+    world.remove::<T>(entity);
 }
 
 fn dump_one_of<T: PgComponent + Component>(world: &World, entity: Entity) -> Option<Vec<PgValue>> {
@@ -74,24 +110,30 @@ fn apply_of<T: PgComponent + Component>(world: &mut World, entity: Entity, value
 /// `World` di balik mutex — snapshot diambil (sinkron) di bawah lock, lock dilepas,
 /// lalu `commit` dijalankan tanpa menahan `World`.
 pub struct StagedSave {
-    /// **Indeks World** tiap entity yang punya ≥1 komponen (pid dialokasikan saat commit).
-    entities: Vec<i64>,
-    /// Baris komponen (keyed by indeks), sejajar urutan `registered` saat `stage`.
+    /// World asal snapshot — `commit` menautkan store ke World ini.
+    world_id: WorldId,
+    /// Entity yang punya ≥1 komponen (pid dialokasikan saat commit), urut World.
+    entities: Vec<Entity>,
+    /// Baris komponen, sejajar urutan `registered` saat `stage`.
     components: Vec<Vec<ComponentRow>>,
     /// Rekam sinkron baru (untuk `save_incremental` berikutnya).
-    next_state: HashMap<i64, EntityState>,
+    next_state: HashMap<Entity, EntityState>,
 }
 
 /// Diff **owned** (sync) dari sebuah `World` vs rekam sinkron internal, siap
 /// di-[`commit_incremental`](PgStore::commit_incremental) secara async — hasil
 /// [`PgStore::stage_incremental`]. Tak memegang `&World`.
 pub struct StagedIncremental {
-    /// entity yang hilang (ada di rekam, tak ada di world) → DELETE.
-    deletes: Vec<i64>,
-    /// entity baru/berubah → UPSERT: `(entity_id, (generation, params per-komponen))`.
-    upserts: Vec<(i64, EntityState)>,
+    /// World asal diff — `commit_incremental` menautkan store ke World ini.
+    world_id: WorldId,
+    /// entity yang hilang (ada di rekam, tak ada di world) → DELETE; terurut.
+    deletes: Vec<Entity>,
+    /// entity baru/berubah → UPSERT: `(entity, params per-komponen)`; terurut
+    /// (indeks, generation) agar urutan tulis & alokasi pid deterministik
+    /// (STD-0005) dan dua writer konkuren mengunci baris dalam urutan sama.
+    upserts: Vec<(Entity, EntityState)>,
     /// Rekam sinkron baru setelah commit.
-    next_state: HashMap<i64, EntityState>,
+    next_state: HashMap<Entity, EntityState>,
 }
 
 /// Komponen owned satu entity, siap di-`commit_insert` (RFC-0034). Tak memegang
@@ -113,15 +155,21 @@ pub struct StagedUpdate {
 pub struct PgStore {
     pool: PgPool,
     registered: Vec<Registered>,
-    /// Rekam keadaan sinkron terakhir (per **indeks World**) untuk `save_incremental`.
-    /// Indeks stabil dalam satu sesi working-set (RFC-0034: indeks ephemeral, `pid`
+    /// Rekam keadaan sinkron terakhir (per `Entity`) untuk `save_incremental`.
+    /// Handle stabil dalam satu sesi working-set (RFC-0034: handle ephemeral, `pid`
     /// persisten — jembatan `pid_of`/`entity_of` di bawah).
-    last: HashMap<i64, EntityState>,
-    /// Jembatan **indeks World → `pid`** (RFC-0034). Diisi saat load/materialize &
+    last: HashMap<Entity, EntityState>,
+    /// Jembatan **`Entity` → `pid`** (RFC-0034). Diisi saat load/materialize &
     /// save; dipakai oleh jalur tulis untuk menulis di bawah `pid` persisten.
-    pid_of: HashMap<u32, i64>,
+    /// Kunci membawa generation: slot yang didaur-ulang `despawn`+`spawn` adalah
+    /// entity **baru** (pid baru), bukan pewaris pid lama.
+    pid_of: HashMap<Entity, i64>,
     /// Jembatan **`pid` → Entity** (handle lokal working-set).
     entity_of: HashMap<i64, Entity>,
+    /// World yang jembatan & rekam sinkron di atas merujuk (`None` sebelum
+    /// operasi pertama). World lain yang datang → jembatan di-reset otomatis
+    /// ([`Self::bind_world`]): handle `Entity` tak bermakna lintas-World.
+    world_id: Option<WorldId>,
     /// Cache read-through opsional (RFC-0033); `None` → langsung Postgres.
     cache: Option<Arc<dyn ComponentCache>>,
 }
@@ -141,6 +189,7 @@ impl PgStore {
             last: HashMap::new(),
             pid_of: HashMap::new(),
             entity_of: HashMap::new(),
+            world_id: None,
             cache: None,
         }
     }
@@ -166,15 +215,40 @@ impl PgStore {
             last: HashMap::new(),
             pid_of: HashMap::new(),
             entity_of: HashMap::new(),
+            world_id: None,
             cache: self.cache.clone(),
         }
+    }
+
+    /// Menautkan store ke `world`: bila berbeda dari World yang terakhir dilayani,
+    /// jembatan `Entity↔pid` dan rekam `save_incremental` di-reset — keduanya
+    /// hanya bermakna untuk satu World. Dipanggil di awal tiap jalur muat/tulis
+    /// yang menerima `&World`.
+    fn bind_world(&mut self, world: &World) {
+        self.bind_world_id(world.id());
+    }
+
+    /// Seperti [`Self::bind_world`] dari id (jalur `commit*`, yang tak memegang
+    /// `&World`).
+    fn bind_world_id(&mut self, id: WorldId) {
+        if self.world_id != Some(id) {
+            self.world_id = Some(id);
+            self.pid_of.clear();
+            self.entity_of.clear();
+            self.last.clear();
+        }
+    }
+
+    /// Apakah `world` adalah World yang jembatan store ini merujuk.
+    fn is_bound_to(&self, world: &World) -> bool {
+        self.world_id == Some(world.id())
     }
 
     /// `pid` persisten untuk `entity` di working-set ini — terisi setelah
     /// `load`/`load_pids`/`fetch`/`save*` memetakan entity tersebut. `None` bila
     /// entity belum pernah disinkronkan lewat store ini.
     pub fn pid_of(&self, entity: Entity) -> Option<i64> {
-        self.pid_of.get(&entity.index()).copied()
+        self.pid_of.get(&entity).copied()
     }
 
     /// Kebalikan [`Self::pid_of`]: handle lokal untuk `pid`, bila termuat di
@@ -183,16 +257,23 @@ impl PgStore {
         self.entity_of.get(&pid).copied()
     }
 
-    /// Mendaftarkan tipe komponen `T` untuk dipersist.
+    /// Mendaftarkan tipe komponen `T` untuk dipersist. Idempoten: tabel yang
+    /// sudah terdaftar dilewati (registrasi ganda dulu menulis tiap baris dua
+    /// kali → `duplicate key`).
     pub fn register<T: PgComponent + Component>(&mut self) -> &mut Self {
+        if self.registered.iter().any(|r| r.table == T::TABLE) {
+            return self;
+        }
         self.registered.push(Registered {
             table: T::TABLE,
+            cache_ns: format!("{}@{:016x}", T::TABLE, schema_fingerprint(T::COLUMNS)),
             columns: T::COLUMNS,
             indexes: T::INDEXES,
             checks: T::CHECKS,
             dump: dump_of::<T>,
             dump_one: dump_one_of::<T>,
             apply: apply_of::<T>,
+            remove: remove_of::<T>,
         });
         self
     }
@@ -284,35 +365,19 @@ impl PgStore {
         Ok(())
     }
 
-    /// Muat komponen `pid` ke `world` sebagai entity lokal baru; kembalikan handle
-    /// (atau `None` bila `pid` tak ada).
-    pub async fn fetch(&self, world: &mut World, pid: i64) -> Result<Option<Entity>, sqlx::Error> {
-        let exists: Option<i64> =
-            sqlx::query_scalar("SELECT pid FROM arke_entities WHERE pid = $1")
-                .bind(pid)
-                .fetch_optional(&self.pool)
-                .await?;
-        if exists.is_none() {
-            return Ok(None);
-        }
-        let entity = world.spawn();
-        for r in &self.registered {
-            let row = sqlx::query(&select_sql(r, Some("pid = $1")))
-                .bind(pid)
-                .fetch_optional(&self.pool)
-                .await?;
-            if let Some(row) = row {
-                let mut values = Vec::with_capacity(r.columns.len());
-                for col in r.columns {
-                    values.push(read_value(&row, col)?);
-                }
-                // Per-op: hanya entity ini termuat → relasi keluar-set menggantung
-                // (NULL, RFC-0034 Am.3).
-                self.translate_refs(r, &mut values);
-                (r.apply)(world, entity, &values);
-            }
-        }
-        Ok(Some(entity))
+    /// Muat komponen `pid` ke `world` sebagai entity lokal; kembalikan handle
+    /// (atau `None` bila `pid` tak ada). Jalur batch yang sama dengan `load_ids`: jembatan
+    /// `pid_of`/`entity_of` ikut terisi (sehingga `entity_version`/
+    /// `update_entity`/`commit_update` bekerja sesudahnya), cache read-through
+    /// dilayani, dan `pid` yang sudah termuat di World ini di-*refresh* di
+    /// tempat, bukan digandakan. Rekam `save_incremental` tak disentuh.
+    pub async fn fetch(
+        &mut self,
+        world: &mut World,
+        pid: i64,
+    ) -> Result<Option<Entity>, sqlx::Error> {
+        let loaded = self.materialize(world, &[pid]).await?;
+        Ok(loaded.first().map(|&(_, e)| e))
     }
 
     /// **Fase 1 (sync)**: kumpulkan komponen `entity` jadi owned [`StagedUpdate`].
@@ -330,7 +395,9 @@ impl PgStore {
     pub async fn commit_update(&self, pid: i64, staged: StagedUpdate) -> Result<(), sqlx::Error> {
         let mut tx = self.begin().await?;
         self.commit_update_in(&mut tx, pid, staged).await?;
-        tx.commit().await
+        tx.commit().await?;
+        self.invalidate_all_tables(&[pid]).await;
+        Ok(())
     }
 
     /// Seperti [`Self::commit_update`] tetapi di dalam transaksi `tx` milik
@@ -365,6 +432,7 @@ impl PgStore {
             .bind(pid)
             .execute(&self.pool)
             .await?;
+        self.invalidate_all_tables(&[pid]).await;
         Ok(())
     }
 
@@ -395,18 +463,28 @@ impl PgStore {
         crate::DeleteWhere::new(self)
     }
 
-    /// Invalidate cache `table` untuk `pids` (no-op tanpa cache / pids kosong).
+    /// Invalidate cache komponen bertabel `table` untuk `pids` (no-op tanpa
+    /// cache / pids kosong / tabel tak terdaftar). Namespace cache = `cache_ns`
+    /// tabel itu (ber-fingerprint skema).
     pub(crate) async fn invalidate_cache(&self, table: &str, pids: &[i64]) {
         if let Some(c) = &self.cache
             && !pids.is_empty()
+            && let Some(r) = self.registered.iter().find(|r| r.table == table)
         {
-            c.invalidate(table, pids).await;
+            c.invalidate(&r.cache_ns, pids).await;
         }
     }
 
-    /// Nama tabel semua komponen terdaftar (untuk invalidasi lintas-tabel).
-    pub(crate) fn tables(&self) -> impl Iterator<Item = &'static str> + '_ {
-        self.registered.iter().map(|r| r.table)
+    /// Invalidate cache `pids` di **semua** tabel komponen terdaftar (entity
+    /// hilang/berubah seluruhnya).
+    pub(crate) async fn invalidate_all_tables(&self, pids: &[i64]) {
+        if let Some(c) = &self.cache
+            && !pids.is_empty()
+        {
+            for r in &self.registered {
+                c.invalidate(&r.cache_ns, pids).await;
+            }
+        }
     }
 
     /// Muat entity yang cocok `predicate` (fragmen `WHERE` atas tabel `T`) ke
@@ -452,6 +530,27 @@ impl PgStore {
         sqlx::query(&create_table_sql_from(r.table, r.columns))
             .execute(&self.pool)
             .await?;
+
+        // FK `pid → arke_entities ON DELETE CASCADE` wajib ada: tanpanya `save`
+        // (DELETE FROM arke_entities) meninggalkan baris komponen yatim. Hilang
+        // bila `arke_entities` pernah di-`DROP … CASCADE` lalu dibuat ulang —
+        // `CREATE TABLE IF NOT EXISTS` tak memasangnya kembali di tabel lama.
+        // Baris yatim yang sudah telanjur ada (tak punya entity → tak pernah bisa
+        // dimuat) dibuang dulu agar constraint bisa dipasang.
+        sqlx::query(&format!(
+            "DO $$ BEGIN \
+               IF NOT EXISTS (SELECT 1 FROM pg_constraint \
+                              WHERE conname = '{table}_pid_fkey' \
+                                AND conrelid = '{table}'::regclass) THEN \
+                 DELETE FROM {table} WHERE pid NOT IN (SELECT pid FROM arke_entities); \
+                 ALTER TABLE {table} ADD CONSTRAINT {table}_pid_fkey \
+                   FOREIGN KEY (pid) REFERENCES arke_entities(pid) ON DELETE CASCADE; \
+               END IF; \
+             END $$;",
+            table = r.table
+        ))
+        .execute(&self.pool)
+        .await?;
 
         // Tambah kolom yang hilang (field baru); backfill NOT NULL dgn default.
         for c in r.columns {
@@ -561,14 +660,13 @@ impl PgStore {
     /// [`commit`](Self::commit) — membuat future `commit` `Send` tanpa `World: Sync`
     /// (ramah handler async multi-thread; RFC-0021 §4).
     pub fn stage(&self, world: &World) -> StagedSave {
-        let mut entities: Vec<i64> = Vec::new();
-        <Entity>::each_filtered_shared::<()>(world, |e| {
-            entities.push(i64::from(e.index()));
-        });
+        let mut entities: Vec<Entity> = Vec::new();
+        <Entity>::each_filtered_shared::<()>(world, |e| entities.push(e));
         let components: Vec<Vec<ComponentRow>> =
             self.registered.iter().map(|r| (r.dump)(world)).collect();
         let next_state = self.dump_state(world);
         StagedSave {
+            world_id: world.id(),
             entities,
             components,
             next_state,
@@ -582,6 +680,7 @@ impl PgStore {
     /// Prasyarat: urutan komponen `staged` sama dengan urutan registrasi saat
     /// [`stage`](Self::stage) (tidak ada `register` di antara stage & commit).
     pub async fn commit(&mut self, staged: StagedSave) -> Result<(), sqlx::Error> {
+        self.bind_world_id(staged.world_id);
         let mut tx = self.pool.begin().await?;
 
         // Overwrite penuh: DELETE meng-cascade ke tabel komponen.
@@ -589,24 +688,25 @@ impl PgStore {
             .execute(&mut *tx)
             .await?;
 
-        // Alokasi `pid` (BIGSERIAL) tiap entity; catat jembatan indeks→pid (RFC-0034).
-        self.pid_of.clear();
-        self.entity_of.clear();
-        for index in &staged.entities {
+        // Alokasi `pid` (BIGSERIAL) tiap entity ke jembatan **lokal**; jembatan
+        // store baru diganti setelah commit sukses — bila tx gagal, jembatan lama
+        // tetap konsisten dengan DB (yang tak berubah).
+        let mut bridge: HashMap<Entity, i64> = HashMap::with_capacity(staged.entities.len());
+        for &entity in &staged.entities {
             let pid: i64 =
                 sqlx::query_scalar("INSERT INTO arke_entities (version) VALUES (0) RETURNING pid")
                     .fetch_one(&mut *tx)
                     .await?;
-            self.pid_of.insert(*index as u32, pid);
+            bridge.insert(entity, pid);
         }
 
         // Komponen ditulis di bawah `pid`. Semua pid working-set kini teralokasi →
-        // resolusi `Ref(index)`→`pid` valid (RFC-0034 Am.3).
+        // resolusi `Ref(entity)`→`pid` valid (RFC-0034 Am.3).
         for (r, rows) in self.registered.iter().zip(&staged.components) {
             let insert = insert_sql(r);
-            for (index, params) in rows {
-                let pid = self.pid_of[&(*index as u32)];
-                let params = self.resolve_refs(params);
+            for (entity, params) in rows {
+                let pid = bridge[entity];
+                let params = resolve_refs_with(&bridge, params);
                 let mut q = sqlx::query(&insert).bind(pid);
                 for (value, col) in params.iter().zip(r.columns) {
                     q = bind_value(q, col.ty, value);
@@ -620,6 +720,8 @@ impl PgStore {
         if let Some(c) = &self.cache {
             c.clear().await;
         }
+        self.entity_of = bridge.iter().map(|(&e, &pid)| (pid, e)).collect();
+        self.pid_of = bridge;
         // Selaraskan rekam sinkron dengan keadaan yang baru ditulis.
         self.last = staged.next_state;
         Ok(())
@@ -641,7 +743,7 @@ impl PgStore {
     /// Menyelaraskan rekam sinkron internal → `save_incremental` berikutnya hanya
     /// menulis perubahan setelah muat ini.
     pub async fn load(&mut self, world: &mut World) -> Result<(), sqlx::Error> {
-        self.reset_world_bridge();
+        self.bind_world(world);
         let rows = sqlx::query("SELECT pid FROM arke_entities ORDER BY pid")
             .fetch_all(&self.pool)
             .await?;
@@ -669,7 +771,7 @@ impl PgStore {
         world: &mut World,
         predicate: &str,
     ) -> Result<usize, sqlx::Error> {
-        self.reset_world_bridge();
+        self.bind_world(world);
         let sql = format!(
             "SELECT pid FROM {} WHERE {} ORDER BY pid",
             T::TABLE,
@@ -693,21 +795,6 @@ impl PgStore {
 
     /// Eksekutor query builder (RFC-0030): SQL **ter-parameterisasi** + nilai
     /// bind → materialisasi entity yang cocok ke `world`. Dipakai `Query::load`.
-    /// `pid` untuk indeks World `index` di working-set aktif, atau `None`
-    /// (RFC-0034 Am.3 — dipakai query rekursif untuk seed `pid` root).
-    pub(crate) fn pid_for_index(&self, index: u32) -> Option<i64> {
-        self.pid_of.get(&index).copied()
-    }
-
-    /// Reset jembatan `index↔pid` sebelum memuat ke **World baru** (RFC-0034 Am.3):
-    /// mencegah kontaminasi lintas-World (resolusi relasi memakai `entity_of` World
-    /// lama). Dipanggil di awal tiap muat top-level; sub-query satu muat (mis.
-    /// `join_load` main+target) berbagi jembatan yang sama tanpa reset di antaranya.
-    pub(crate) fn reset_world_bridge(&mut self) {
-        self.pid_of.clear();
-        self.entity_of.clear();
-    }
-
     pub(crate) async fn load_by_query(
         &mut self,
         sql: String,
@@ -741,33 +828,60 @@ impl PgStore {
         world: &mut World,
         ids: &[i64],
     ) -> Result<Vec<(i64, Entity)>, sqlx::Error> {
+        self.bind_world(world);
         if ids.is_empty() {
             return Ok(Vec::new());
         }
-        // `ids` = `pid`s. Spawn entity lokal baru (indeks ephemeral, RFC-0034) +
-        // catat jembatan indeks↔pid.
+        // `ids` = `pid`s. `pid` yang sudah tertaut ke entity hidup di `world` ini
+        // di-refresh di tempat (muat aditif, mis. beberapa `Query::load` ke satu
+        // World per-request); selebihnya spawn entity lokal baru (indeks
+        // ephemeral, RFC-0034) + catat jembatan Entity↔pid.
         let rows = sqlx::query("SELECT pid FROM arke_entities WHERE pid = ANY($1) ORDER BY pid")
             .bind(ids)
             .fetch_all(&self.pool)
             .await?;
         let mut by_id: HashMap<i64, Entity> = HashMap::with_capacity(rows.len());
         let mut entities: Vec<(i64, Entity)> = Vec::with_capacity(rows.len());
+        let mut refreshed: HashSet<Entity> = HashSet::new();
         for row in rows {
             let pid: i64 = row.try_get("pid")?;
-            let entity = world.spawn();
+            let entity = match self.entity_of.get(&pid) {
+                Some(&e) if world.contains(e) => {
+                    refreshed.insert(e);
+                    e
+                }
+                _ => {
+                    let e = world.spawn();
+                    // Jaga bijeksi: tautan lama di salah satu sisi dilepas dari
+                    // sisi lainnya hanya bila masih menunjuk balik ke sini.
+                    if let Some(old_pid) = self.pid_of.insert(e, pid)
+                        && old_pid != pid
+                        && self.entity_of.get(&old_pid) == Some(&e)
+                    {
+                        self.entity_of.remove(&old_pid);
+                    }
+                    if let Some(old_e) = self.entity_of.insert(pid, e)
+                        && old_e != e
+                        && self.pid_of.get(&old_e) == Some(&pid)
+                    {
+                        self.pid_of.remove(&old_e);
+                    }
+                    e
+                }
+            };
             by_id.insert(pid, entity);
             entities.push((pid, entity));
-            self.pid_of.insert(entity.index(), pid);
-            self.entity_of.insert(pid, entity);
         }
 
         for r in &self.registered {
             // Read-through cache (RFC-0033): layani hit dari cache, ambil miss dari
             // Postgres lalu isi cache. Tanpa cache → jalur langsung.
             let cached = match &self.cache {
-                Some(c) => c.get_many(r.table, ids).await,
+                Some(c) => c.get_many(&r.cache_ns, ids).await,
                 None => vec![None; ids.len()],
             };
+            // Entity refresh yang barisnya ditemukan; sisanya → komponen dilepas.
+            let mut found: HashSet<i64> = HashSet::new();
             let mut miss_ids: Vec<i64> = Vec::new();
             for (i, &id) in ids.iter().enumerate() {
                 match cached
@@ -781,39 +895,48 @@ impl PgStore {
                         self.translate_refs(r, &mut values);
                         if let Some(&entity) = by_id.get(&id) {
                             (r.apply)(world, entity, &values);
+                            found.insert(id);
                         }
                     }
                     None => miss_ids.push(id),
                 }
             }
-            if miss_ids.is_empty() {
-                continue;
+            if !miss_ids.is_empty() {
+                let rows = sqlx::query(&select_sql(r, Some("pid = ANY($1)")))
+                    .bind(&miss_ids)
+                    .fetch_all(&self.pool)
+                    .await?;
+                let mut to_cache: Vec<(i64, Vec<u8>)> = Vec::new();
+                for row in rows {
+                    let id: i64 = row.try_get("pid")?;
+                    let mut values = Vec::with_capacity(r.columns.len());
+                    for col in r.columns {
+                        values.push(read_value(&row, col)?);
+                    }
+                    // Cache disimpan dengan pid mentah (sebelum terjemahan) agar
+                    // valid lintas-World; terjemahkan pid→Ref hanya untuk apply
+                    // (RFC-0034 Am.3).
+                    if self.cache.is_some() {
+                        to_cache.push((id, encode_row(&values)));
+                    }
+                    self.translate_refs(r, &mut values);
+                    if let Some(&entity) = by_id.get(&id) {
+                        (r.apply)(world, entity, &values);
+                        found.insert(id);
+                    }
+                }
+                if let Some(c) = &self.cache
+                    && !to_cache.is_empty()
+                {
+                    c.put_many(&r.cache_ns, &to_cache).await;
+                }
             }
-            let rows = sqlx::query(&select_sql(r, Some("pid = ANY($1)")))
-                .bind(&miss_ids)
-                .fetch_all(&self.pool)
-                .await?;
-            let mut to_cache: Vec<(i64, Vec<u8>)> = Vec::new();
-            for row in rows {
-                let id: i64 = row.try_get("pid")?;
-                let mut values = Vec::with_capacity(r.columns.len());
-                for col in r.columns {
-                    values.push(read_value(&row, col)?);
+            // Refresh: komponen yang barisnya sudah tiada di DB dilepas dari
+            // entity, agar World tak menyimpan keadaan basi.
+            for &(pid, entity) in &entities {
+                if refreshed.contains(&entity) && !found.contains(&pid) {
+                    (r.remove)(world, entity);
                 }
-                // Cache disimpan dengan pid mentah (sebelum terjemahan) agar valid
-                // lintas-World; terjemahkan pid→Ref hanya untuk apply (RFC-0034 Am.3).
-                if self.cache.is_some() {
-                    to_cache.push((id, encode_row(&values)));
-                }
-                self.translate_refs(r, &mut values);
-                if let Some(&entity) = by_id.get(&id) {
-                    (r.apply)(world, entity, &values);
-                }
-            }
-            if let Some(c) = &self.cache
-                && !to_cache.is_empty()
-            {
-                c.put_many(r.table, &to_cache).await;
             }
         }
         Ok(entities)
@@ -836,7 +959,7 @@ impl PgStore {
     /// Identitas ke-`pid` diselesaikan via jembatan `pid_of` (RFC-0034); indeks
     /// World bersifat ephemeral sehingga identitas persisten = `pid`.
     pub async fn entity_version(&self, entity: Entity) -> Result<Option<i64>, sqlx::Error> {
-        let Some(&pid) = self.pid_of.get(&entity.index()) else {
+        let Some(&pid) = self.pid_of.get(&entity) else {
             return Ok(None);
         };
         let row = sqlx::query("SELECT version FROM arke_entities WHERE pid = $1")
@@ -863,7 +986,10 @@ impl PgStore {
         entity: Entity,
         expected_version: i64,
     ) -> Result<i64, UpdateError> {
-        let Some(&pid) = self.pid_of.get(&entity.index()) else {
+        // Identitas dari jembatan (`entity` = handle World yang ditautkan);
+        // `world` hanya sumber nilai komponen — boleh World lain yang mereplay
+        // handle yang sama lewat `spawn_at` (pola writer RFC-0021 §5).
+        let Some(&pid) = self.pid_of.get(&entity) else {
             return Err(UpdateError::Conflict);
         };
         let mut tx = self.pool.begin().await.map_err(UpdateError::Db)?;
@@ -905,28 +1031,14 @@ impl PgStore {
 
         tx.commit().await.map_err(UpdateError::Db)?;
         // Invalidate cache untuk entity ini di tiap tabel (RFC-0033).
-        if let Some(c) = &self.cache {
-            for r in &self.registered {
-                c.invalidate(r.table, &[pid]).await;
-            }
-        }
+        self.invalidate_all_tables(&[pid]).await;
         Ok(new_version)
     }
 
-    /// **Tulis (RFC-0034 Am.3):** ganti `PgValue::Ref(index)` → `Int(pid)` via
-    /// `pid_of`. Ref menggantung (indeks tak ter-map, mis. relasi lintas-op) → `Null`.
-    /// Nilai lain apa adanya. Panggil **setelah** semua pid working-set teralokasi.
+    /// **Tulis (RFC-0034 Am.3):** ganti `PgValue::Ref(entity)` → `Int(pid)` via
+    /// jembatan store. Lihat [`resolve_refs_with`].
     fn resolve_refs(&self, params: &[PgValue]) -> Vec<PgValue> {
-        params
-            .iter()
-            .map(|v| match v {
-                PgValue::Ref(idx) => match self.pid_of.get(&(*idx as u32)) {
-                    Some(pid) => PgValue::Int(*pid),
-                    None => PgValue::Null,
-                },
-                other => other.clone(),
-            })
-            .collect()
+        resolve_refs_with(&self.pid_of, params)
     }
 
     /// **Baca (RFC-0034 Am.3):** untuk kolom `entity_ref`, `Int(pid)` → `Ref(indeks
@@ -940,7 +1052,7 @@ impl PgStore {
             if col.entity_ref {
                 *v = match v {
                     PgValue::Int(pid) => match self.entity_of.get(pid) {
-                        Some(e) => PgValue::Ref(i64::from(e.index())),
+                        Some(&e) => PgValue::Ref(pack_entity(e)),
                         None => PgValue::Ref(DANGLING_INDEX),
                     },
                     _ => PgValue::Null,
@@ -950,19 +1062,16 @@ impl PgStore {
     }
 
     /// Kumpulkan keadaan seluruh entity + komponen `world` (untuk diff).
-    fn dump_state(&self, world: &World) -> HashMap<i64, EntityState> {
+    fn dump_state(&self, world: &World) -> HashMap<Entity, EntityState> {
         let n = self.registered.len();
-        let mut current: HashMap<i64, EntityState> = HashMap::new();
+        let mut current: HashMap<Entity, EntityState> = HashMap::new();
         <Entity>::each_filtered_shared::<()>(world, |e| {
-            current.insert(
-                i64::from(e.index()),
-                (i64::from(e.generation()), vec![None; n]),
-            );
+            current.insert(e, vec![None; n]);
         });
         for (ci, r) in self.registered.iter().enumerate() {
-            for (id, params) in (r.dump)(world) {
-                if let Some(state) = current.get_mut(&id) {
-                    state.1[ci] = Some(params);
+            for (e, params) in (r.dump)(world) {
+                if let Some(state) = current.get_mut(&e) {
+                    state[ci] = Some(params);
                 }
             }
         }
@@ -989,18 +1098,30 @@ impl PgStore {
     /// `commit_incremental` `Send` tanpa `World: Sync` (ramah handler async).
     pub fn stage_incremental(&self, world: &World) -> StagedIncremental {
         let current = self.dump_state(world);
-        let deletes: Vec<i64> = self
-            .last
+        // World lain dari yang terakhir dilayani → rekam sinkron tak berlaku:
+        // diff terhadap rekam kosong (semua entity = baru), dan `commit_incremental`
+        // me-reset jembatan lewat `world_id`.
+        let empty = HashMap::new();
+        let last = if self.is_bound_to(world) {
+            &self.last
+        } else {
+            &empty
+        };
+        let mut deletes: Vec<Entity> = last
             .keys()
             .copied()
-            .filter(|id| !current.contains_key(id))
+            .filter(|e| !current.contains_key(e))
             .collect();
-        let upserts: Vec<(i64, EntityState)> = current
+        let mut upserts: Vec<(Entity, EntityState)> = current
             .iter()
-            .filter(|&(id, state)| self.last.get(id) != Some(state))
-            .map(|(id, state)| (*id, state.clone()))
+            .filter(|&(e, state)| last.get(e) != Some(state))
+            .map(|(e, state)| (*e, state.clone()))
             .collect();
+        // Urutan deterministik (STD-0005): `HashMap` beriterasi acak.
+        deletes.sort_unstable_by_key(|e| (e.index(), e.generation()));
+        upserts.sort_unstable_by_key(|(e, _)| (e.index(), e.generation()));
         StagedIncremental {
+            world_id: world.id(),
             deletes,
             upserts,
             next_state: current,
@@ -1014,61 +1135,63 @@ impl PgStore {
         &mut self,
         staged: StagedIncremental,
     ) -> Result<SyncStats, sqlx::Error> {
+        self.bind_world_id(staged.world_id);
         let mut tx = self.pool.begin().await?;
         let mut stats = SyncStats {
             written: 0,
             deleted: 0,
         };
         // Entity yang tersentuh (dihapus/berubah) → invalidate cache (RFC-0033).
-        // Kunci diff internal = **indeks** World (ephemeral, stabil dalam-sesi);
-        // identitas DB = `pid` diselesaikan via `pid_of` (RFC-0034).
+        // Kunci diff internal = `Entity` (ephemeral, stabil dalam-sesi); identitas
+        // DB = `pid` diselesaikan via jembatan (RFC-0034). Jembatan dimutasi pada
+        // salinan **lokal** dan baru dipromosikan setelah commit sukses — tx yang
+        // gagal tak meninggalkan pid hantu (hasil INSERT yang di-rollback).
         let mut affected: Vec<i64> = Vec::new();
+        let mut bridge = self.pid_of.clone();
 
         // Hilang → DELETE (cascade ke tabel komponen).
-        for index in &staged.deletes {
-            if let Some(pid) = self.pid_of.remove(&(*index as u32)) {
+        for entity in &staged.deletes {
+            if let Some(pid) = bridge.remove(entity) {
                 sqlx::query("DELETE FROM arke_entities WHERE pid = $1")
                     .bind(pid)
                     .execute(&mut *tx)
                     .await?;
-                self.entity_of.remove(&pid);
                 affected.push(pid);
                 stats.deleted += 1;
             }
         }
 
-        // Baru/berubah → alokasi `pid` untuk entity baru, UPSERT (versi naik) +
-        // ganti baris komponen.
-        for (index, state) in &staged.upserts {
-            let pid = match self.pid_of.get(&(*index as u32)) {
-                Some(&pid) => {
-                    sqlx::query("UPDATE arke_entities SET version = version + 1 WHERE pid = $1")
-                        .bind(pid)
-                        .execute(&mut *tx)
-                        .await?;
-                    pid
-                }
-                None => {
-                    let pid: i64 = sqlx::query_scalar(
-                        "INSERT INTO arke_entities (version) VALUES (0) RETURNING pid",
-                    )
-                    .fetch_one(&mut *tx)
+        // Pass 1: alokasi `pid` untuk semua entity baru **sebelum** baris komponen
+        // ditulis, sehingga relasi ke entity baru se-batch me-resolve (bukan
+        // menggantung NULL).
+        for (entity, _) in &staged.upserts {
+            if !bridge.contains_key(entity) {
+                let pid: i64 = sqlx::query_scalar(
+                    "INSERT INTO arke_entities (version) VALUES (0) RETURNING pid",
+                )
+                .fetch_one(&mut *tx)
+                .await?;
+                bridge.insert(*entity, pid);
+            }
+        }
+
+        // Pass 2: UPSERT (versi naik untuk yang sudah ada) + ganti baris komponen.
+        for (entity, state) in &staged.upserts {
+            let pid = bridge[entity];
+            if self.pid_of.contains_key(entity) {
+                sqlx::query("UPDATE arke_entities SET version = version + 1 WHERE pid = $1")
+                    .bind(pid)
+                    .execute(&mut *tx)
                     .await?;
-                    self.pid_of.insert(*index as u32, pid);
-                    pid
-                }
-            };
+            }
             for (ci, r) in self.registered.iter().enumerate() {
                 sqlx::query(&format!("DELETE FROM {} WHERE pid = $1", r.table))
                     .bind(pid)
                     .execute(&mut *tx)
                     .await?;
-                if let Some(params) = &state.1[ci] {
+                if let Some(params) = &state[ci] {
                     let insert = insert_sql(r);
-                    // Ref→pid (RFC-0034 Am.3): resolve terhadap `pid_of` yang sudah
-                    // ada. Caveat: ref ke entity **baru se-batch** yang belum ter-upsert
-                    // di iterasi ini → menggantung (NULL); relasi koheren via `save` penuh.
-                    let params = self.resolve_refs(params);
+                    let params = resolve_refs_with(&bridge, params);
                     let mut q = sqlx::query(&insert).bind(pid);
                     for (value, col) in params.iter().zip(r.columns) {
                         q = bind_value(q, col.ty, value);
@@ -1081,13 +1204,9 @@ impl PgStore {
         }
 
         tx.commit().await?;
-        if let Some(c) = &self.cache
-            && !affected.is_empty()
-        {
-            for r in &self.registered {
-                c.invalidate(r.table, &affected).await;
-            }
-        }
+        self.invalidate_all_tables(&affected).await;
+        self.entity_of = bridge.iter().map(|(&e, &pid)| (pid, e)).collect();
+        self.pid_of = bridge;
         self.last = staged.next_state;
         Ok(stats)
     }
@@ -1121,6 +1240,23 @@ impl std::fmt::Display for UpdateError {
 }
 
 impl std::error::Error for UpdateError {}
+
+/// **Tulis (RFC-0034 Am.3):** ganti `PgValue::Ref(entity)` → `Int(pid)` via
+/// `bridge`. Ref menggantung (entity tak ter-map, mis. relasi lintas-op atau ke
+/// entity yang sudah di-despawn) → `Null`. Nilai lain apa adanya. Panggil
+/// **setelah** semua pid working-set teralokasi.
+fn resolve_refs_with(bridge: &HashMap<Entity, i64>, params: &[PgValue]) -> Vec<PgValue> {
+    params
+        .iter()
+        .map(|v| match v {
+            PgValue::Ref(packed) => match bridge.get(&unpack_entity(*packed)) {
+                Some(pid) => PgValue::Int(*pid),
+                None => PgValue::Null,
+            },
+            other => other.clone(),
+        })
+        .collect()
+}
 
 /// Default backfill untuk kolom `NOT NULL` yang ditambahkan ke tabel ber-baris.
 fn default_sql(ty: PgType) -> &'static str {
