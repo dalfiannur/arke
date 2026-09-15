@@ -67,6 +67,24 @@ rilis juga ada di [GitHub Releases](https://github.com/dalfiannur/arke/releases)
   tanpanya `save` meninggalkan baris komponen yatim; `commit_update`/`remove`
   kini meng-invalidate cache.
 
+### Performance
+
+- **Kolam thread persisten** (`src/pool.rs`) untuk `Schedule::run_parallel` dan
+  `World::par_for_each`: dulu `thread::scope` men-spawn thread OS tiap panggilan
+  (thread-per-sistem; thread-per-chunk-per-archetype), ~15–20 µs per thread.
+  Kini `available_parallelism` pekerja parkir di `Condvar`, dimiliki
+  `Schedule`/`World`, di-join saat drop. Eksekutor graf menjadi pekerja
+  terbatas + antrean sistem siap. Bench baru W7 (16 sistem kecil): **13,4 µs →
+  1,3 µs per sistem**; W8 (`par_for_each`, 16 archetype): **24,5 ns → 0,2 ns
+  per elemen** (dulu 20× lebih lambat dari serial). Satu `unsafe` baru
+  (transmute masa-hidup pekerjaan, terkurung di `pool`, sound karena `scope`
+  memblokir sampai semua pekerjaan selesai — juga saat unwind), diverifikasi
+  miri.
+- **Indeks archetype** (`HashMap` ber-hasher Fx atas himpunan komponen) di
+  `World` menggantikan scan linear semua archetype di tiap `insert`/`remove`
+  struktural; buffer id dipakai ulang (tanpa alokasi `Vec` per operasi). Bench
+  baru W6 (64 archetype): **84 → 61 ns/op**; W4: 35 → 30 ns/op.
+
 ### Fixed
 
 - **Panic di satu sistem `run_parallel` menggantung, bukan dipropagasi**

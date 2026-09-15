@@ -55,6 +55,7 @@
 //! | [`snapshot`] | `Snapshot` World berversi, round-trip setia (M-6) |
 //! | [`error`] | `EcsError` berkonteks yang menyebut komponen (M-7) |
 //! | `storage` (privat) | Kolom kontigu bertipe (`TypedColumn`) |
+//! | `pool` (privat) | Kolam thread pekerja persisten untuk jalur paralel |
 //! | `archetype` (privat) | Tabel per-kombinasi-komponen |
 //!
 //! Query tersedia dua jalur: method arity-1 langsung pada [`World`]
@@ -62,7 +63,8 @@
 //! [`QueryData`] generik atas tuple sembarang-arity (baca/tulis campuran) untuk
 //! selebihnya (`query_pair`/`query_pair_ref` usang sejak 0.6.0, RFC-0027).
 //! Iterasi dijalankan berkolom (RFC-0023); `unsafe`-nya **terkurung** di
-//! [`query`] & [`world`], semuanya diverifikasi miri. Jalur pengguna tetap bebas
+//! [`query`], [`world`], [`schedule`] (`SyncWorld`) & `pool` (kolam thread
+//! persisten), semuanya diverifikasi miri. Jalur pengguna tetap bebas
 //! `unsafe` (STD-0004).
 
 pub mod bundle;
@@ -77,6 +79,7 @@ pub mod snapshot;
 pub mod world;
 
 mod archetype;
+mod pool;
 mod storage;
 
 /// Penanda *sealed* untuk trait ekstensi (RFC-0026). Modul ini privat-crate,

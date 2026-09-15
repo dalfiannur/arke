@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use crate::archetype::Archetype;
 use crate::bundle::Bundle;
-use crate::component::{Component, ComponentId, ComponentRegistry};
+use crate::component::{ArchetypeMap, Component, ComponentId, ComponentRegistry};
 use crate::entity::Entity;
 use crate::error::EcsError;
 use crate::serialize::Serialize;
@@ -65,6 +65,18 @@ pub struct World {
     free: Vec<u32>,
     registry: ComponentRegistry,
     archetypes: Vec<Archetype>,
+    /// Indeks `himpunan komponen (terurut) → posisi di `archetypes`` — resolusi
+    /// archetype tujuan O(1) alih-alih scan linear semua archetype tiap
+    /// `insert`/`remove` struktural (W6: 64 archetype ≈ 2,4× lebih lambat dari
+    /// W4 dengan scan). Hanya untuk lookup titik; urutan pembuatan (dan
+    /// iterasi) tetap `archetypes` (STD-0005).
+    archetype_index: ArchetypeMap<usize>,
+    /// Buffer id komponen yang dipakai ulang oleh `insert`/`remove`/
+    /// `insert_bundle` saat menyusun himpunan tujuan — menghindari alokasi
+    /// `Vec` per operasi struktural.
+    scratch_ids: Vec<ComponentId>,
+    /// Kolam pekerja untuk `par_for_each`, dibuat malas dan di-join saat drop.
+    pool: Option<crate::pool::Pool>,
     serde: SerdeRegistry,
     /// State global singleton-per-tipe (RFC-0010).
     resources: HashMap<TypeId, Box<dyn Any + Send>>,
@@ -96,6 +108,9 @@ impl Default for World {
             free: Vec::new(),
             registry: ComponentRegistry::default(),
             archetypes: Vec::new(),
+            archetype_index: ArchetypeMap::default(),
+            scratch_ids: Vec::new(),
+            pool: None,
             serde: SerdeRegistry::default(),
             resources: HashMap::new(),
         }
@@ -202,10 +217,13 @@ impl World {
         }
 
         // Entity sudah punya komponen lain: pindahkan ke archetype {komponen lama ∪ cid}.
-        let mut ids = self.archetypes[loc.archetype].component_ids().to_vec();
+        let mut ids = std::mem::take(&mut self.scratch_ids);
+        ids.clear();
+        ids.extend_from_slice(self.archetypes[loc.archetype].component_ids());
         ids.push(cid);
         ids.sort_unstable();
         let dst_idx = self.find_or_create_archetype(&ids);
+        self.scratch_ids = ids;
 
         let (moved, dst_row) = {
             let (src, dst) = split_two(&mut self.archetypes, loc.archetype, dst_idx);
@@ -238,13 +256,12 @@ impl World {
         let bundle_ids = B::ids(&mut self.registry);
         let index = entity.index() as usize;
 
-        let old_ids: Vec<ComponentId> = match self.entities[index].location {
-            Some(loc) => self.archetypes[loc.archetype].component_ids().to_vec(),
-            None => Vec::new(),
-        };
-
         // Archetype tujuan = lama ∪ bundle; komponen wajib distinct + baru.
-        let mut ids = old_ids;
+        let mut ids = std::mem::take(&mut self.scratch_ids);
+        ids.clear();
+        if let Some(loc) = self.entities[index].location {
+            ids.extend_from_slice(self.archetypes[loc.archetype].component_ids());
+        }
         for &bid in &bundle_ids {
             if ids.contains(&bid) {
                 panic!(
@@ -256,6 +273,7 @@ impl World {
         }
         ids.sort_unstable();
         let dst_idx = self.find_or_create_archetype(&ids);
+        self.scratch_ids = ids;
 
         match self.entities[index].location {
             Some(loc) => {
@@ -303,14 +321,17 @@ impl World {
         let index = entity.index() as usize;
         let loc = self.entities[index].location?;
         let cid = self.registry.get::<T>()?;
-        let src_ids = self.archetypes[loc.archetype].component_ids().to_vec();
+        let src_ids = self.archetypes[loc.archetype].component_ids();
         if !src_ids.contains(&cid) {
             return None;
         }
-        let dst_ids: Vec<_> = src_ids.into_iter().filter(|&c| c != cid).collect();
+        let mut dst_ids = std::mem::take(&mut self.scratch_ids);
+        dst_ids.clear();
+        dst_ids.extend(src_ids.iter().copied().filter(|&c| c != cid));
 
         // Kasus: komponen terakhir → entity menjadi tanpa komponen.
         if dst_ids.is_empty() {
+            self.scratch_ids = dst_ids;
             let src = &mut self.archetypes[loc.archetype];
             let (value, moved) = src.take_single_row::<T>(loc.row);
             self.entities[index].location = None;
@@ -320,6 +341,7 @@ impl World {
 
         // Kasus umum: pindah ke archetype subset, ekstrak komponen yang dihapus.
         let dst_idx = self.find_or_create_archetype(&dst_ids);
+        self.scratch_ids = dst_ids;
         let (value, moved, dst_row) = {
             let (src, dst) = split_two(&mut self.archetypes, loc.archetype, dst_idx);
             let dst_row = dst.push_entity(entity);
@@ -447,27 +469,62 @@ impl World {
         let Some(cid) = self.registry.get::<T>() else {
             return;
         };
-        let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
-        let f = &f;
-        std::thread::scope(|scope| {
-            for archetype in self.archetypes.iter_mut() {
-                let Some(col) = archetype.column_index(cid) else {
-                    continue;
-                };
+        // Kumpulkan slice kolom `T` dari tiap archetype (peminjaman disjoint —
+        // `iter_mut` menjamin tiap archetype dipinjam sekali), lalu potong
+        // menjadi chunk seukuran `total / pekerja` dan bagikan round-robin ke
+        // **pekerja terbatas** di kolam persisten (`available_parallelism`).
+        // Dulu: satu thread OS per chunk per archetype tiap panggilan (16
+        // archetype × inti = ratusan spawn, W8 ≈ 20× lebih lambat dari serial).
+        // Pembagian aman via `chunks_mut`.
+        let pool = self
+            .pool
+            .get_or_insert_with(|| crate::pool::Pool::new(crate::schedule::worker_count()));
+        let slices: Vec<&mut [T]> = self
+            .archetypes
+            .iter_mut()
+            .filter_map(|archetype| {
+                let col = archetype.column_index(cid)?;
                 let slice = archetype.slice_mut::<T>(col);
-                if slice.is_empty() {
-                    continue;
+                (!slice.is_empty()).then_some(slice)
+            })
+            .collect();
+        let total: usize = slices.iter().map(|s| s.len()).sum();
+        if total == 0 {
+            return;
+        }
+        let workers = crate::schedule::worker_count().min(total);
+        if workers <= 1 {
+            for slice in slices {
+                for item in slice {
+                    f(item);
                 }
-                let chunk_size = slice.len().div_ceil(threads);
-                for chunk in slice.chunks_mut(chunk_size) {
-                    scope.spawn(move || {
+            }
+            return;
+        }
+        let chunk_size = total.div_ceil(workers);
+        let mut buckets: Vec<Vec<&mut [T]>> = (0..workers).map(|_| Vec::new()).collect();
+        let mut next = 0;
+        for slice in slices {
+            for chunk in slice.chunks_mut(chunk_size) {
+                buckets[next % workers].push(chunk);
+                next += 1;
+            }
+        }
+        let f = &f;
+        let jobs: Vec<Box<dyn FnOnce() + Send + '_>> = buckets
+            .into_iter()
+            .filter(|b| !b.is_empty())
+            .map(|bucket| {
+                Box::new(move || {
+                    for chunk in bucket {
                         for item in chunk {
                             f(item);
                         }
-                    });
-                }
-            }
-        });
+                    }
+                }) as Box<dyn FnOnce() + Send + '_>
+            })
+            .collect();
+        pool.scope(jobs);
     }
 
     /// Mengiterasi pasangan `(&A, &B)` pada setiap entity yang memiliki **kedua**
@@ -736,16 +793,14 @@ impl World {
     /// Menemukan archetype dengan himpunan komponen `ids` (terurut), atau
     /// membuatnya bila belum ada. Mengembalikan indeksnya.
     fn find_or_create_archetype(&mut self, ids: &[ComponentId]) -> usize {
-        if let Some(i) = self
-            .archetypes
-            .iter()
-            .position(|a| a.component_ids() == ids)
-        {
+        if let Some(&i) = self.archetype_index.get(ids) {
             return i;
         }
         let columns = ids.iter().map(|&id| self.registry.new_column(id)).collect();
         self.archetypes.push(Archetype::new(ids.to_vec(), columns));
-        self.archetypes.len() - 1
+        let i = self.archetypes.len() - 1;
+        self.archetype_index.insert(ids.into(), i);
+        i
     }
 
     /// Memperbarui lokasi entity yang tergeser ke `row` di `archetype` akibat

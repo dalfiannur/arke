@@ -18,6 +18,7 @@ use std::sync::{Condvar, Mutex};
 use crate::CommandBuffer;
 use crate::Component;
 use crate::World;
+use crate::pool::Pool;
 use crate::query::{Access, QueryData, QueryFilter, QueryState};
 
 /// Closure sistem `SharedCmd`: baca `&World`, rekam ke buffer (RFC-0019).
@@ -194,16 +195,36 @@ struct SyncWorld<'a>(&'a World);
 // `UnsafeCell`, RFC-0015/0016). Diverifikasi miri di CI.
 unsafe impl Sync for SyncWorld<'_> {}
 
+/// Jumlah thread pekerja untuk jalur paralel: `available_parallelism`, dihitung
+/// **sekali** (di Linux ia membaca `/proc` & kuota cgroup — bukan gratis untuk
+/// dipanggil tiap frame).
+pub(crate) fn worker_count() -> usize {
+    use std::sync::OnceLock;
+    static N: OnceLock<usize> = OnceLock::new();
+    *N.get_or_init(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
+}
+
+/// Keadaan bersama eksekutor graf: pendahulu tersisa per sistem, antrean sistem
+/// **siap** (pendahulu = 0), dan jumlah sistem yang belum selesai.
+struct GraphState {
+    pending: Vec<usize>,
+    ready: std::collections::VecDeque<usize>,
+    remaining: usize,
+}
+
 /// Menjalankan sekumpulan sistem `Shared` lewat **graf-ketergantungan**: tiap
 /// sistem mulai segera setelah pendahulu berkonflik selesai (RFC-0018 §2).
 ///
-/// Model **thread-per-sistem** (`std::thread::scope`): tiap thread memegang
-/// `&mut System` disjoint (miliknya sendiri) dan menunggu di `Condvar` sampai
-/// seluruh pendahulunya (`pending[i] == 0`) selesai, lalu berjalan, lalu
-/// mengurangi `pending` tiap suksesor. Graf **asiklik** (sisi hanya `j → i`
-/// dengan `j < i`) → bebas deadlock. Pasangan berkonflik tak pernah bersamaan
-/// → hasil **identik** eksekusi serial (STD-0006). **Tanpa `unsafe` baru**.
-fn run_graph_shared(systems: &mut [System], world: &World) {
+/// Model **pekerja terbatas** di atas [`Pool`] persisten (`min(n, inti)`
+/// pekerjaan): tiap pekerja mengambil sistem **siap** dari antrean bersama
+/// (`Mutex` + `Condvar`), mengambil `&mut System`-nya secara eksklusif dari
+/// slotnya, menjalankannya, lalu melepas suksesornya (yang pendahulunya habis
+/// → masuk antrean siap, urut indeks). Dulu thread-per-sistem via
+/// `thread::scope`: spawn thread OS tiap sistem tiap run (W7 ≈ 13 µs/sistem).
+/// Graf **asiklik** (sisi hanya `j → i` dengan `j < i`) → bebas deadlock.
+/// Pasangan berkonflik tak pernah bersamaan → hasil **identik** eksekusi serial
+/// (STD-0006); urutan sistem tak-konflik tak memengaruhi hasil.
+fn run_graph_shared(systems: &mut [System], world: &World, pool: &Pool) {
     let n = systems.len();
     // Bangun graf: sisi j→i untuk tiap j<i yang berkonflik (RFC-0018 §1).
     let mut pending = vec![0usize; n];
@@ -216,68 +237,96 @@ fn run_graph_shared(systems: &mut [System], world: &World) {
             }
         }
     }
+    let ready: std::collections::VecDeque<usize> = (0..n).filter(|&i| pending[i] == 0).collect();
 
     let sync_world = SyncWorld(world);
-    let pending = Mutex::new(pending);
+    let state = Mutex::new(GraphState {
+        pending,
+        ready,
+        remaining: n,
+    });
     let signal = Condvar::new();
+    // Slot `&mut System` per indeks: diambil (`take`) tepat sekali oleh pekerja
+    // yang menjalankannya — eksklusivitas via `Mutex`, tanpa `unsafe`.
+    let slots: Vec<Mutex<Option<&mut System>>> =
+        systems.iter_mut().map(|s| Mutex::new(Some(s))).collect();
 
-    /// Melepas suksesor sistem `i` saat drop — **termasuk saat unwind**. Tanpa
-    /// ini, panic di satu sistem membuat suksesornya menunggu `Condvar` selamanya
-    /// dan `thread::scope` tak pernah selesai (deadlock alih-alih propagasi).
+    /// Melepas suksesor sistem `i` & menandainya selesai saat drop — **termasuk
+    /// saat unwind**. Tanpa ini, panic di satu sistem membuat pekerja lain
+    /// menunggu `Condvar` selamanya dan `thread::scope` tak pernah selesai
+    /// (deadlock alih-alih propagasi).
     struct ReleaseOnDrop<'a> {
         i: usize,
-        pending: &'a Mutex<Vec<usize>>,
+        state: &'a Mutex<GraphState>,
         signal: &'a Condvar,
         successors: &'a [Vec<usize>],
     }
     impl Drop for ReleaseOnDrop<'_> {
         fn drop(&mut self) {
             // Mutex bisa terracuni oleh thread lain yang panic saat memegangnya;
-            // datanya (penghitung) tetap konsisten karena tiap kritikal-seksi
-            // hanya aritmetika tanpa titik panic.
-            let mut guard = self
-                .pending
+            // datanya tetap konsisten karena tiap kritikal-seksi hanya
+            // aritmetika/antrean tanpa titik panic.
+            let mut st = self
+                .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             for &s in &self.successors[self.i] {
-                guard[s] -= 1;
+                st.pending[s] -= 1;
+                if st.pending[s] == 0 {
+                    st.ready.push_back(s);
+                }
             }
-            drop(guard);
+            st.remaining -= 1;
+            drop(st);
             self.signal.notify_all();
         }
     }
 
-    std::thread::scope(|scope| {
-        for (i, system) in systems.iter_mut().enumerate() {
-            let pending = &pending;
+    let workers = worker_count().min(n).max(1);
+    let jobs: Vec<Box<dyn FnOnce() + Send + '_>> = (0..workers)
+        .map(|_| {
+            let state = &state;
             let signal = &signal;
             let successors = &successors;
+            let slots = &slots;
             let sync_world = &sync_world;
-            scope.spawn(move || {
-                // Tunggu semua pendahulu berkonflik selesai.
-                {
-                    let mut guard = pending
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    while guard[i] > 0 {
-                        guard = signal
-                            .wait(guard)
+            Box::new(move || {
+                loop {
+                    // Ambil sistem siap; bila belum ada tapi masih ada yang
+                    // berjalan, tunggu; bila semua selesai, berhenti.
+                    let i = {
+                        let mut st = state
+                            .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    }
+                        loop {
+                            if let Some(i) = st.ready.pop_front() {
+                                break i;
+                            }
+                            if st.remaining == 0 {
+                                return;
+                            }
+                            st = signal
+                                .wait(st)
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        }
+                    };
+                    let _release = ReleaseOnDrop {
+                        i,
+                        state,
+                        signal,
+                        successors,
+                    };
+                    let system = slots[i]
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take()
+                        .expect("tiap sistem diambil tepat sekali");
+                    system.run_shared(sync_world.0);
                 }
-                // Suksesor dilepas saat guard ini drop — juga bila `run_shared`
-                // panic, sehingga panic dipropagasi oleh `scope`, bukan menggantung.
-                let _release = ReleaseOnDrop {
-                    i,
-                    pending,
-                    signal,
-                    successors,
-                };
-                // Jalankan sistem (thread ini pemilik tunggal `&mut System`).
-                system.run_shared(sync_world.0);
-            });
-        }
-    });
+            }) as Box<dyn FnOnce() + Send + '_>
+        })
+        .collect();
+    pool.scope(jobs);
 }
 
 /// Kumpulan sistem yang dijalankan dalam urutan deterministik.
@@ -307,6 +356,9 @@ fn run_graph_shared(systems: &mut [System], world: &World) {
 #[derive(Default)]
 pub struct Schedule {
     systems: Vec<System>,
+    /// Kolam pekerja untuk `run_parallel`, dibuat malas pada pemakaian pertama
+    /// dan di-join saat `Schedule` drop.
+    pool: Option<Pool>,
 }
 
 impl Schedule {
@@ -358,7 +410,8 @@ impl Schedule {
                 if i - start == 1 {
                     self.systems[start].run(world);
                 } else {
-                    run_graph_shared(&mut self.systems[start..i], &*world);
+                    let pool = self.pool.get_or_insert_with(|| Pool::new(worker_count()));
+                    run_graph_shared(&mut self.systems[start..i], &*world, pool);
                 }
             } else {
                 // `Exclusive`: barrier serial (`&mut World`).

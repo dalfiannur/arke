@@ -16,6 +16,12 @@
 //! - **W3** akses acak per-entity (`get`) — keunggulan teoretis sparse-set (O(1)).
 //! - **W4** churn struktural (insert/remove → pindah archetype) — kelemahan archetype.
 //! - **W5** iterasi terfragmentasi (banyak archetype) — uji fragmentasi + query-cache.
+//!
+//! Tiga beban tambahan (audit 0.7.0) menjaga jalur struktural & paralel:
+//!
+//! - **W6** churn di world ber-64-archetype — resolusi archetype tujuan (indeks hash).
+//! - **W7** overhead `run_parallel` 16 sistem kecil — kolam thread persisten.
+//! - **W8** `par_for_each` terfragmentasi — pekerja terbatas di kolam.
 
 use std::hint::black_box;
 use std::time::Instant;
@@ -275,6 +281,160 @@ fn w5_fragmented(b: &Bench) {
     );
 }
 
+/// W6: churn struktural di world **ber-banyak archetype** (64): biaya resolusi
+/// archetype tujuan (`find_or_create_archetype`) — linear-scan vs map.
+fn w6_churn_many_archetypes(b: &Bench) {
+    let n = b.size(10_000, 200);
+    let mut world = World::new();
+    // 64 archetype: subset {M0..M3} × {Tag} × {Velocity} → 4 bit + 2 bit.
+    for i in 0..64usize {
+        let e = world.spawn();
+        world.insert(
+            e,
+            Position {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+        );
+        if i & 1 != 0 {
+            world.insert(e, M0);
+        }
+        if i & 2 != 0 {
+            world.insert(e, M1);
+        }
+        if i & 4 != 0 {
+            world.insert(e, M2);
+        }
+        if i & 8 != 0 {
+            world.insert(e, M3);
+        }
+        if i & 16 != 0 {
+            world.insert(e, Tag);
+        }
+        if i & 32 != 0 {
+            world.insert(
+                e,
+                Velocity {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+            );
+        }
+    }
+    // Entity churn hidup di archetype {Position, M0..M3} (dibuat belakangan).
+    let mut entities = Vec::with_capacity(n);
+    for i in 0..n {
+        let e = world.spawn_bundle((
+            Position {
+                x: i as f32,
+                y: 0.0,
+                z: 0.0,
+            },
+            M0,
+            M1,
+            M2,
+            M3,
+        ));
+        entities.push(e);
+    }
+    b.run(
+        "W6 churn insert+remove Tag (64 arch)",
+        (n * 2) as u64,
+        300.0,
+        || {
+            let mut sum = 0u64;
+            for &e in &entities {
+                world.insert(e, Tag);
+                world.remove::<Tag>(e);
+                sum = sum.wrapping_add(1);
+            }
+            sum
+        },
+    );
+}
+
+/// W7: overhead eksekutor `run_parallel` — 16 sistem kecil (8 pasang
+/// berkonflik, tiap pasang disjoint dari lainnya) atas world kecil; ns per
+/// **sistem** ≈ biaya penjadwalan/thread, bukan kerja sistem.
+fn w7_run_parallel_overhead(b: &Bench) {
+    use arke::{Schedule, System};
+    struct C0(u64);
+    struct C1(u64);
+    struct C2(u64);
+    struct C3(u64);
+    struct C4(u64);
+    struct C5(u64);
+    struct C6(u64);
+    struct C7(u64);
+    let mut world = World::new();
+    for _ in 0..b.size(256, 16) {
+        world.spawn_bundle((C0(0), C1(0), C2(0), C3(0), C4(0), C5(0), C6(0), C7(0)));
+    }
+    let mut s = Schedule::new();
+    macro_rules! pair {
+        ($t:ident) => {
+            s.add(System::each::<&mut $t>(|c| c.0 = c.0.wrapping_add(1)));
+            s.add(System::each::<&$t>(|c| {
+                black_box(c.0);
+            }));
+        };
+    }
+    pair!(C0);
+    pair!(C1);
+    pair!(C2);
+    pair!(C3);
+    pair!(C4);
+    pair!(C5);
+    pair!(C6);
+    pair!(C7);
+    b.run(
+        "W7 run_parallel 16 sistem (per sistem)",
+        16,
+        8_000.0,
+        || {
+            s.run_parallel(&mut world);
+            1
+        },
+    );
+}
+
+/// W8: `par_for_each` atas world terfragmentasi (16 archetype) — biaya spawn
+/// thread per chunk×archetype vs pekerja terbatas.
+fn w8_par_for_each_fragmented(b: &Bench) {
+    let n = b.size(100_000, 1_000);
+    let mut world = World::new();
+    for i in 0..n {
+        let e = world.spawn();
+        world.insert(
+            e,
+            Position {
+                x: i as f32,
+                y: 0.0,
+                z: 0.0,
+            },
+        );
+        let bits = i % 16;
+        if bits & 1 != 0 {
+            world.insert(e, M0);
+        }
+        if bits & 2 != 0 {
+            world.insert(e, M1);
+        }
+        if bits & 4 != 0 {
+            world.insert(e, M2);
+        }
+        if bits & 8 != 0 {
+            world.insert(e, M3);
+        }
+    }
+    b.run("W8 par_for_each Position (16 arch)", n as u64, 8.0, || {
+        world.par_for_each::<Position>(|p| p.x += 1.0);
+        1
+    });
+}
+
 fn main() {
     let quick = std::env::var_os("ARKE_BENCH_QUICK").is_some();
     let check = std::env::var_os("ARKE_BENCH_CHECK").is_some();
@@ -297,6 +457,9 @@ fn main() {
     w3_random_get(&b);
     w4_churn(&b);
     w5_fragmented(&b);
+    w6_churn_many_archetypes(&b);
+    w7_run_parallel_overhead(&b);
+    w8_par_for_each_fragmented(&b);
 
     if check && b.failed.get() > 0 {
         eprintln!(

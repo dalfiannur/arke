@@ -46,7 +46,8 @@ use std::hash::{BuildHasherDefault, Hasher};
 
 use crate::storage::{Column, TypedColumn};
 
-/// Hasher cepat untuk kunci `TypeId` (algoritma FxHash, dipakai rustc).
+/// Hasher cepat untuk kunci `TypeId` dan `[ComponentId]` (algoritma FxHash,
+/// dipakai rustc).
 ///
 /// `TypeId` sudah berupa hash 128-bit berkualitas; SipHash default boros untuk
 /// kunci sekecil ini. Deterministik (tanpa seed acak) — hanya untuk *lookup*
@@ -68,6 +69,15 @@ impl Hasher for TypeIdHasher {
         self.write_u64(i as u64);
         self.write_u64((i >> 64) as u64);
     }
+    // Jalur cepat untuk kunci `[ComponentId]` (u32 per elemen + panjang) di
+    // indeks archetype `World` — tanpa ini default `write_u32`/`write_usize`
+    // jatuh ke `write(&[u8])` per elemen.
+    fn write_u32(&mut self, i: u32) {
+        self.write_u64(u64::from(i));
+    }
+    fn write_usize(&mut self, i: usize) {
+        self.write_u64(i as u64);
+    }
     fn write(&mut self, bytes: &[u8]) {
         // Fallback (jarang; `TypeId` memakai `write_u64`/`write_u128`).
         for chunk in bytes.chunks(8) {
@@ -80,6 +90,10 @@ impl Hasher for TypeIdHasher {
 
 /// `HashMap` berkunci `TypeId` dengan hasher cepat.
 pub(crate) type TypeIdMap<V> = HashMap<TypeId, V, BuildHasherDefault<TypeIdHasher>>;
+
+/// `HashMap` berkunci himpunan komponen (terurut) dengan hasher cepat — indeks
+/// archetype di `World`.
+pub(crate) type ArchetypeMap<V> = HashMap<Box<[ComponentId]>, V, BuildHasherDefault<TypeIdHasher>>;
 
 /// Pemetaan tipe komponen ke [`ComponentId`], sekaligus pabrik kolom kosong
 /// untuk tiap tipe yang terdaftar.
