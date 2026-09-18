@@ -19,6 +19,13 @@ rilis juga ada di [GitHub Releases](https://github.com/dalfiannur/arke/releases)
   `sqlx::Error::Protocol`); `count()` mengabaikan kursor. Tipe baru: `Cursor`,
   `CursorError`, `Page`, `PageError`.
 
+- **`arke-postgres`: filter lintas komponen `Query::with::<R>()` /
+  `with_where(Filter<R>)` / `without::<R>()`** — padanan `With`/`Without` arke
+  core di Postgres: semi-join `pid [NOT] IN (SELECT pid FROM cmp_r [WHERE …])`
+  pada entity yang sama (bukan relasi FK), ikut `where_clause` sehingga berlaku
+  untuk `load*`, `count`, `exists`, `count_estimate`, `load_page`, dan mutasi
+  massal.
+
 - **`arke-postgres`: full-text search.** `#[pg(fts)]`/`#[pg(fts = "<regconfig>")]`
   (derive 0.8 → `PgComponent::FTS`, `FtsDef`; hanya `String`/`Option<String>`)
   → `migrate` membuat indeks GIN ekspresi `to_tsvector('<cfg>', col)`

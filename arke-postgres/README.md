@@ -107,6 +107,31 @@ let n = store.query::<Meeting>().filter(f)
 # }
 ```
 
+**Filter lintas komponen** (entity yang sama, bukan relasi FK) — padanan
+`With`/`Without` arke core: `.with::<R>()` (memiliki `R`),
+`.with_where(R::field().eq(..))` (memiliki `R` yang memenuhi predikat),
+`.without::<R>()`. Tiap-tiap jadi satu semi-join `pid IN (SELECT pid FROM cmp_r …)`
+di query yang sama — pengganti `INTERSECT` + N×`EXISTS` pada model JSONB.
+Ikut berlaku untuk `count`/`exists`/`count_estimate`/`load_page`.
+
+```rust,no_run
+# use arke::World;
+# use arke_postgres::{Dir, PgComponent, PgStore};
+# #[derive(PgComponent)] struct Order { status: String, total: i64 }
+# #[derive(PgComponent)] struct Customer { tier: String }
+# #[derive(PgComponent)] struct Archived { at: i64 }
+# async fn f(store: &mut PgStore, world: &mut World) -> Result<(), sqlx::Error> {
+// "order open milik customer gold yang belum diarsipkan, urut total"
+let n = store.query::<Order>()
+    .filter(Order::status().eq("open".into()))
+    .with_where(Customer::tier().eq("gold".into()))
+    .without::<Archived>()
+    .order_by(Order::total(), Dir::Desc)
+    .load(world).await?;
+# Ok(())
+# }
+```
+
 **Paginasi keyset** — untuk list screen, `load_page` mengganti `offset` +
 `count()`: mengambil `limit + 1` baris, mengembalikan `Page { items, next, prev }`
 dengan kursor opaque aman-URL (`Cursor` ↔ `String` via `Display`/`FromStr`).

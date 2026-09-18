@@ -847,6 +847,9 @@ pub struct Query<'a, T: PgComponent> {
     only: Option<&'static [&'static str]>,
     /// Kursor keyset (`after`/`before`).
     cursor: Option<(Cursor, Bound)>,
+    /// Kondisi **lintas komponen** pada entity yang sama
+    /// (`with`/`with_where`/`without`): SQL + param.
+    archetype: Vec<(String, Vec<(PgType, PgValue)>)>,
 }
 
 impl<'a, T: PgComponent> Query<'a, T> {
@@ -860,6 +863,7 @@ impl<'a, T: PgComponent> Query<'a, T> {
             offset: None,
             only: None,
             cursor: None,
+            archetype: Vec::new(),
         }
     }
 
@@ -869,6 +873,38 @@ impl<'a, T: PgComponent> Query<'a, T> {
             Some(existing) => existing.and(f),
             None => f,
         });
+        self
+    }
+
+    /// Saring entity yang **juga memiliki** komponen `R` (kehadiran, apa pun
+    /// nilainya) — padanan `With<R>` arke core di sisi Postgres:
+    /// `pid IN (SELECT pid FROM cmp_r)`. Lihat [`Self::with_where`] untuk
+    /// predikat atas `R`, [`Self::without`] untuk ketiadaan.
+    pub fn with<R: PgComponent>(mut self) -> Self {
+        self.archetype
+            .push((archetype_cond(R::TABLE, None, false), Vec::new()));
+        self
+    }
+
+    /// Saring entity yang memiliki komponen `R` yang **memenuhi** `filter`
+    /// (join lintas komponen pada entity yang sama, bukan relasi FK):
+    /// `pid IN (SELECT pid FROM cmp_r WHERE <filter>)`. Satu semi-join per
+    /// komponen — pengganti `INTERSECT` + `EXISTS` pada model JSONB. Berlaku
+    /// juga untuk `count`/`exists`/`count_estimate`/`load_page`. Boleh
+    /// berkali-kali (digabung `AND`).
+    pub fn with_where<R: PgComponent>(mut self, filter: Filter<R>) -> Self {
+        self.archetype.push((
+            archetype_cond(R::TABLE, Some(&filter.sql), false),
+            filter.params,
+        ));
+        self
+    }
+
+    /// Saring entity yang **tidak** memiliki komponen `R` — padanan `Without<R>`:
+    /// `pid NOT IN (SELECT pid FROM cmp_r)`.
+    pub fn without<R: PgComponent>(mut self) -> Self {
+        self.archetype
+            .push((archetype_cond(R::TABLE, None, true), Vec::new()));
         self
     }
 
@@ -1001,6 +1037,10 @@ impl<'a, T: PgComponent> Query<'a, T> {
         for j in &self.joins {
             conds.push(join_cond(j.rel_column, j.related_table, &j.filter_sql));
             params.extend(j.filter_params.iter().cloned());
+        }
+        for (sql, p) in &self.archetype {
+            conds.push(sql.clone());
+            params.extend(p.iter().cloned());
         }
         if conds.is_empty() {
             (None, params)
@@ -1516,6 +1556,19 @@ fn recursive_sql(table: &str, rel: &str, dir: RecurDir) -> String {
 
 /// Kondisi join antar-entity (RFC-0031) sebagai sub-query (menghindari alias):
 /// `<rel> IN (SELECT entity_id FROM <tbl> WHERE <filter>)`.
+/// Kondisi lintas komponen: `pid [NOT] IN (SELECT pid FROM <table> [WHERE f])`.
+/// `pid` di tabel komponen tak pernah NULL (PK/FK), jadi `NOT IN` aman.
+fn archetype_cond(table: &str, filter_sql: Option<&str>, negate: bool) -> String {
+    let not = if negate { "NOT " } else { "" };
+    match filter_sql {
+        Some(f) => format!(
+            "pid {not}IN (SELECT pid FROM {} WHERE {f})",
+            quote_ident(table)
+        ),
+        None => format!("pid {not}IN (SELECT pid FROM {})", quote_ident(table)),
+    }
+}
+
 fn join_cond(rel_column: &str, related_table: &str, filter_sql: &str) -> String {
     format!(
         "{} IN (SELECT pid FROM {} WHERE {filter_sql})",
@@ -1831,6 +1884,27 @@ mod tests {
         let (order, oparams) = order_by_sql(&keys, false);
         assert!(order.starts_with("ts_rank(") && order.ends_with(" DESC, pid DESC"));
         assert_eq!(oparams.len(), 1);
+    }
+
+    #[test]
+    fn archetype_cond_sql() {
+        assert_eq!(
+            archetype_cond("cmp_note", None, false),
+            "pid IN (SELECT pid FROM cmp_note)"
+        );
+        assert_eq!(
+            archetype_cond("cmp_note", None, true),
+            "pid NOT IN (SELECT pid FROM cmp_note)"
+        );
+        assert_eq!(
+            archetype_cond("cmp_customer", Some("tier = ?"), false),
+            "pid IN (SELECT pid FROM cmp_customer WHERE tier = ?)"
+        );
+        // Kata kunci sebagai nama tabel di-quote.
+        assert_eq!(
+            archetype_cond("order", None, false),
+            "pid IN (SELECT pid FROM \"order\")"
+        );
     }
 
     #[test]
