@@ -169,15 +169,31 @@ impl MongoStore {
     ///
     /// `pid` dialokasikan di sisi klien, jadi operasi ini cukup satu
     /// round-trip dan aman untuk multi-replica (RFC-0035 §3).
-    pub async fn create(&mut self, world: &World, entity: Entity) -> Result<Pid, MongoError> {
-        self.bind_world(world)?;
-        let cmp = self.reg.cmp_doc(world, entity)?;
-        let pid = Pid::new();
-        self.entities
-            .insert_one(doc! { "_id": pid.0, "version": 0i64, "cmp": cmp })
-            .await?;
-        self.bind(entity, pid);
-        Ok(pid)
+    ///
+    /// Bukan `async fn`: parameter `async fn` hidup di state future sampai
+    /// selesai, sehingga `&World` tertangkap melewati `.await` dan future
+    /// pemanggil menjadi `!Send` (`World` bukan `Sync`). `world` selesai dibaca
+    /// di sini; future yang dikembalikan hanya memegang `&mut self` + BSON owned
+    /// dan dijamin `Send` (sejajar `arke-postgres` ≥ 0.17.1). Galat fase sinkron
+    /// (`WorldMismatch`, validasi nama field) dilaporkan lewat future, sebelum
+    /// satu pun tulis.
+    pub fn create<'s>(
+        &'s mut self,
+        world: &World,
+        entity: Entity,
+    ) -> impl std::future::Future<Output = Result<Pid, MongoError>> + Send + 's {
+        let staged = self
+            .bind_world(world)
+            .and_then(|()| self.reg.cmp_doc(world, entity));
+        async move {
+            let cmp = staged?;
+            let pid = Pid::new();
+            self.entities
+                .insert_one(doc! { "_id": pid.0, "version": 0i64, "cmp": cmp })
+                .await?;
+            self.bind(entity, pid);
+            Ok(pid)
+        }
     }
 
     /// Memuat dokumen `pid` ke `world` sebagai entity baru; `None` bila dokumen
@@ -413,20 +429,33 @@ impl MongoStore {
     /// `save` dengan `World` yang berbeda dari yang ditautkan store →
     /// [`MongoError::WorldMismatch`] (dulu: menghapus dokumen milik `World`
     /// lama) — lihat "Satu store, satu `World`" pada [`MongoStore`].
-    pub async fn save(&mut self, world: &World) -> Result<(), MongoError> {
+    ///
+    /// Bukan `async fn` (lihat [`create`](Self::create)): seluruh pembacaan
+    /// `world` terjadi secara sinkron sebelum kembali, future yang dikembalikan
+    /// tak memegang `&World` dan `Send`.
+    pub fn save<'s>(
+        &'s mut self,
+        world: &World,
+    ) -> impl std::future::Future<Output = Result<(), MongoError>> + Send + 's {
+        let staged = self.stage_save(world);
+        async move {
+            let ops = staged?;
+            self.commit_save(ops).await
+        }
+    }
+
+    /// Fase sinkron [`save`](Self::save): kumpulkan operasi tulis per entity
+    /// hidup. `update_ops` bisa gagal dengan `InvalidName`/`DuplicateField`
+    /// (validasi nama field, RFC-0035 Am. 2); mengumpulkan semua operasi dulu
+    /// berarti galat semacam itu membatalkan seluruh `save` **sebelum** satu
+    /// dokumen pun tertulis — bukan meninggalkan separuh entity tertulis dan
+    /// separuh gagal di tengah jalan. Biayanya: BSON seluruh entity hidup ditahan
+    /// di memori sekaligus sebelum satu pun ditulis.
+    fn stage_save(
+        &mut self,
+        world: &World,
+    ) -> Result<Vec<(Entity, Option<Pid>, Document)>, MongoError> {
         self.bind_world(world)?;
-        // Kumpulkan dulu (sinkron) alih-alih menulis sambil mengiterasi:
-        // `update_ops` bisa gagal dengan `InvalidName`/`DuplicateField`
-        // (validasi nama field, RFC-0035 Am. 2), dan mengumpulkan semua
-        // operasi dulu berarti error semacam itu membatalkan seluruh `save`
-        // **sebelum** satu dokumen pun tertulis — bukan meninggalkan separuh
-        // entity tertulis dan separuh gagal di tengah jalan. (Ini tak ada
-        // hubungannya dengan menahan `&World` melewati `.await`: `world` di
-        // sini parameter `async fn`, jadi ia sudah hidup di dalam future
-        // untuk seluruh umurnya terlepas dari kapan dikumpulkan — future ini
-        // `!Send` baik dikumpulkan lebih dulu maupun tidak, sejajar
-        // `arke-postgres`.) Biayanya: BSON seluruh entity hidup ditahan di
-        // memori sekaligus sebelum satu pun ditulis.
         let mut live: Vec<Entity> = Vec::new();
         <Entity>::each_filtered_shared::<()>(world, |e| live.push(e));
 
@@ -438,7 +467,15 @@ impl MongoStore {
                 self.reg.update_ops(world, entity)?,
             ));
         }
+        Ok(ops)
+    }
 
+    /// Fase async [`save`](Self::save): upsert tiap entity, lalu hapus dokumen
+    /// entity yang hilang dari World. **Tidak menyentuh `World`.**
+    async fn commit_save(
+        &mut self,
+        ops: Vec<(Entity, Option<Pid>, Document)>,
+    ) -> Result<(), MongoError> {
         let mut still_live: HashSet<Pid> = HashSet::with_capacity(ops.len());
         for (entity, existing, update) in ops {
             let pid = existing.unwrap_or_else(Pid::new);

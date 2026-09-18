@@ -97,6 +97,13 @@ rilis juga ada di [GitHub Releases](https://github.com/dalfiannur/arke/releases)
   `tests/send_future.rs`. Pola "World per-request" di README kini benar-benar
   bisa di-await langsung di handler multi-thread.
 
+- **`arke-mongo`: future `MongoStore::create`/`save` kini `Send` tanpa
+  `World: Sync`** — akar dan pola perbaikan yang sama dengan `arke-postgres`
+  di atas: pembacaan `world` (validasi nama field, pengumpulan operasi) menjadi
+  fase sinkron, I/O di future yang dikembalikan (`impl Future + Send + '_`);
+  galat fase sinkron tetap membatalkan `save` sebelum satu dokumen pun tertulis.
+  Pemanggilan `.await` tak berubah. Uji kompilasi `arke-mongo/tests/send_future.rs`.
+
 ## [0.7.0] — 2026-09-15
 
 Rilis gelombang breaking kedua menuju 1.0 ([RFC-0036](docs/RFC/RFC-0036-audit-0.7-soundness-stability-security.md), [ADR-0036](docs/ADR/ADR-0036-audit-0.7-soundness-stability-security.md), [Milestone 33](docs/MILESTONE_33.md)). Crate pendamping: `arke-derive` 0.4.0 (`#[serialize(name/default)]`; kode hasil derive butuh `arke` ≥ 0.7), `arke-postgres` 0.16.0, `arke-postgres-derive` 0.8.0, `arke-cache` 0.4.0, `arke-mongo` 0.1.0 (rilis pertama).
