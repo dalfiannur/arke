@@ -883,19 +883,43 @@ impl PgStore {
         world: &mut World,
         only: Option<&[&'static str]>,
     ) -> Result<Vec<(i64, Entity)>, sqlx::Error> {
-        let mut q = sqlx::query(&sql);
-        for (ty, val) in &params {
-            q = bind_value(q, *ty, val);
-        }
-        let ids: Vec<i64> = q
-            .fetch_all(&self.pool)
+        let ids: Vec<i64> = self
+            .fetch_rows(&sql, &params)
             .await?
             .iter()
             .map(|r| r.try_get("pid"))
             .collect::<Result<_, _>>()?;
-        let loaded = self.materialize_only(world, &ids, only).await?;
+        self.load_ids_only(world, &ids, only).await
+    }
+
+    /// Jalankan `sql` ter-parameterisasi, kembalikan baris mentah.
+    pub(crate) async fn fetch_rows(
+        &self,
+        sql: &str,
+        params: &[(PgType, PgValue)],
+    ) -> Result<Vec<sqlx::postgres::PgRow>, sqlx::Error> {
+        let mut q = sqlx::query(sql);
+        for (ty, val) in params {
+            q = bind_value(q, *ty, val);
+        }
+        q.fetch_all(&self.pool).await
+    }
+
+    /// Materialisasi `ids` (hidrasi selektif `only`) + selaraskan rekam sinkron.
+    /// Hasil **urut mengikuti `ids`** (urutan query), bukan `ORDER BY pid`.
+    pub(crate) async fn load_ids_only(
+        &mut self,
+        world: &mut World,
+        ids: &[i64],
+        only: Option<&[&'static str]>,
+    ) -> Result<Vec<(i64, Entity)>, sqlx::Error> {
+        let loaded = self.materialize_only(world, ids, only).await?;
         self.last = self.dump_state(world);
-        Ok(loaded)
+        let by_pid: HashMap<i64, Entity> = loaded.into_iter().collect();
+        Ok(ids
+            .iter()
+            .filter_map(|pid| by_pid.get(pid).map(|&e| (*pid, e)))
+            .collect())
     }
 
     /// Rekonstruksi entity `ids` + seluruh komponennya ke `world`.
@@ -1693,37 +1717,47 @@ async fn allocate_pids(conn: &mut PgConnection, n: usize) -> Result<Vec<i64>, sq
 
 /// Baca satu kolom baris menjadi [`PgValue`] sesuai tipenya (`NULL` → `Null`).
 fn read_value(row: &sqlx::postgres::PgRow, col: &ColumnDef) -> Result<PgValue, sqlx::Error> {
-    Ok(match col.ty {
-        PgType::Integer => match row.try_get::<Option<i32>, _>(col.name)? {
+    read_typed(row, col.name, col.ty)
+}
+
+/// Baca kolom `name` bertipe `ty` dari `row` sebagai [`PgValue`] (`NULL` → `Null`).
+/// JSONB/NUMERIC diharapkan sudah di-`::text` oleh SQL pemanggil.
+pub(crate) fn read_typed(
+    row: &sqlx::postgres::PgRow,
+    name: &str,
+    ty: PgType,
+) -> Result<PgValue, sqlx::Error> {
+    Ok(match ty {
+        PgType::Integer => match row.try_get::<Option<i32>, _>(name)? {
             Some(v) => PgValue::Int(i64::from(v)),
             None => PgValue::Null,
         },
-        PgType::BigInt => match row.try_get::<Option<i64>, _>(col.name)? {
+        PgType::BigInt => match row.try_get::<Option<i64>, _>(name)? {
             Some(v) => PgValue::Int(v),
             None => PgValue::Null,
         },
-        PgType::Real => match row.try_get::<Option<f32>, _>(col.name)? {
+        PgType::Real => match row.try_get::<Option<f32>, _>(name)? {
             Some(v) => PgValue::Float(f64::from(v)),
             None => PgValue::Null,
         },
-        PgType::DoublePrecision => match row.try_get::<Option<f64>, _>(col.name)? {
+        PgType::DoublePrecision => match row.try_get::<Option<f64>, _>(name)? {
             Some(v) => PgValue::Float(v),
             None => PgValue::Null,
         },
-        PgType::Boolean => match row.try_get::<Option<bool>, _>(col.name)? {
+        PgType::Boolean => match row.try_get::<Option<bool>, _>(name)? {
             Some(v) => PgValue::Bool(v),
             None => PgValue::Null,
         },
-        PgType::Text => match row.try_get::<Option<String>, _>(col.name)? {
+        PgType::Text => match row.try_get::<Option<String>, _>(name)? {
             Some(v) => PgValue::Text(v),
             None => PgValue::Null,
         },
         // Dibaca lewat `col::text` (lihat `select_sql`).
-        PgType::Jsonb => match row.try_get::<Option<String>, _>(col.name)? {
+        PgType::Jsonb => match row.try_get::<Option<String>, _>(name)? {
             Some(v) => PgValue::Json(v),
             None => PgValue::Null,
         },
-        PgType::Numeric => match row.try_get::<Option<String>, _>(col.name)? {
+        PgType::Numeric => match row.try_get::<Option<String>, _>(name)? {
             Some(v) => PgValue::Numeric(v),
             None => PgValue::Null,
         },

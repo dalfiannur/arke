@@ -9,6 +9,16 @@ rilis juga ada di [GitHub Releases](https://github.com/dalfiannur/arke/releases)
 
 ### Added
 
+- **`arke-postgres`: paginasi keyset `Query::after`/`before`/`load_page`.**
+  `load_page` mengambil `limit + 1` baris → `Page { items, next, prev }` tanpa
+  `COUNT(*)`; `Cursor` opaque aman-URL (JSON `arke::Value` + base64url, 0-dep;
+  `Display`/`FromStr`). Arah seragam → row-value compare `(k…, pid) > (…)`
+  (ramah index); arah campur → OR-expanded. Kursor divalidasi terhadap
+  `order_by` (`CursorError::Mismatch`); `NULL`/JSONB sebagai kunci ditolak.
+  `after`/`before` juga berlaku untuk `load`/`load_pids` (galat kursor →
+  `sqlx::Error::Protocol`); `count()` mengabaikan kursor. Tipe baru: `Cursor`,
+  `CursorError`, `Page`, `PageError`.
+
 - **`arke-postgres`: hidrasi selektif `Query::only::<S>()`.** `S` = satu
   komponen atau tuple 1–8 (`only::<(Health, Position)>()`); `load`/`load_pids`
   hanya membaca tabel komponen dalam `S` (round-trip `2 + |S|`, bukan `2 + R`
@@ -20,6 +30,11 @@ rilis juga ada di [GitHub Releases](https://github.com/dalfiannur/arke/releases)
   Trait `ComponentSet` diekspor.
 
 ### Changed
+
+- **`arke-postgres`: `ORDER BY` query builder selalu diikat `pid`** (arah
+  mengikuti kunci terakhir) → urutan total & deterministik juga untuk
+  `limit`/`offset`. **`load_pids` kini mengembalikan urutan `ORDER BY` query**
+  (sebelumnya `ORDER BY pid` dari `materialize`, bertentangan dengan doc-nya).
 
 - **`arke-postgres`: `#[pg(check)]` ber-nama-stabil (content-addressed).**
   Constraint kini bernama `chk_<tabel>_<fnv64(ekspresi)>` (dulu

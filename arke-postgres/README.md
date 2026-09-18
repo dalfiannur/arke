@@ -107,6 +107,30 @@ let n = store.query::<Meeting>().filter(f)
 # }
 ```
 
+**Paginasi keyset** — untuk list screen, `load_page` mengganti `offset` +
+`count()`: mengambil `limit + 1` baris, mengembalikan `Page { items, next, prev }`
+dengan kursor opaque aman-URL (`Cursor` ↔ `String` via `Display`/`FromStr`).
+`ORDER BY` selalu diikat `pid` (deterministik); arah seragam → row-value compare
+`(k, pid) > ($1, $2)` yang ramah index. Kursor divalidasi terhadap `order_by`
+query (`PageError::Cursor(Mismatch)` bila beda). Kunci bernilai `NULL` tak
+terjangkau keyset — filter atau beri default.
+
+```rust,no_run
+# use arke::World;
+# use arke_postgres::{Cursor, Dir, PgComponent, PgStore};
+# #[derive(PgComponent)] struct Meeting { start: i64 }
+# async fn f(store: &mut PgStore, world: &mut World, token: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+let mut q = store.query::<Meeting>().order_by(Meeting::start(), Dir::Desc).limit(20);
+if let Some(t) = token {                      // dari ?cursor=… request sebelumnya
+    q = q.after(t.parse::<Cursor>()?);
+}
+let page = q.load_page(world).await?;
+let next_token = page.next.map(|c| c.to_string()); // None = halaman terakhir
+# let _ = next_token;
+# Ok(())
+# }
+```
+
 **Hidrasi selektif** — `load` memuat *seluruh* komponen terdaftar untuk tiap
 entity yang cocok (1 round-trip per tabel). Bila endpoint hanya butuh sebagian,
 `.only::<(A, B)>()` (atau `.only::<A>()`) membatasi ke tabel itu saja; komponen

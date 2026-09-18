@@ -365,6 +365,379 @@ struct JoinClause {
     load: bool,
 }
 
+// ---------------------------------------------------------------------------
+// Paginasi keyset (RFC-0030 lanjutan): kursor opaque + kondisi `WHERE` keyset.
+// ---------------------------------------------------------------------------
+
+/// Kursor **keyset** opaque: nilai kunci `ORDER BY` + `pid` baris tepi halaman.
+/// Dibuat oleh [`Query::load_page`] (`next`/`prev`), diteruskan ke
+/// [`Query::after`]/[`Query::before`]. Stabil sebagai string aman-URL lewat
+/// [`Cursor::encode`]/[`Cursor::decode`] (juga `Display`/`FromStr`); isinya
+/// **bukan** rahasia (bukan tanda tangan) — validasi kecocokan kunci dilakukan
+/// saat query dijalankan ([`CursorError::Mismatch`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Cursor {
+    keys: Vec<PgValue>,
+    pid: i64,
+}
+
+/// Kegagalan membaca/mencocokkan [`Cursor`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CursorError {
+    /// Token bukan hasil [`Cursor::encode`] (base64url/JSON/skema tak dikenal).
+    Malformed,
+    /// Kursor tak cocok dengan `order_by` query ini (jumlah/tipe kunci), atau
+    /// kunci tak dapat dipakai keyset (`NULL`, JSONB, referensi entity).
+    Mismatch(String),
+}
+
+impl std::fmt::Display for CursorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CursorError::Malformed => write!(f, "kursor keyset rusak/tak dikenal"),
+            CursorError::Mismatch(why) => write!(f, "kursor keyset tak cocok: {why}"),
+        }
+    }
+}
+
+impl std::error::Error for CursorError {}
+
+/// Kegagalan [`Query::load_page`].
+#[derive(Debug)]
+pub enum PageError {
+    /// `load_page` butuh [`Query::limit`] (ukuran halaman).
+    MissingLimit,
+    /// [`Query::offset`] tak bermakna bersama kursor — pakai salah satu.
+    OffsetWithCursor,
+    /// Kursor tak cocok/rusak.
+    Cursor(CursorError),
+    /// Galat database.
+    Db(sqlx::Error),
+}
+
+impl std::fmt::Display for PageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PageError::MissingLimit => write!(f, "load_page butuh limit (ukuran halaman)"),
+            PageError::OffsetWithCursor => write!(f, "offset tak dapat dipakai bersama kursor"),
+            PageError::Cursor(e) => write!(f, "{e}"),
+            PageError::Db(e) => write!(f, "database: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for PageError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            PageError::Cursor(e) => Some(e),
+            PageError::Db(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<sqlx::Error> for PageError {
+    fn from(e: sqlx::Error) -> Self {
+        PageError::Db(e)
+    }
+}
+
+impl From<CursorError> for PageError {
+    fn from(e: CursorError) -> Self {
+        PageError::Cursor(e)
+    }
+}
+
+/// Satu halaman hasil [`Query::load_page`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct Page {
+    /// `(pid, Entity)` urut sesuai `ORDER BY` query (arah maju), ≤ `limit`.
+    pub items: Vec<(i64, Entity)>,
+    /// Kursor halaman **berikut** (`Some` bila masih ada baris setelah halaman
+    /// ini) — teruskan ke [`Query::after`].
+    pub next: Option<Cursor>,
+    /// Kursor halaman **sebelum** (`Some` bila halaman ini dicapai lewat kursor,
+    /// atau `before` menemukan baris lebih awal) — teruskan ke [`Query::before`].
+    pub prev: Option<Cursor>,
+}
+
+/// Arah kursor pada [`Query`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Bound {
+    After,
+    Before,
+}
+
+impl Cursor {
+    /// Encode ke token aman-URL (`[A-Za-z0-9_-]`): JSON `{"v":1,"k":[[tag,val]…],"p":pid}`
+    /// di-base64url tanpa padding.
+    pub fn encode(&self) -> String {
+        use arke::Value;
+        let keys: Vec<Value> = self
+            .keys
+            .iter()
+            .map(|v| {
+                let (tag, val) = match v {
+                    PgValue::Int(i) => ("i", Value::Int(*i)),
+                    PgValue::Float(f) => ("f", Value::Float(*f)),
+                    PgValue::Bool(b) => ("b", Value::Bool(*b)),
+                    PgValue::Text(t) => ("t", Value::Text(t.clone())),
+                    PgValue::Numeric(n) => ("n", Value::Text(n.clone())),
+                    // Ditolak saat validasi (`keyset_where`); tak pernah sampai sini
+                    // lewat `load_page`. Dipetakan agar `encode` total.
+                    PgValue::Json(j) => ("j", Value::Text(j.clone())),
+                    PgValue::Ref(r) => ("r", Value::Int(*r)),
+                    PgValue::Null => ("_", Value::Null),
+                };
+                Value::List(vec![Value::Text(tag.to_string()), val])
+            })
+            .collect();
+        let doc = Value::Map(vec![
+            ("v".to_string(), Value::Int(1)),
+            ("k".to_string(), Value::List(keys)),
+            ("p".to_string(), Value::Int(self.pid)),
+        ]);
+        base64url_encode(doc.to_json().as_bytes())
+    }
+
+    /// Kebalikan [`Cursor::encode`].
+    pub fn decode(token: &str) -> Result<Cursor, CursorError> {
+        use arke::Value;
+        let bytes = base64url_decode(token).ok_or(CursorError::Malformed)?;
+        let text = String::from_utf8(bytes).map_err(|_| CursorError::Malformed)?;
+        let Some(Value::Map(fields)) = Value::from_json(&text) else {
+            return Err(CursorError::Malformed);
+        };
+        let get = |name: &str| fields.iter().find(|(k, _)| k == name).map(|(_, v)| v);
+        if get("v") != Some(&Value::Int(1)) {
+            return Err(CursorError::Malformed);
+        }
+        let Some(Value::Int(pid)) = get("p") else {
+            return Err(CursorError::Malformed);
+        };
+        let Some(Value::List(list)) = get("k") else {
+            return Err(CursorError::Malformed);
+        };
+        let mut keys = Vec::with_capacity(list.len());
+        for item in list {
+            let Value::List(pair) = item else {
+                return Err(CursorError::Malformed);
+            };
+            let [Value::Text(tag), val] = pair.as_slice() else {
+                return Err(CursorError::Malformed);
+            };
+            keys.push(match (tag.as_str(), val) {
+                ("i", Value::Int(i)) => PgValue::Int(*i),
+                ("f", Value::Float(f)) => PgValue::Float(*f),
+                ("f", Value::Int(i)) => PgValue::Float(*i as f64),
+                ("b", Value::Bool(b)) => PgValue::Bool(*b),
+                ("t", Value::Text(t)) => PgValue::Text(t.clone()),
+                ("n", Value::Text(n)) => PgValue::Numeric(n.clone()),
+                ("j", Value::Text(j)) => PgValue::Json(j.clone()),
+                ("r", Value::Int(r)) => PgValue::Ref(*r),
+                ("_", Value::Null) => PgValue::Null,
+                _ => return Err(CursorError::Malformed),
+            });
+        }
+        Ok(Cursor { keys, pid: *pid })
+    }
+}
+
+impl std::fmt::Display for Cursor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.encode())
+    }
+}
+
+impl std::str::FromStr for Cursor {
+    type Err = CursorError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Cursor::decode(s)
+    }
+}
+
+const B64URL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+/// base64url tanpa padding (RFC 4648 §5) — 0 dependensi.
+fn base64url_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        let chars = [
+            B64URL[(n >> 18) as usize & 63],
+            B64URL[(n >> 12) as usize & 63],
+            B64URL[(n >> 6) as usize & 63],
+            B64URL[n as usize & 63],
+        ];
+        let keep = chunk.len() + 1;
+        out.extend(chars[..keep].iter().map(|&c| c as char));
+    }
+    out
+}
+
+fn base64url_decode(s: &str) -> Option<Vec<u8>> {
+    let val = |c: u8| B64URL.iter().position(|&x| x == c).map(|p| p as u32);
+    let bytes = s.as_bytes();
+    if bytes.len() % 4 == 1 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
+    for chunk in bytes.chunks(4) {
+        let mut n: u32 = 0;
+        for &c in chunk {
+            n = (n << 6) | val(c)?;
+        }
+        n <<= 6 * (4 - chunk.len());
+        let full = [(n >> 16) as u8, (n >> 8) as u8, n as u8];
+        out.extend_from_slice(&full[..chunk.len() - 1]);
+    }
+    Some(out)
+}
+
+/// SQL utama ter-parameterisasi + nilai bind + apakah urutan dibalik (`before`).
+type BuiltSql = (String, Vec<(PgType, PgValue)>, bool);
+
+/// Satu kunci `ORDER BY` (kolom, tipe, arah).
+#[derive(Clone, Copy, Debug)]
+struct OrderKey {
+    column: &'static str,
+    ty: PgType,
+    dir: Dir,
+}
+
+/// Kunci efektif keyset: `order` + tiebreak `pid` (arah = arah kunci terakhir,
+/// `Asc` bila tanpa `order_by`) — urutan total & deterministik.
+fn keyset_keys(order: &[OrderKey]) -> Vec<OrderKey> {
+    let mut keys = order.to_vec();
+    let dir = order.last().map_or(Dir::Asc, |k| k.dir);
+    keys.push(OrderKey {
+        column: "pid",
+        ty: PgType::BigInt,
+        dir,
+    });
+    keys
+}
+
+/// Klausa `ORDER BY` untuk `keys` (dibalik bila `reverse`).
+fn order_by_sql(keys: &[OrderKey], reverse: bool) -> String {
+    let parts: Vec<String> = keys
+        .iter()
+        .map(|k| {
+            let dir = match (k.dir, reverse) {
+                (Dir::Asc, false) | (Dir::Desc, true) => "ASC",
+                (Dir::Desc, false) | (Dir::Asc, true) => "DESC",
+            };
+            format!("{} {dir}", quote_ident(k.column))
+        })
+        .collect();
+    parts.join(", ")
+}
+
+/// Kondisi `WHERE` keyset "baris setelah `cursor`" dalam urutan `keys`
+/// (`bound = After`), atau "sebelum" (`Before`), dengan placeholder `?`.
+/// Arah seragam → row-value compare `(k1, k2, pid) > (?, ?, ?)` (ramah index);
+/// arah campur → bentuk OR-expanded. Memvalidasi kursor terhadap `keys`.
+fn keyset_where(
+    keys: &[OrderKey],
+    cursor: &Cursor,
+    bound: Bound,
+) -> Result<(String, Vec<(PgType, PgValue)>), CursorError> {
+    // `keys` sudah termasuk `pid` di ujung; kursor menyimpan kunci tanpa pid.
+    let n = keys.len() - 1;
+    if cursor.keys.len() != n {
+        return Err(CursorError::Mismatch(format!(
+            "kursor membawa {} kunci, order_by query {n}",
+            cursor.keys.len()
+        )));
+    }
+    let mut params: Vec<(PgType, PgValue)> = Vec::with_capacity(keys.len());
+    for (k, v) in keys.iter().zip(
+        cursor
+            .keys
+            .iter()
+            .chain(std::iter::once(&PgValue::Int(cursor.pid))),
+    ) {
+        let ok = match (k.ty, v) {
+            (PgType::Integer | PgType::BigInt, PgValue::Int(_)) => true,
+            (PgType::Real | PgType::DoublePrecision, PgValue::Float(_)) => true,
+            (PgType::Boolean, PgValue::Bool(_)) => true,
+            (PgType::Text, PgValue::Text(_)) => true,
+            (PgType::Numeric, PgValue::Numeric(_)) => true,
+            (_, PgValue::Null) => {
+                return Err(CursorError::Mismatch(format!(
+                    "kunci `{}` NULL — keyset butuh kunci non-NULL",
+                    k.column
+                )));
+            }
+            (PgType::Jsonb, _) => {
+                return Err(CursorError::Mismatch(format!(
+                    "kunci `{}` JSONB tak dapat dipakai keyset",
+                    k.column
+                )));
+            }
+            _ => false,
+        };
+        if !ok {
+            return Err(CursorError::Mismatch(format!(
+                "tipe kunci `{}` ({:?}) tak cocok nilai kursor",
+                k.column, k.ty
+            )));
+        }
+        params.push((k.ty, v.clone()));
+    }
+
+    let op = |k: &OrderKey| match (k.dir, bound) {
+        (Dir::Asc, Bound::After) | (Dir::Desc, Bound::Before) => ">",
+        (Dir::Desc, Bound::After) | (Dir::Asc, Bound::Before) => "<",
+    };
+    let ph = |k: &OrderKey| format!("?{}", cast_of(k.ty));
+    let uniform = keys.iter().all(|k| k.dir == keys[0].dir);
+    let sql = if uniform {
+        let cols: Vec<String> = keys
+            .iter()
+            .map(|k| quote_ident(k.column).into_owned())
+            .collect();
+        let phs: Vec<String> = keys.iter().map(ph).collect();
+        format!(
+            "({}) {} ({})",
+            cols.join(", "),
+            op(&keys[0]),
+            phs.join(", ")
+        )
+    } else {
+        // (k1 op ?) OR (k1 = ? AND k2 op ?) OR (k1 = ? AND k2 = ? AND pid op ?)
+        // Placeholder diulang per cabang → params diduplikasi sesuai urutan.
+        let mut branches = Vec::with_capacity(keys.len());
+        let mut dup: Vec<(PgType, PgValue)> = Vec::new();
+        for i in 0..keys.len() {
+            let mut conds = Vec::with_capacity(i + 1);
+            for (j, k) in keys.iter().enumerate().take(i + 1) {
+                let o = if j < i { "=" } else { op(k) };
+                conds.push(format!("{} {o} {}", quote_ident(k.column), ph(k)));
+                dup.push(params[j].clone());
+            }
+            branches.push(format!("({})", conds.join(" AND ")));
+        }
+        params = dup;
+        branches.join(" OR ")
+    };
+    Ok((sql, params))
+}
+
+/// Cast placeholder untuk tipe kolom (NUMERIC/JSONB di-bind sebagai teks).
+fn cast_of(ty: PgType) -> &'static str {
+    match ty {
+        PgType::Numeric => "::numeric",
+        PgType::Jsonb => "::jsonb",
+        _ => "",
+    }
+}
+
 /// Himpunan komponen untuk **hidrasi selektif** ([`Query::only`]): satu
 /// komponen (`only::<Health>()`) atau tuple 1–8 (`only::<(Health, Position)>()`).
 pub trait ComponentSet {
@@ -398,11 +771,13 @@ pub struct Query<'a, T: PgComponent> {
     pub(crate) store: &'a mut PgStore,
     filter: Option<Filter<T>>,
     joins: Vec<JoinClause>,
-    order: Vec<(&'static str, Dir)>,
+    order: Vec<OrderKey>,
     limit: Option<i64>,
     offset: Option<i64>,
     /// Hidrasi selektif: tabel komponen yang dimuat (`None` = semua terdaftar).
     only: Option<&'static [&'static str]>,
+    /// Kursor keyset (`after`/`before`).
+    cursor: Option<(Cursor, Bound)>,
 }
 
 impl<'a, T: PgComponent> Query<'a, T> {
@@ -415,6 +790,7 @@ impl<'a, T: PgComponent> Query<'a, T> {
             limit: None,
             offset: None,
             only: None,
+            cursor: None,
         }
     }
 
@@ -463,9 +839,31 @@ impl<'a, T: PgComponent> Query<'a, T> {
         self
     }
 
-    /// Tambah kunci `ORDER BY` (bisa berkali-kali untuk multi-kunci).
+    /// Tambah kunci `ORDER BY` (bisa berkali-kali untuk multi-kunci). `pid`
+    /// selalu ditambahkan sebagai kunci pengikat terakhir (arah mengikuti kunci
+    /// terakhir) → urutan total & deterministik, prasyarat paginasi keyset.
     pub fn order_by<V>(mut self, field: Field<T, V>, dir: Dir) -> Self {
-        self.order.push((field.column, dir));
+        self.order.push(OrderKey {
+            column: field.column,
+            ty: field.ty,
+            dir,
+        });
+        self
+    }
+
+    /// **Keyset**: hanya baris **setelah** `cursor` dalam urutan `order_by`
+    /// (kursor dari [`Page::next`]). Berlaku untuk `load`/`load_pids`/`load_page`;
+    /// `count()` mengabaikannya (total keseluruhan). Kursor harus berasal dari
+    /// query dengan `order_by` yang sama — bila tidak, [`CursorError::Mismatch`].
+    pub fn after(mut self, cursor: Cursor) -> Self {
+        self.cursor = Some((cursor, Bound::After));
+        self
+    }
+
+    /// **Keyset**: hanya baris **sebelum** `cursor` (kursor dari [`Page::prev`]);
+    /// hasil tetap dikembalikan dalam urutan maju. Lihat [`Self::after`].
+    pub fn before(mut self, cursor: Cursor) -> Self {
+        self.cursor = Some((cursor, Bound::Before));
         self
     }
 
@@ -519,38 +917,46 @@ impl<'a, T: PgComponent> Query<'a, T> {
         }
     }
 
-    /// Susun SQL utama ter-parameterisasi + nilai bind. Terpisah dari [`load`]
-    /// agar dapat diuji tanpa DB.
-    ///
-    /// [`load`]: Self::load
-    fn build(&self) -> (String, Vec<(PgType, PgValue)>) {
+    /// Susun SQL utama ter-parameterisasi + nilai bind, dengan `limit` eksplisit
+    /// dan, bila `select_keys`,
+    /// kolom kunci `ORDER BY` ikut di-`SELECT` (untuk membentuk kursor tepi
+    /// halaman). Mengembalikan pula apakah urutan SQL **dibalik** (`before`) —
+    /// pemanggil membalik hasil di memori.
+    fn build_with(&self, limit: Option<i64>, select_keys: bool) -> Result<BuiltSql, CursorError> {
+        let keys = keyset_keys(&self.order);
         let (where_opt, mut params) = self.where_clause();
-        let mut sql = format!("SELECT pid FROM {}", quote_ident(T::TABLE));
-        if let Some(w) = &where_opt {
+        let mut conds: Vec<String> = where_opt.into_iter().map(|w| format!("({w})")).collect();
+        let mut reversed = false;
+        if let Some((cursor, bound)) = &self.cursor {
+            let (ks, ks_params) = keyset_where(&keys, cursor, *bound)?;
+            conds.push(format!("({ks})"));
+            params.extend(ks_params);
+            reversed = *bound == Bound::Before;
+        }
+
+        let mut select = String::from("pid");
+        if select_keys {
+            // NUMERIC di-`::text` agar terbaca sebagai `PgValue::Numeric` (lihat
+            // `read_typed`); JSONB ditolak `keyset_where`.
+            for k in &self.order {
+                let col = quote_ident(k.column);
+                match k.ty {
+                    PgType::Numeric => select.push_str(&format!(", {col}::text AS {col}")),
+                    _ => select.push_str(&format!(", {col}")),
+                }
+            }
+        }
+        let mut sql = format!("SELECT {select} FROM {}", quote_ident(T::TABLE));
+        if !conds.is_empty() {
             sql.push_str(" WHERE ");
-            sql.push_str(w);
+            sql.push_str(&conds.join(" AND "));
         }
+        // Urutan total & deterministik (STD-0005 mirror pada sisi Postgres):
+        // kunci `order_by` + tiebreak `pid`.
+        sql.push_str(" ORDER BY ");
+        sql.push_str(&order_by_sql(&keys, reversed));
 
-        if self.order.is_empty() {
-            // Urutan deterministik default (STD-0005 mirror pada sisi Postgres).
-            sql.push_str(" ORDER BY pid");
-        } else {
-            sql.push_str(" ORDER BY ");
-            let parts: Vec<String> = self
-                .order
-                .iter()
-                .map(|(c, d)| {
-                    let dir = match d {
-                        Dir::Asc => "ASC",
-                        Dir::Desc => "DESC",
-                    };
-                    format!("{} {dir}", quote_ident(c))
-                })
-                .collect();
-            sql.push_str(&parts.join(", "));
-        }
-
-        if let Some(l) = self.limit {
+        if let Some(l) = limit {
             sql.push_str(" LIMIT ?");
             params.push((PgType::BigInt, PgValue::Int(l)));
         }
@@ -559,7 +965,7 @@ impl<'a, T: PgComponent> Query<'a, T> {
             params.push((PgType::BigInt, PgValue::Int(o)));
         }
 
-        (renumber(&sql), params)
+        Ok((renumber(&sql), params, reversed))
     }
 
     /// SQL pemuat target `R` untuk `join_load`: id entity yang **ditunjuk** oleh
@@ -645,8 +1051,27 @@ impl<'a, T: PgComponent> Query<'a, T> {
     /// entity `T` yang dimuat (urut `ORDER BY` query) — id persisten untuk
     /// `remove(pid)`/`commit_update(pid)`/respons API, tanpa `load_where`.
     pub async fn load_pids(self, world: &mut World) -> Result<Vec<(i64, Entity)>, sqlx::Error> {
+        // Kursor tak cocok di jalur non-`load_page` → galat protokol (`sqlx::Error`),
+        // agar tanda tangan lama tetap; `load_page` memberi `PageError` bertipe.
+        let (main_sql, main_params, reversed) = self
+            .build_with(self.limit, false)
+            .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+        let mut loaded = self.run_load(main_sql, main_params, world).await?;
+        if reversed {
+            loaded.reverse();
+        }
+        Ok(loaded)
+    }
+
+    /// Jalankan SQL utama (+ target `join_load`) dan materialisasi ke `world`.
+    /// Urutan hasil = urutan baris SQL utama.
+    async fn run_load(
+        self,
+        main_sql: String,
+        main_params: Vec<(PgType, PgValue)>,
+        world: &mut World,
+    ) -> Result<Vec<(i64, Entity)>, sqlx::Error> {
         // Susun semua SQL (pinjam-baca `self`) sebelum menyentuh `self.store`.
-        let (main_sql, main_params) = self.build();
         let targets: Vec<(String, Vec<(PgType, PgValue)>)> = self
             .joins
             .iter()
@@ -670,6 +1095,70 @@ impl<'a, T: PgComponent> Query<'a, T> {
         store
             .load_by_query(main_sql, main_params, world, only)
             .await
+    }
+
+    /// **Satu halaman keyset** tanpa `COUNT(*)`: mengambil `limit + 1` baris
+    /// untuk tahu ada-tidaknya halaman berikut, memuat ≤ `limit` entity ke
+    /// `world`, dan membentuk kursor tepi ([`Page::next`]/[`Page::prev`]).
+    /// Butuh [`limit`](Self::limit); tak boleh bersama [`offset`](Self::offset).
+    /// Halaman pertama: tanpa `after`/`before`. Kunci `order_by` harus non-NULL
+    /// pada baris tepi (NULL → [`CursorError::Mismatch`]); baris ber-kunci NULL
+    /// tak terjangkau keyset — beri `Option` default atau filter `is_null().not()`.
+    pub async fn load_page(self, world: &mut World) -> Result<Page, PageError> {
+        let Some(limit) = self.limit else {
+            return Err(PageError::MissingLimit);
+        };
+        if self.offset.is_some() && self.cursor.is_some() {
+            return Err(PageError::OffsetWithCursor);
+        }
+        let bound = self.cursor.as_ref().map(|(_, b)| *b);
+        let (sql, params, reversed) = self.build_with(Some(limit + 1), true)?;
+        let order: Vec<OrderKey> = self.order.clone();
+
+        // Baris tepi + kunci: baca dulu dari SQL utama (ikut `only`/join lewat
+        // `run_load` dengan daftar pid yang sudah dipangkas).
+        let rows = self.store.fetch_rows(&sql, &params).await?;
+        let mut edges: Vec<Cursor> = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let pid: i64 = row.try_get("pid")?;
+            let mut keys = Vec::with_capacity(order.len());
+            for k in &order {
+                keys.push(crate::store::read_typed(row, k.column, k.ty)?);
+            }
+            edges.push(Cursor { keys, pid });
+        }
+        let has_more = edges.len() as i64 > limit;
+        edges.truncate(limit as usize);
+        if reversed {
+            edges.reverse();
+        }
+
+        // Muat entity halaman (urut maju) lewat daftar pid literal.
+        let pids: Vec<i64> = edges.iter().map(|c| c.pid).collect();
+        let items = if pids.is_empty() {
+            Vec::new()
+        } else {
+            let list: Vec<String> = pids.iter().map(|p| p.to_string()).collect();
+            let page_sql = format!(
+                "SELECT pid FROM {} WHERE pid IN ({}) ORDER BY array_position(ARRAY[{}]::bigint[], pid)",
+                quote_ident(T::TABLE),
+                list.join(", "),
+                list.join(", ")
+            );
+            self.run_load(page_sql, Vec::new(), world).await?
+        };
+
+        let first = edges.first().cloned();
+        let last = edges.last().cloned();
+        let (next, prev) = match bound {
+            // Halaman pertama / maju: next bila masih ada; prev bila dicapai lewat kursor.
+            None => (has_more.then_some(last).flatten(), None),
+            Some(Bound::After) => (has_more.then_some(last).flatten(), first),
+            // Mundur: prev bila masih ada baris lebih awal; next selalu (kita
+            // datang dari sana).
+            Some(Bound::Before) => (last, has_more.then_some(first).flatten()),
+        };
+        Ok(Page { items, next, prev })
     }
 
     /// Mulai **path relasi bertipe** (RFC-0032): hop pertama `T →(rel)→ Next`.
@@ -1015,6 +1504,138 @@ pub(crate) fn renumber(sql: &str) -> String {
 mod tests {
     use super::*;
     use crate::ColumnDef;
+
+    #[test]
+    fn kursor_round_trip_dan_aman_url() {
+        let c = Cursor {
+            keys: vec![
+                PgValue::Int(-7),
+                PgValue::Float(1.5),
+                PgValue::Bool(true),
+                PgValue::Text("a?b&c=d ü".into()),
+                PgValue::Numeric("123456789012345678901".into()),
+            ],
+            pid: 42,
+        };
+        let tok = c.encode();
+        assert!(
+            tok.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        );
+        assert_eq!(Cursor::decode(&tok).unwrap(), c);
+        assert_eq!(tok.parse::<Cursor>().unwrap(), c);
+        assert_eq!(Cursor::decode("bukan-kursor"), Err(CursorError::Malformed));
+        assert_eq!(Cursor::decode(""), Err(CursorError::Malformed));
+        // Skema versi lain ditolak.
+        let v2 = base64url_encode(br#"{"v":2,"k":[],"p":1}"#);
+        assert_eq!(Cursor::decode(&v2), Err(CursorError::Malformed));
+    }
+
+    #[test]
+    fn base64url_semua_panjang_sisa() {
+        for n in 0..10 {
+            let data: Vec<u8> = (0..n).map(|i| (i * 37 + 11) as u8).collect();
+            let enc = base64url_encode(&data);
+            assert!(!enc.contains('='));
+            assert_eq!(base64url_decode(&enc).unwrap(), data, "n={n}");
+        }
+        assert_eq!(base64url_decode("A"), None, "sisa 1 karakter tak valid");
+        assert_eq!(base64url_decode("A*"), None, "karakter di luar alfabet");
+    }
+
+    fn key(column: &'static str, ty: PgType, dir: Dir) -> OrderKey {
+        OrderKey { column, ty, dir }
+    }
+
+    #[test]
+    fn keyset_arah_seragam_pakai_row_value() {
+        let keys = keyset_keys(&[key("hp", PgType::Integer, Dir::Desc)]);
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[1].column, "pid");
+        assert_eq!(keys[1].dir, Dir::Desc, "tiebreak ikut arah kunci terakhir");
+        let cur = Cursor {
+            keys: vec![PgValue::Int(20)],
+            pid: 9,
+        };
+        let (sql, params) = keyset_where(&keys, &cur, Bound::After).unwrap();
+        assert_eq!(sql, "(hp, pid) < (?, ?)");
+        assert_eq!(
+            params,
+            vec![
+                (PgType::Integer, PgValue::Int(20)),
+                (PgType::BigInt, PgValue::Int(9))
+            ]
+        );
+        let (sql, _) = keyset_where(&keys, &cur, Bound::Before).unwrap();
+        assert_eq!(sql, "(hp, pid) > (?, ?)");
+        assert_eq!(order_by_sql(&keys, false), "hp DESC, pid DESC");
+        assert_eq!(order_by_sql(&keys, true), "hp ASC, pid ASC");
+    }
+
+    #[test]
+    fn keyset_arah_campur_pakai_or_expanded() {
+        let keys = keyset_keys(&[
+            key("hp", PgType::Integer, Dir::Desc),
+            key("name", PgType::Text, Dir::Asc),
+        ]);
+        let cur = Cursor {
+            keys: vec![PgValue::Int(5), PgValue::Text("m".into())],
+            pid: 3,
+        };
+        let (sql, params) = keyset_where(&keys, &cur, Bound::After).unwrap();
+        assert_eq!(
+            sql,
+            "(hp < ?) OR (hp = ? AND name > ?) OR (hp = ? AND name = ? AND pid > ?)"
+        );
+        assert_eq!(params.len(), 6, "param diduplikasi per cabang");
+        assert_eq!(params[5], (PgType::BigInt, PgValue::Int(3)));
+        // NUMERIC dapat cast pada placeholder.
+        let keys = keyset_keys(&[key("amt", PgType::Numeric, Dir::Asc)]);
+        let cur = Cursor {
+            keys: vec![PgValue::Numeric("1.5".into())],
+            pid: 1,
+        };
+        let (sql, _) = keyset_where(&keys, &cur, Bound::After).unwrap();
+        assert_eq!(sql, "(amt, pid) > (?::numeric, ?)");
+    }
+
+    #[test]
+    fn keyset_menolak_kursor_tak_cocok() {
+        let keys = keyset_keys(&[key("hp", PgType::Integer, Dir::Asc)]);
+        let salah_jumlah = Cursor {
+            keys: vec![],
+            pid: 1,
+        };
+        assert!(matches!(
+            keyset_where(&keys, &salah_jumlah, Bound::After),
+            Err(CursorError::Mismatch(_))
+        ));
+        let salah_tipe = Cursor {
+            keys: vec![PgValue::Text("x".into())],
+            pid: 1,
+        };
+        assert!(matches!(
+            keyset_where(&keys, &salah_tipe, Bound::After),
+            Err(CursorError::Mismatch(_))
+        ));
+        let null = Cursor {
+            keys: vec![PgValue::Null],
+            pid: 1,
+        };
+        assert!(matches!(
+            keyset_where(&keys, &null, Bound::After),
+            Err(CursorError::Mismatch(_))
+        ));
+        let keys = keyset_keys(&[key("extra", PgType::Jsonb, Dir::Asc)]);
+        let json = Cursor {
+            keys: vec![PgValue::Json("{}".into())],
+            pid: 1,
+        };
+        assert!(matches!(
+            keyset_where(&keys, &json, Bound::After),
+            Err(CursorError::Mismatch(_))
+        ));
+    }
 
     #[test]
     fn renumber_mengabaikan_tanda_tanya_di_dalam_kutip() {
