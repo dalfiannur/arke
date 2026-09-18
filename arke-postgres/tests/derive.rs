@@ -299,3 +299,36 @@ fn ref_bertipe_kolom_token_dan_round_trip() {
     assert_eq!(back.a.entity(), e);
     assert_eq!(back.b, None);
 }
+
+// `#[pg(fts)]`: default `simple`, `#[pg(fts = "…")]` config eksplisit; boleh
+// pada `Option<String>`; kolom lain tak ikut. Galat (non-String, level-tipe,
+// config tak valid) diuji sebagai `compile_fail` doctest di `arke_postgres::FtsDef`.
+#[derive(PgComponent)]
+struct Article {
+    #[pg(fts = "english")]
+    title: String,
+    #[pg(fts)]
+    summary: Option<String>,
+    body: String,
+}
+
+#[test]
+fn fts_di_generate_sesuai_atribut() {
+    use arke_postgres::FtsDef;
+    assert_eq!(
+        Article::FTS,
+        &[
+            FtsDef {
+                column: "title",
+                config: "english"
+            },
+            FtsDef {
+                column: "summary",
+                config: "simple"
+            },
+        ]
+    );
+    assert!(Article::INDEXES.is_empty(), "fts bukan IndexDef btree");
+    // Komponen tanpa atribut: default kosong.
+    assert!(Stats::FTS.is_empty());
+}

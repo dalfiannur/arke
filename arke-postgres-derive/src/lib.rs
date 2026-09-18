@@ -11,8 +11,10 @@ use proc_macro::{Delimiter, TokenStream, TokenTree};
 /// Turunkan `arke_postgres::PgComponent` untuk struct field-bernama.
 ///
 /// Tipe field dipetakan ke kolom SQL ber-tipe (RFC-0021 §3). Atribut opsional:
-/// field `#[pg(index)]`/`#[pg(unique)]` → indeks; tipe `#[pg(check = "…")]` →
-/// constraint `CHECK`. Tipe tak didukung, generic, atau non-struct → `compile_error!`.
+/// field `#[pg(index)]`/`#[pg(unique)]` → indeks; `#[pg(fts)]`/`#[pg(fts =
+/// "<regconfig>")]` (hanya `String`/`Option<String>`) → indeks GIN full-text
+/// (default config `simple`); tipe `#[pg(check = "…")]` → constraint `CHECK`.
+/// Tipe tak didukung, generic, atau non-struct → `compile_error!`.
 #[proc_macro_derive(PgComponent, attributes(pg))]
 pub fn derive_pg_component(input: TokenStream) -> TokenStream {
     let code = match expand(input) {
@@ -31,6 +33,9 @@ struct Field {
     ty: String,
     index: bool,
     unique: bool,
+    /// `#[pg(fts)]`/`#[pg(fts = "<config>")]`: konfigurasi text search
+    /// (`None` = tanpa FTS; `Some("simple")` bila tanpa nilai).
+    fts: Option<String>,
 }
 
 /// Satu item atribut `#[pg(...)]`.
@@ -39,6 +44,7 @@ enum PgItem {
     Unique,
     Check(String),
     Table(String),
+    Fts(String),
 }
 
 /// Parse isi bracket `#[pg(...)]` → daftar item. Bracket non-`pg` → kosong.
@@ -61,6 +67,23 @@ fn parse_pg_items(bracket_stream: TokenStream) -> Result<Vec<PgItem>, String> {
             match key.to_string().as_str() {
                 "index" => items.push(PgItem::Index),
                 "unique" => items.push(PgItem::Unique),
+                "fts" => match (inner.get(j + 1), inner.get(j + 2)) {
+                    (Some(TokenTree::Punct(p)), Some(TokenTree::Literal(lit)))
+                        if p.as_char() == '=' =>
+                    {
+                        let cfg = unquote(&lit.to_string());
+                        // Nama regconfig: dipakai sebagai literal SQL `'<cfg>'`.
+                        if cfg.is_empty()
+                            || !cfg.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                        {
+                            return Err("pg(fts = \"...\"): nama konfigurasi harus [A-Za-z0-9_]"
+                                .to_string());
+                        }
+                        items.push(PgItem::Fts(cfg));
+                        j += 2;
+                    }
+                    _ => items.push(PgItem::Fts("simple".to_string())),
+                },
                 "check" => match (inner.get(j + 1), inner.get(j + 2)) {
                     (Some(TokenTree::Punct(p)), Some(TokenTree::Literal(lit)))
                         if p.as_char() == '=' =>
@@ -116,9 +139,10 @@ fn expand(input: TokenStream) -> Result<String, String> {
                         match item {
                             PgItem::Check(expr) => checks.push(expr),
                             PgItem::Table(name) => table = Some(name),
-                            PgItem::Index | PgItem::Unique => {
+                            PgItem::Index | PgItem::Unique | PgItem::Fts(_) => {
                                 return Err(
-                                    "pg(index)/pg(unique) hanya valid di level-field".to_string()
+                                    "pg(index)/pg(unique)/pg(fts) hanya valid di level-field"
+                                        .to_string(),
                                 );
                             }
                         }
@@ -182,6 +206,7 @@ fn parse_named_fields(stream: TokenStream) -> Result<Vec<Field>, String> {
         // Atribut field: baca `#[pg(index|unique)]`, lewati lainnya.
         let mut index = false;
         let mut unique = false;
+        let mut fts: Option<String> = None;
         while matches!(toks.get(i), Some(TokenTree::Punct(p)) if p.as_char() == '#') {
             i += 1;
             if let Some(TokenTree::Group(g)) = toks.get(i)
@@ -191,6 +216,7 @@ fn parse_named_fields(stream: TokenStream) -> Result<Vec<Field>, String> {
                     match item {
                         PgItem::Index => index = true,
                         PgItem::Unique => unique = true,
+                        PgItem::Fts(cfg) => fts = Some(cfg),
                         PgItem::Check(_) | PgItem::Table(_) => {
                             return Err("pg(check)/pg(table) hanya valid di level-tipe".to_string());
                         }
@@ -238,12 +264,18 @@ fn parse_named_fields(stream: TokenStream) -> Result<Vec<Field>, String> {
             i += 1;
         }
         let col = name.strip_prefix("r#").unwrap_or(&name).to_string();
+        if fts.is_some() && !matches!(ty.as_str(), "String" | "Option<String>") {
+            return Err(format!(
+                "derive(PgComponent): `#[pg(fts)]` hanya untuk `String`/`Option<String>` (field `{col}`)"
+            ));
+        }
         fields.push(Field {
             name,
             col,
             ty,
             index,
             unique,
+            fts,
         });
     }
     Ok(fields)
@@ -514,6 +546,7 @@ fn gen_impl(
     let mut to_params = String::new();
     let mut from_fields = String::new();
     let mut indexes = String::new();
+    let mut fts_defs = String::new();
 
     // Indeks nilai/kolom **berjalan** (tiap field = 1 slot; relasi Entity kini
     // 1 kolom `<name>_id` berisi pid, RFC-0034 Am.3).
@@ -534,6 +567,12 @@ fn gen_impl(
             indexes.push_str(&format!(
                 "::arke_postgres::IndexDef {{ column: {col:?}, unique: {} }}, ",
                 f.unique
+            ));
+        }
+        if let Some(cfg) = &f.fts {
+            fts_defs.push_str(&format!(
+                "::arke_postgres::FtsDef {{ column: {:?}, config: {cfg:?} }}, ",
+                f.col
             ));
         }
     }
@@ -597,6 +636,7 @@ fn gen_impl(
             const TABLE: &'static str = {table:?};\n\
             const COLUMNS: &'static [::arke_postgres::ColumnDef] = &[{columns}];\n\
             const INDEXES: &'static [::arke_postgres::IndexDef] = &[{indexes}];\n\
+            const FTS: &'static [::arke_postgres::FtsDef] = &[{fts_defs}];\n\
             const CHECKS: &'static [&'static str] = &[{checks_str}];\n\
             fn to_params(&self) -> ::std::vec::Vec<::arke_postgres::PgValue> {{\n\
                 ::std::vec![{to_params}]\n\

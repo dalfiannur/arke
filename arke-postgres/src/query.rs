@@ -286,6 +286,23 @@ impl<C: PgComponent> Field<C, String> {
             vec![(PgType::Text, PgValue::Text(pattern.into()))],
         )
     }
+
+    /// **Full-text search**: `to_tsvector(cfg, col) @@ websearch_to_tsquery(cfg, ?)`.
+    /// Sintaks `query` ala mesin pencari: kata = AND, `OR`, `-kata` = NOT,
+    /// `"frasa"`. `cfg` = `#[pg(fts = "…")]` field ini (indeks GIN dibuat
+    /// `migrate`); field tanpa atribut tetap boleh (`simple`, tanpa indeks).
+    /// Padukan dengan [`Query::order_by_rank`] untuk urutan relevansi.
+    pub fn search(self, query: impl Into<String>) -> Filter<C> {
+        let cfg = fts_config::<C>(self.column);
+        Filter::raw(
+            format!(
+                "{} @@ {}",
+                tsvector_expr(cfg, &self.col()),
+                tsquery_expr(cfg)
+            ),
+            vec![(PgType::Text, PgValue::Text(query.into()))],
+        )
+    }
 }
 
 /// Operator *containment* JSONB (`@>`) untuk field array (`Vec<V>` → kolom JSONB
@@ -602,12 +619,36 @@ fn base64url_decode(s: &str) -> Option<Vec<u8>> {
 /// SQL utama ter-parameterisasi + nilai bind + apakah urutan dibalik (`before`).
 type BuiltSql = (String, Vec<(PgType, PgValue)>, bool);
 
-/// Satu kunci `ORDER BY` (kolom, tipe, arah).
-#[derive(Clone, Copy, Debug)]
+/// Satu kunci `ORDER BY`: kolom biasa, atau **ekspresi** ter-parameterisasi
+/// (mis. `ts_rank(...)` dari [`Query::order_by_rank`]) yang di-`SELECT` dengan
+/// alias `column` saat membentuk kursor.
+#[derive(Clone, Debug)]
 struct OrderKey {
+    /// Nama kolom, atau alias hasil bila `expr` ada.
     column: &'static str,
     ty: PgType,
     dir: Dir,
+    /// Ekspresi SQL (placeholder `?`) + nilai bind; `None` → kolom biasa.
+    expr: Option<(String, Vec<(PgType, PgValue)>)>,
+}
+
+impl OrderKey {
+    fn column(column: &'static str, ty: PgType, dir: Dir) -> Self {
+        Self {
+            column,
+            ty,
+            dir,
+            expr: None,
+        }
+    }
+
+    /// SQL kunci (ekspresi atau kolom ter-quote) + param yang dibawanya.
+    fn sql(&self) -> (String, &[(PgType, PgValue)]) {
+        match &self.expr {
+            Some((e, p)) => (e.clone(), p.as_slice()),
+            None => (quote_ident(self.column).into_owned(), &[]),
+        }
+    }
 }
 
 /// Kunci efektif keyset: `order` + tiebreak `pid` (arah = arah kunci terakhir,
@@ -615,16 +656,14 @@ struct OrderKey {
 fn keyset_keys(order: &[OrderKey]) -> Vec<OrderKey> {
     let mut keys = order.to_vec();
     let dir = order.last().map_or(Dir::Asc, |k| k.dir);
-    keys.push(OrderKey {
-        column: "pid",
-        ty: PgType::BigInt,
-        dir,
-    });
+    keys.push(OrderKey::column("pid", PgType::BigInt, dir));
     keys
 }
 
-/// Klausa `ORDER BY` untuk `keys` (dibalik bila `reverse`).
-fn order_by_sql(keys: &[OrderKey], reverse: bool) -> String {
+/// Klausa `ORDER BY` untuk `keys` (dibalik bila `reverse`) + param ekspresi
+/// (urut tekstual).
+fn order_by_sql(keys: &[OrderKey], reverse: bool) -> (String, Vec<(PgType, PgValue)>) {
+    let mut params = Vec::new();
     let parts: Vec<String> = keys
         .iter()
         .map(|k| {
@@ -632,10 +671,12 @@ fn order_by_sql(keys: &[OrderKey], reverse: bool) -> String {
                 (Dir::Asc, false) | (Dir::Desc, true) => "ASC",
                 (Dir::Desc, false) | (Dir::Asc, true) => "DESC",
             };
-            format!("{} {dir}", quote_ident(k.column))
+            let (sql, p) = k.sql();
+            params.extend_from_slice(p);
+            format!("{sql} {dir}")
         })
         .collect();
-    parts.join(", ")
+    (parts.join(", "), params)
 }
 
 /// Kondisi `WHERE` keyset "baris setelah `cursor`" dalam urutan `keys`
@@ -655,7 +696,9 @@ fn keyset_where(
             cursor.keys.len()
         )));
     }
-    let mut params: Vec<(PgType, PgValue)> = Vec::with_capacity(keys.len());
+    // Nilai kursor per kunci (validasi tipe); param SQL dirakit di bawah dalam
+    // urutan tekstual (param ekspresi kunci ⇢ nilai kursor).
+    let mut values: Vec<(PgType, PgValue)> = Vec::with_capacity(keys.len());
     for (k, v) in keys.iter().zip(
         cursor
             .keys
@@ -688,7 +731,7 @@ fn keyset_where(
                 k.column, k.ty
             )));
         }
-        params.push((k.ty, v.clone()));
+        values.push((k.ty, v.clone()));
     }
 
     let op = |k: &OrderKey| match (k.dir, bound) {
@@ -697,12 +740,17 @@ fn keyset_where(
     };
     let ph = |k: &OrderKey| format!("?{}", cast_of(k.ty));
     let uniform = keys.iter().all(|k| k.dir == keys[0].dir);
+    let mut params: Vec<(PgType, PgValue)> = Vec::new();
     let sql = if uniform {
-        let cols: Vec<String> = keys
-            .iter()
-            .map(|k| quote_ident(k.column).into_owned())
-            .collect();
+        // (k1, k2, pid) op (?, ?, ?) — param ekspresi kunci dulu, lalu nilai kursor.
+        let mut cols = Vec::with_capacity(keys.len());
+        for k in keys {
+            let (sql, p) = k.sql();
+            params.extend_from_slice(p);
+            cols.push(sql);
+        }
         let phs: Vec<String> = keys.iter().map(ph).collect();
+        params.extend(values.iter().cloned());
         format!(
             "({}) {} ({})",
             cols.join(", "),
@@ -713,20 +761,41 @@ fn keyset_where(
         // (k1 op ?) OR (k1 = ? AND k2 op ?) OR (k1 = ? AND k2 = ? AND pid op ?)
         // Placeholder diulang per cabang → params diduplikasi sesuai urutan.
         let mut branches = Vec::with_capacity(keys.len());
-        let mut dup: Vec<(PgType, PgValue)> = Vec::new();
         for i in 0..keys.len() {
             let mut conds = Vec::with_capacity(i + 1);
             for (j, k) in keys.iter().enumerate().take(i + 1) {
                 let o = if j < i { "=" } else { op(k) };
-                conds.push(format!("{} {o} {}", quote_ident(k.column), ph(k)));
-                dup.push(params[j].clone());
+                let (sql, p) = k.sql();
+                params.extend_from_slice(p);
+                conds.push(format!("{sql} {o} {}", ph(k)));
+                params.push(values[j].clone());
             }
             branches.push(format!("({})", conds.join(" AND ")));
         }
-        params = dup;
         branches.join(" OR ")
     };
     Ok((sql, params))
+}
+
+/// Ekspresi `to_tsvector('<cfg>', <col_sql>)` — **satu** definisi dipakai indeks
+/// GIN (`migrate`), `search`, dan `order_by_rank`, agar planner mencocokkan
+/// indeks ekspresi.
+pub(crate) fn tsvector_expr(config: &str, col_sql: &str) -> String {
+    format!("to_tsvector('{config}', {col_sql})")
+}
+
+/// Ekspresi `websearch_to_tsquery('<cfg>', ?)` (teks pencarian di-bind).
+fn tsquery_expr(config: &str) -> String {
+    format!("websearch_to_tsquery('{config}', ?)")
+}
+
+/// Config FTS kolom `column` pada komponen `C` (`#[pg(fts = …)]`), atau
+/// `simple` bila kolom tak ditandai (search tetap valid, tanpa indeks).
+fn fts_config<C: PgComponent>(column: &str) -> &'static str {
+    C::FTS
+        .iter()
+        .find(|f| f.column == column)
+        .map_or("simple", |f| f.config)
 }
 
 /// Cast placeholder untuk tipe kolom (NUMERIC/JSONB di-bind sebagai teks).
@@ -843,10 +912,33 @@ impl<'a, T: PgComponent> Query<'a, T> {
     /// selalu ditambahkan sebagai kunci pengikat terakhir (arah mengikuti kunci
     /// terakhir) → urutan total & deterministik, prasyarat paginasi keyset.
     pub fn order_by<V>(mut self, field: Field<T, V>, dir: Dir) -> Self {
+        self.order
+            .push(OrderKey::column(field.column, field.ty, dir));
+        self
+    }
+
+    /// Urutkan berdasarkan **relevansi full-text** (`ts_rank`, menurun) kolom
+    /// `field` terhadap `query` (sintaks `websearch_to_tsquery`); biasanya
+    /// dipadukan dengan `.filter(field.search(query))`. Berlaku sebagai kunci
+    /// `ORDER BY` biasa: bisa ditumpuk dengan `order_by` dan dipakai
+    /// [`load_page`](Self::load_page) (kursor membawa nilai rank).
+    pub fn order_by_rank(mut self, field: Field<T, String>, query: impl Into<String>) -> Self {
+        let cfg = fts_config::<T>(field.column);
+        let expr = format!(
+            "ts_rank({}, {})",
+            tsvector_expr(cfg, &field.col()),
+            tsquery_expr(cfg)
+        );
+        // Alias statis per posisi kunci (tak boleh bentrok dengan kolom komponen).
+        const ALIASES: [&str; 8] = [
+            "__rank0", "__rank1", "__rank2", "__rank3", "__rank4", "__rank5", "__rank6", "__rank7",
+        ];
+        let alias = ALIASES[self.order.len().min(ALIASES.len() - 1)];
         self.order.push(OrderKey {
-            column: field.column,
-            ty: field.ty,
-            dir,
+            column: alias,
+            ty: PgType::Real,
+            dir: Dir::Desc,
+            expr: Some((expr, vec![(PgType::Text, PgValue::Text(query.into()))])),
         });
         self
     }
@@ -924,8 +1016,30 @@ impl<'a, T: PgComponent> Query<'a, T> {
     /// pemanggil membalik hasil di memori.
     fn build_with(&self, limit: Option<i64>, select_keys: bool) -> Result<BuiltSql, CursorError> {
         let keys = keyset_keys(&self.order);
-        let (where_opt, mut params) = self.where_clause();
+        // Param dirakit dalam **urutan tekstual** SQL (SELECT → WHERE → ORDER BY
+        // → LIMIT/OFFSET) karena `renumber` menomori `?` berurutan.
+        let mut params: Vec<(PgType, PgValue)> = Vec::new();
+
+        let mut select = String::from("pid");
+        if select_keys {
+            // NUMERIC di-`::text` agar terbaca sebagai `PgValue::Numeric` (lihat
+            // `read_typed`); JSONB ditolak `keyset_where`. Kunci ekspresi
+            // di-alias dengan `column`-nya.
+            for k in &self.order {
+                let (ksql, p) = k.sql();
+                params.extend_from_slice(p);
+                let alias = quote_ident(k.column);
+                match (k.ty, &k.expr) {
+                    (PgType::Numeric, _) => select.push_str(&format!(", {ksql}::text AS {alias}")),
+                    (_, Some(_)) => select.push_str(&format!(", {ksql} AS {alias}")),
+                    (_, None) => select.push_str(&format!(", {ksql}")),
+                }
+            }
+        }
+
+        let (where_opt, where_params) = self.where_clause();
         let mut conds: Vec<String> = where_opt.into_iter().map(|w| format!("({w})")).collect();
+        params.extend(where_params);
         let mut reversed = false;
         if let Some((cursor, bound)) = &self.cursor {
             let (ks, ks_params) = keyset_where(&keys, cursor, *bound)?;
@@ -934,18 +1048,6 @@ impl<'a, T: PgComponent> Query<'a, T> {
             reversed = *bound == Bound::Before;
         }
 
-        let mut select = String::from("pid");
-        if select_keys {
-            // NUMERIC di-`::text` agar terbaca sebagai `PgValue::Numeric` (lihat
-            // `read_typed`); JSONB ditolak `keyset_where`.
-            for k in &self.order {
-                let col = quote_ident(k.column);
-                match k.ty {
-                    PgType::Numeric => select.push_str(&format!(", {col}::text AS {col}")),
-                    _ => select.push_str(&format!(", {col}")),
-                }
-            }
-        }
         let mut sql = format!("SELECT {select} FROM {}", quote_ident(T::TABLE));
         if !conds.is_empty() {
             sql.push_str(" WHERE ");
@@ -953,8 +1055,10 @@ impl<'a, T: PgComponent> Query<'a, T> {
         }
         // Urutan total & deterministik (STD-0005 mirror pada sisi Postgres):
         // kunci `order_by` + tiebreak `pid`.
+        let (order_sql, order_params) = order_by_sql(&keys, reversed);
         sql.push_str(" ORDER BY ");
-        sql.push_str(&order_by_sql(&keys, reversed));
+        sql.push_str(&order_sql);
+        params.extend(order_params);
 
         if let Some(l) = limit {
             sql.push_str(" LIMIT ?");
@@ -1581,7 +1685,7 @@ mod tests {
     }
 
     fn key(column: &'static str, ty: PgType, dir: Dir) -> OrderKey {
-        OrderKey { column, ty, dir }
+        OrderKey::column(column, ty, dir)
     }
 
     #[test]
@@ -1605,8 +1709,8 @@ mod tests {
         );
         let (sql, _) = keyset_where(&keys, &cur, Bound::Before).unwrap();
         assert_eq!(sql, "(hp, pid) > (?, ?)");
-        assert_eq!(order_by_sql(&keys, false), "hp DESC, pid DESC");
-        assert_eq!(order_by_sql(&keys, true), "hp ASC, pid ASC");
+        assert_eq!(order_by_sql(&keys, false).0, "hp DESC, pid DESC");
+        assert_eq!(order_by_sql(&keys, true).0, "hp ASC, pid ASC");
     }
 
     #[test]
@@ -1675,6 +1779,61 @@ mod tests {
     }
 
     #[test]
+    fn fts_search_dan_rank_sql() {
+        // `name` ber-`#[pg(fts = "english")]` → config dari FTS; ekspresi
+        // identik dengan indeks GIN yang dibuat `migrate`.
+        let f = Health::name().search("running shoe");
+        assert_eq!(
+            f.sql,
+            "to_tsvector('english', name) @@ websearch_to_tsquery('english', ?)"
+        );
+        assert_eq!(
+            f.params,
+            vec![(PgType::Text, PgValue::Text("running shoe".into()))]
+        );
+        assert_eq!(
+            tsvector_expr("english", "name"),
+            "to_tsvector('english', name)"
+        );
+        // Kolom tanpa atribut → `simple`.
+        assert_eq!(fts_config::<Health>("other"), "simple");
+
+        // Kunci rank berekspresi: keyset row-value membawa param ekspresi
+        // sebelum nilai kursor (urutan tekstual).
+        let rank = OrderKey {
+            column: "__rank0",
+            ty: PgType::Real,
+            dir: Dir::Desc,
+            expr: Some((
+                "ts_rank(to_tsvector('english', name), websearch_to_tsquery('english', ?))"
+                    .to_string(),
+                vec![(PgType::Text, PgValue::Text("shoe".into()))],
+            )),
+        };
+        let keys = keyset_keys(&[rank]);
+        let cur = Cursor {
+            keys: vec![PgValue::Float(0.5)],
+            pid: 7,
+        };
+        let (sql, params) = keyset_where(&keys, &cur, Bound::After).unwrap();
+        assert_eq!(
+            sql,
+            "(ts_rank(to_tsvector('english', name), websearch_to_tsquery('english', ?)), pid) < (?, ?)"
+        );
+        assert_eq!(
+            params,
+            vec![
+                (PgType::Text, PgValue::Text("shoe".into())),
+                (PgType::Real, PgValue::Float(0.5)),
+                (PgType::BigInt, PgValue::Int(7)),
+            ]
+        );
+        let (order, oparams) = order_by_sql(&keys, false);
+        assert!(order.starts_with("ts_rank(") && order.ends_with(" DESC, pid DESC"));
+        assert_eq!(oparams.len(), 1);
+    }
+
+    #[test]
     fn explain_rows_terparse() {
         assert_eq!(
             parse_explain_rows("Seq Scan on cmp_health  (cost=0.00..35.50 rows=850 width=8)"),
@@ -1708,6 +1867,10 @@ mod tests {
     }
     impl PgComponent for Health {
         const TABLE: &'static str = "cmp_health";
+        const FTS: &'static [crate::FtsDef] = &[crate::FtsDef {
+            column: "name",
+            config: "english",
+        }];
         const COLUMNS: &'static [ColumnDef] = &[ColumnDef::scalar("hp", PgType::Integer, false)];
         fn to_params(&self) -> Vec<PgValue> {
             vec![PgValue::Int(i64::from(self._hp))]

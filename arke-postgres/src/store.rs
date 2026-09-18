@@ -19,8 +19,9 @@ use sqlx::{
 use crate::tx::PgTx;
 
 use crate::cache::{ComponentCache, decode_row, encode_row};
+use crate::query::tsvector_expr;
 use crate::{
-    ColumnDef, IndexDef, PgComponent, PgType, PgValue, create_table_sql_from, pack_entity,
+    ColumnDef, FtsDef, IndexDef, PgComponent, PgType, PgValue, create_table_sql_from, pack_entity,
     quote_ident, unpack_entity,
 };
 
@@ -50,6 +51,8 @@ struct Registered {
     cache_ns: String,
     columns: &'static [ColumnDef],
     indexes: &'static [IndexDef],
+    /// Kolom full-text (`#[pg(fts)]`) → indeks GIN ekspresi.
+    fts: &'static [FtsDef],
     checks: &'static [&'static str],
     /// Kumpulkan baris komponen dari `World`.
     dump: fn(&World) -> Vec<ComponentRow>,
@@ -301,6 +304,7 @@ impl PgStore {
             cache_ns: format!("{}@{:016x}", T::TABLE, schema_fingerprint(T::COLUMNS)),
             columns: T::COLUMNS,
             indexes: T::INDEXES,
+            fts: T::FTS,
             checks: T::CHECKS,
             dump: dump_of::<T>,
             dump_one: dump_one_of::<T>,
@@ -683,6 +687,41 @@ impl PgStore {
                 quote_ident(&name),
                 quote_ident(r.table),
                 quote_ident(idx.column)
+            ))
+            .execute(&self.pool)
+            .await?;
+        }
+
+        // Indeks full-text (`#[pg(fts)]`): GIN atas ekspresi
+        // `to_tsvector('<cfg>', col)` — persis ekspresi yang dipakai
+        // `Field::search`/`order_by_rank`, sehingga planner mencocokkannya.
+        // Idempoten; config berubah (indexdef tak memuat `'<cfg>'::regconfig`)
+        // → DROP + buat ulang. Tanpa kolom tambahan → rekonsiliasi kolom tak
+        // tersentuh.
+        for f in r.fts {
+            let name = format!("idx_{}_{}_fts", r.table, f.column);
+            let existing: Option<String> = sqlx::query_scalar(
+                "SELECT indexdef FROM pg_indexes \
+                 WHERE schemaname = current_schema() AND tablename = $1 AND indexname = $2",
+            )
+            .bind(r.table)
+            .bind(&name)
+            .fetch_optional(&self.pool)
+            .await?;
+            if let Some(def) = existing {
+                if def.contains("USING gin ") && def.contains(&format!("'{}'::regconfig", f.config))
+                {
+                    continue;
+                }
+                sqlx::query(&format!("DROP INDEX {}", quote_ident(&name)))
+                    .execute(&self.pool)
+                    .await?;
+            }
+            sqlx::query(&format!(
+                "CREATE INDEX {} ON {} USING gin ({})",
+                quote_ident(&name),
+                quote_ident(r.table),
+                tsvector_expr(f.config, &quote_ident(f.column)),
             ))
             .execute(&self.pool)
             .await?;

@@ -187,6 +187,39 @@ pub struct IndexDef {
     pub unique: bool,
 }
 
+/// Kolom **full-text search** (`#[pg(fts)]`): indeks GIN ekspresi
+/// `to_tsvector('<config>', <column>)`, dipakai [`Field::search`] dan
+/// [`Query::order_by_rank`].
+///
+/// Hanya untuk `String`/`Option<String>`:
+///
+/// ```compile_fail
+/// #[derive(arke_postgres::PgComponent)]
+/// struct Bad { #[pg(fts)] hp: i32 }
+/// ```
+///
+/// Hanya di level-field:
+///
+/// ```compile_fail
+/// #[derive(arke_postgres::PgComponent)]
+/// #[pg(fts)]
+/// struct Bad { title: String }
+/// ```
+///
+/// Nama config harus `[A-Za-z0-9_]` (dipakai sebagai literal SQL):
+///
+/// ```compile_fail
+/// #[derive(arke_postgres::PgComponent)]
+/// struct Bad { #[pg(fts = "eng'lish")] title: String }
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FtsDef {
+    /// Kolom teks yang di-index.
+    pub column: &'static str,
+    /// Nama `regconfig` Postgres (`simple`, `english`, `indonesian`, …).
+    pub config: &'static str,
+}
+
 /// Nilai kolom yang portabel (batas antara komponen ↔ driver DB).
 ///
 /// `to_params` menghasilkannya; layer `sqlx` (nanti) mem-bind-nya ke query.
@@ -223,6 +256,8 @@ pub trait PgComponent {
     const COLUMNS: &'static [ColumnDef];
     /// Indeks kustom (`#[pg(index)]`/`#[pg(unique)]`); kosong bila tak ada.
     const INDEXES: &'static [IndexDef] = &[];
+    /// Kolom full-text (`#[pg(fts)]`); kosong bila tak ada.
+    const FTS: &'static [FtsDef] = &[];
     /// Ekspresi `CHECK` level-tabel (`#[pg(check = "…")]`); kosong bila tak ada.
     const CHECKS: &'static [&'static str] = &[];
     /// Nilai kolom untuk baris ini, urut sesuai [`Self::COLUMNS`].

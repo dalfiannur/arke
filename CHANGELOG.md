@@ -19,6 +19,15 @@ rilis juga ada di [GitHub Releases](https://github.com/dalfiannur/arke/releases)
   `sqlx::Error::Protocol`); `count()` mengabaikan kursor. Tipe baru: `Cursor`,
   `CursorError`, `Page`, `PageError`.
 
+- **`arke-postgres`: full-text search.** `#[pg(fts)]`/`#[pg(fts = "<regconfig>")]`
+  (derive 0.8 → `PgComponent::FTS`, `FtsDef`; hanya `String`/`Option<String>`)
+  → `migrate` membuat indeks GIN ekspresi `to_tsvector('<cfg>', col)`
+  (idempoten, config berubah → dibuat ulang). `Field<C, String>::search(q)`
+  (`websearch_to_tsquery`: AND/OR/`-kata`/`"frasa"`) dan
+  `Query::order_by_rank(field, q)` (`ts_rank` menurun) — kunci `ORDER BY`
+  berekspresi, sehingga **keyset `load_page` berjalan di atas rank**. Default
+  config `simple` (tanpa stemming); field tanpa atribut tetap bisa `search`.
+
 - **`arke-postgres`: `Query::count_estimate()`** — estimasi jumlah baris dari
   planner (`EXPLAIN` → `rows=`) tanpa memindai tabel, `WHERE` sama dengan
   `count()`. Untuk "≈ N hasil"/total halaman kasar; akurasi bergantung

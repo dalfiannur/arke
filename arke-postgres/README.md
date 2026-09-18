@@ -321,6 +321,7 @@ Atribut `#[pg(...)]` → `migrate` membuat indeks/constraint (idempoten):
 struct Enemy {
     #[pg(index)]  kind: i32,       // btree index (mempercepat load_where)
     #[pg(unique)] tag: i64,        // UNIQUE index
+    #[pg(fts = "english")] name: String, // indeks GIN full-text (default `simple`)
     hp: i32,
 }
 ```
@@ -330,6 +331,13 @@ struct Enemy {
   melayani `contains`/`contains_all` (`@>`). `migrate` mengganti btree lama di
   kolom JSONB dengan GIN. `#[pg(unique)]` selalu btree (GIN tak mendukung UNIQUE).
 - `#[pg(unique)]` → `CREATE UNIQUE INDEX`.
+- `#[pg(fts)]` / `#[pg(fts = "<regconfig>")]` (hanya `String`/`Option<String>`)
+  → indeks GIN ekspresi `to_tsvector('<cfg>', kolom)`; config berubah →
+  dibuat ulang. Query: `Enemy::name().search("kata -lain OR \"frasa\"")`
+  (sintaks `websearch_to_tsquery`) dan `.order_by_rank(Enemy::name(), "kata")`
+  (`ts_rank` menurun, ikut keyset `load_page`). Default `simple` = tokenisasi +
+  lowercase tanpa stemming (netral bahasa); `indonesian`/`english` men-stem.
+  Field tanpa atribut tetap bisa `search` — hanya tanpa indeks.
 - `#[pg(check = "…")]` (level-tipe, boleh banyak) → constraint `CHECK` bernama
   `chk_<tabel>_<hash ekspresi>`; mengubah/menghapus ekspresi direkonsiliasi
   `migrate` (yang lama di-drop). Baris lama yang melanggar ekspresi baru
