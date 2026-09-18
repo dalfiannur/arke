@@ -859,13 +859,20 @@ impl PgStore {
         Ok(())
     }
 
-    /// Simpan **seluruh** `world` (overwrite penuh) dalam satu transaksi — kini
-    /// = [`stage`](Self::stage) (sinkron) + [`commit`](Self::commit) (async). Karena
-    /// semua pembacaan `world` terjadi sebelum `.await`, future `save` sendiri pun
-    /// tak lagi menahan `&World` melewati titik async.
-    pub async fn save(&mut self, world: &World) -> Result<(), sqlx::Error> {
+    /// Simpan **seluruh** `world` (overwrite penuh) dalam satu transaksi —
+    /// = [`stage`](Self::stage) (sinkron) + [`commit`](Self::commit) (async).
+    ///
+    /// Sengaja **bukan** `async fn`: parameter sebuah `async fn` hidup di state
+    /// future sampai selesai, sehingga `&World` ikut tertangkap melewati `.await`
+    /// dan future pemanggil menjadi `!Send` (`World` bukan `Sync`). Di sini
+    /// `world` selesai dibaca sebelum kembali; future yang dikembalikan hanya
+    /// memegang `&mut self` + data owned, dan dijamin `Send` oleh tanda tangan.
+    pub fn save<'s>(
+        &'s mut self,
+        world: &World,
+    ) -> impl std::future::Future<Output = Result<(), sqlx::Error>> + Send + 's {
         let staged = self.stage(world);
-        self.commit(staged).await
+        self.commit(staged)
     }
 
     /// Memuat (materialize) **seluruh** keadaan dari Postgres ke `world`,
@@ -1179,16 +1186,53 @@ impl PgStore {
     /// Mengembalikan versi baru bila sukses, atau [`UpdateError::Conflict`] bila
     /// writer lain telah mengubah entity ini (versi tak cocok / entity tak ada).
     /// Transaksional: pada konflik, tak ada perubahan.
-    pub async fn update_entity(
-        &self,
+    ///
+    /// Bukan `async fn` (lihat [`save`](Self::save)): komponen dibaca dari
+    /// `world` secara sinkron di sini, future yang dikembalikan tak memegang
+    /// `&World` dan `Send`.
+    pub fn update_entity<'s>(
+        &'s self,
         world: &World,
         entity: Entity,
         expected_version: i64,
-    ) -> Result<i64, UpdateError> {
+    ) -> impl std::future::Future<Output = Result<i64, UpdateError>> + Send + 's {
         // Identitas dari jembatan (`entity` = handle World yang ditautkan);
         // `world` hanya sumber nilai komponen — boleh World lain yang mereplay
         // handle yang sama lewat `spawn_at` (pola writer RFC-0021 §5).
-        let Some(&pid) = self.pid_of.get(&entity) else {
+        let pid = self.pid_of.get(&entity).copied();
+        // Komponen entity ini dari keadaan `world` saat ini. Entity parsial
+        // (`Query::only`): tabel yang tak dimuat **dan** tak diisi pemanggil di
+        // World dilewati — nilainya di DB bukan milik working-set ini. Yang diisi
+        // pemanggil tetap ditulis.
+        let partial = self.partial.get(&entity);
+        let rows: Vec<(usize, Option<Vec<PgValue>>)> = self
+            .registered
+            .iter()
+            .enumerate()
+            .filter_map(|(ci, r)| {
+                let params = (r.dump_one)(world, entity);
+                if params.is_none()
+                    && let Some(set) = partial
+                    && !set.contains(r.table)
+                {
+                    return None;
+                }
+                Some((ci, params))
+            })
+            .collect();
+        self.update_entity_staged(pid, rows, expected_version)
+    }
+
+    /// Fase async [`update_entity`](Self::update_entity): gerbang versi + tulis
+    /// ulang komponen yang sudah di-stage. `pid` `None` = entity tak ditautkan
+    /// ke jembatan → konflik.
+    async fn update_entity_staged(
+        &self,
+        pid: Option<i64>,
+        rows: Vec<(usize, Option<Vec<PgValue>>)>,
+        expected_version: i64,
+    ) -> Result<i64, UpdateError> {
+        let Some(pid) = pid else {
             return Err(UpdateError::Conflict);
         };
         let mut tx = self.pool.begin().await.map_err(UpdateError::Db)?;
@@ -1210,19 +1254,8 @@ impl PgStore {
             return Err(UpdateError::Conflict);
         };
 
-        // Ganti komponen entity ini dengan keadaan `world` saat ini. Entity
-        // parsial (`Query::only`): tabel yang tak dimuat **dan** tak diisi
-        // pemanggil di World dilewati — nilainya di DB bukan milik working-set
-        // ini. Yang diisi pemanggil tetap ditulis.
-        let partial = self.partial.get(&entity);
-        for r in &self.registered {
-            let params = (r.dump_one)(world, entity);
-            if params.is_none()
-                && let Some(set) = partial
-                && !set.contains(r.table)
-            {
-                continue;
-            }
+        for (ci, params) in rows {
+            let r = &self.registered[ci];
             sqlx::query(&format!(
                 "DELETE FROM {} WHERE pid = $1",
                 quote_ident(r.table)
@@ -1301,9 +1334,15 @@ impl PgStore {
     ///
     /// Catatan: diff berbasis-nilai (arke tak melacak perubahan otomatis), jadi
     /// `PgStore` menyimpan salinan keadaan terakhir (biaya memori per entity).
-    pub async fn save_incremental(&mut self, world: &World) -> Result<SyncStats, sqlx::Error> {
+    ///
+    /// Bukan `async fn` dengan alasan yang sama seperti [`save`](Self::save):
+    /// future yang dikembalikan tidak memegang `&World`, dan `Send`.
+    pub fn save_incremental<'s>(
+        &'s mut self,
+        world: &World,
+    ) -> impl std::future::Future<Output = Result<SyncStats, sqlx::Error>> + Send + 's {
         let staged = self.stage_incremental(world);
-        self.commit_incremental(staged).await
+        self.commit_incremental(staged)
     }
 
     /// **Fase 1 (sync)** incremental dua-fase: diff `world` vs rekam sinkron internal

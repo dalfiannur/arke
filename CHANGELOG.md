@@ -84,6 +84,19 @@ rilis juga ada di [GitHub Releases](https://github.com/dalfiannur/arke/releases)
   CHECK baru membuat `migrate` gagal keras (keputusan migrasi data ada di
   operator).
 
+### Fixed
+
+- **`arke-postgres`: future `PgStore::save`/`save_incremental`/`update_entity`
+  kini `Send` tanpa `World: Sync`.** `save*` sudah dua-fase (`stage*` sinkron +
+  `commit*` async) dan `update_entity` membaca `world` di dalam transaksi;
+  sebagai `async fn`, parameter `&World` hidup di state future sampai selesai —
+  sehingga future *pemanggil* (handler axum, `tokio::spawn`) menjadi `!Send`
+  walau `World: Send`. Kini ketiganya `fn` biasa yang membaca `world`
+  secara sinkron lalu mengembalikan future fase async (`impl Future + Send +
+  '_`); pemanggilan `.await` tak berubah. Regresi dijaga uji kompilasi
+  `tests/send_future.rs`. Pola "World per-request" di README kini benar-benar
+  bisa di-await langsung di handler multi-thread.
+
 ## [0.7.0] — 2026-09-15
 
 Rilis gelombang breaking kedua menuju 1.0 ([RFC-0036](docs/RFC/RFC-0036-audit-0.7-soundness-stability-security.md), [ADR-0036](docs/ADR/ADR-0036-audit-0.7-soundness-stability-security.md), [Milestone 33](docs/MILESTONE_33.md)). Crate pendamping: `arke-derive` 0.4.0 (`#[serialize(name/default)]`; kode hasil derive butuh `arke` ≥ 0.7), `arke-postgres` 0.16.0, `arke-postgres-derive` 0.8.0, `arke-cache` 0.4.0, `arke-mongo` 0.1.0 (rilis pertama).
