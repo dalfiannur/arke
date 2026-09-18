@@ -190,6 +190,11 @@ pub struct PgStore {
     pid_of: HashMap<Entity, i64>,
     /// Jembatan **`pid` → Entity** (handle lokal working-set).
     entity_of: HashMap<i64, Entity>,
+    /// Entity yang dimuat **parsial** (`Query::only`) → tabel komponen yang
+    /// dimuat untuknya. Jalur tulis per-entity (`update_entity`,
+    /// `save_incremental`) melewati tabel di luar himpunan ini agar komponen
+    /// yang tak dimuat tak terhapus. Entry dilepas saat entity dimuat penuh.
+    partial: HashMap<Entity, HashSet<&'static str>>,
     /// World yang jembatan & rekam sinkron di atas merujuk (`None` sebelum
     /// operasi pertama). World lain yang datang → jembatan di-reset otomatis
     /// ([`Self::bind_world`]): handle `Entity` tak bermakna lintas-World.
@@ -213,6 +218,7 @@ impl PgStore {
             last: HashMap::new(),
             pid_of: HashMap::new(),
             entity_of: HashMap::new(),
+            partial: HashMap::new(),
             world_id: None,
             cache: None,
         }
@@ -239,6 +245,7 @@ impl PgStore {
             last: HashMap::new(),
             pid_of: HashMap::new(),
             entity_of: HashMap::new(),
+            partial: HashMap::new(),
             world_id: None,
             cache: self.cache.clone(),
         }
@@ -259,6 +266,7 @@ impl PgStore {
             self.world_id = Some(id);
             self.pid_of.clear();
             self.entity_of.clear();
+            self.partial.clear();
             self.last.clear();
         }
     }
@@ -793,6 +801,8 @@ impl PgStore {
         }
         self.entity_of = bridge.iter().map(|(&e, &pid)| (pid, e)).collect();
         self.pid_of = bridge;
+        // Overwrite penuh: DB kini = World, tak ada lagi entity parsial.
+        self.partial.clear();
         // Selaraskan rekam sinkron dengan keadaan yang baru ditulis.
         self.last = staged.next_state;
         Ok(())
@@ -871,6 +881,7 @@ impl PgStore {
         sql: String,
         params: Vec<(PgType, PgValue)>,
         world: &mut World,
+        only: Option<&[&'static str]>,
     ) -> Result<Vec<(i64, Entity)>, sqlx::Error> {
         let mut q = sqlx::query(&sql);
         for (ty, val) in &params {
@@ -882,7 +893,7 @@ impl PgStore {
             .iter()
             .map(|r| r.try_get("pid"))
             .collect::<Result<_, _>>()?;
-        let loaded = self.materialize(world, &ids).await?;
+        let loaded = self.materialize_only(world, &ids, only).await?;
         self.last = self.dump_state(world);
         Ok(loaded)
     }
@@ -898,6 +909,19 @@ impl PgStore {
         &mut self,
         world: &mut World,
         ids: &[i64],
+    ) -> Result<Vec<(i64, Entity)>, sqlx::Error> {
+        self.materialize_only(world, ids, None).await
+    }
+
+    /// [`Self::materialize`] dengan **hidrasi selektif** (`Query::only`): bila
+    /// `only = Some(tables)`, hanya tabel komponen tersebut yang dibaca; komponen
+    /// lain tak disentuh di `world`. Entity yang **baru** di-spawn lewat jalur
+    /// parsial dicatat di `partial`; muat penuh (`None`) melepas catatan itu.
+    async fn materialize_only(
+        &mut self,
+        world: &mut World,
+        ids: &[i64],
+        only: Option<&[&'static str]>,
     ) -> Result<Vec<(i64, Entity)>, sqlx::Error> {
         self.bind_world(world);
         if ids.is_empty() {
@@ -944,7 +968,36 @@ impl PgStore {
             entities.push((pid, entity));
         }
 
+        // Catatan parsial: entity baru lewat `only` → parsial dengan himpunan
+        // ini; yang sudah parsial → himpunan digabung; muat penuh → dilepas.
+        // Entity yang sudah lengkap (refreshed, tanpa catatan) tetap lengkap —
+        // komponen di luar `only` masih ada di World dari muat sebelumnya.
+        match only {
+            Some(tables) => {
+                for &(_, entity) in &entities {
+                    if refreshed.contains(&entity) {
+                        if let Some(set) = self.partial.get_mut(&entity) {
+                            set.extend(tables.iter().copied());
+                        }
+                    } else {
+                        self.partial
+                            .insert(entity, tables.iter().copied().collect());
+                    }
+                }
+            }
+            None => {
+                for &(_, entity) in &entities {
+                    self.partial.remove(&entity);
+                }
+            }
+        }
+
         for r in &self.registered {
+            if let Some(tables) = only
+                && !tables.contains(&r.table)
+            {
+                continue;
+            }
             // Read-through cache (RFC-0033): layani hit dari cache, ambil miss dari
             // Postgres lalu isi cache. Tanpa cache → jalur langsung.
             let cached = match &self.cache {
@@ -1082,8 +1135,19 @@ impl PgStore {
             return Err(UpdateError::Conflict);
         };
 
-        // Ganti komponen entity ini dengan keadaan `world` saat ini.
+        // Ganti komponen entity ini dengan keadaan `world` saat ini. Entity
+        // parsial (`Query::only`): tabel yang tak dimuat **dan** tak diisi
+        // pemanggil di World dilewati — nilainya di DB bukan milik working-set
+        // ini. Yang diisi pemanggil tetap ditulis.
+        let partial = self.partial.get(&entity);
         for r in &self.registered {
+            let params = (r.dump_one)(world, entity);
+            if params.is_none()
+                && let Some(set) = partial
+                && !set.contains(r.table)
+            {
+                continue;
+            }
             sqlx::query(&format!(
                 "DELETE FROM {} WHERE pid = $1",
                 quote_ident(r.table)
@@ -1092,7 +1156,7 @@ impl PgStore {
             .execute(&mut *tx)
             .await
             .map_err(UpdateError::Db)?;
-            if let Some(params) = (r.dump_one)(world, entity) {
+            if let Some(params) = params {
                 let insert = insert_sql(r);
                 let params = self.resolve_refs(&params);
                 let mut q = sqlx::query(&insert).bind(pid);
@@ -1265,16 +1329,33 @@ impl PgStore {
         }
         let upsert_pids: Vec<i64> = staged.upserts.iter().map(|(e, _)| bridge[e]).collect();
         for (ci, r) in self.registered.iter().enumerate() {
+            // Entity parsial (`Query::only`) yang tak memuat tabel ini **dan**
+            // tak punya nilainya di World dilewati di tabel ini: barisnya di DB
+            // bukan milik working-set → tak di-DELETE, tak ditulis ulang. Nilai
+            // yang diisi pemanggil tetap ditulis.
+            let owns = |e: &Entity, state: &EntityState| {
+                state[ci].is_some() || self.partial.get(e).is_none_or(|set| set.contains(r.table))
+            };
+            let table_pids: Vec<i64> = staged
+                .upserts
+                .iter()
+                .filter(|(e, state)| owns(e, state))
+                .map(|(e, _)| bridge[e])
+                .collect();
+            if table_pids.is_empty() {
+                continue;
+            }
             sqlx::query(&format!(
                 "DELETE FROM {} WHERE pid = ANY($1)",
                 quote_ident(r.table)
             ))
-            .bind(&upsert_pids)
+            .bind(&table_pids)
             .execute(&mut *tx)
             .await?;
             let rows: Vec<(i64, Vec<PgValue>)> = staged
                 .upserts
                 .iter()
+                .filter(|(e, state)| owns(e, state))
                 .filter_map(|(e, state)| {
                     state[ci]
                         .as_ref()
@@ -1290,6 +1371,9 @@ impl PgStore {
         self.invalidate_all_tables(&affected).await;
         self.entity_of = bridge.iter().map(|(&e, &pid)| (pid, e)).collect();
         self.pid_of = bridge;
+        for e in &staged.deletes {
+            self.partial.remove(e);
+        }
         self.last = staged.next_state;
         Ok(stats)
     }

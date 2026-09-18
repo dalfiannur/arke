@@ -365,6 +365,33 @@ struct JoinClause {
     load: bool,
 }
 
+/// Himpunan komponen untuk **hidrasi selektif** ([`Query::only`]): satu
+/// komponen (`only::<Health>()`) atau tuple 1–8 (`only::<(Health, Position)>()`).
+pub trait ComponentSet {
+    /// Nama tabel tiap komponen dalam himpunan.
+    const TABLES: &'static [&'static str];
+}
+
+impl<C: PgComponent> ComponentSet for C {
+    const TABLES: &'static [&'static str] = &[C::TABLE];
+}
+
+macro_rules! component_set_tuple {
+    ($($name:ident),+) => {
+        impl<$($name: PgComponent),+> ComponentSet for ($($name,)+) {
+            const TABLES: &'static [&'static str] = &[$($name::TABLE),+];
+        }
+    };
+}
+component_set_tuple!(A);
+component_set_tuple!(A, B);
+component_set_tuple!(A, B, C);
+component_set_tuple!(A, B, C, D);
+component_set_tuple!(A, B, C, D, E);
+component_set_tuple!(A, B, C, D, E, F);
+component_set_tuple!(A, B, C, D, E, F, G);
+component_set_tuple!(A, B, C, D, E, F, G, H);
+
 /// Builder query baca ber-filter (RFC-0030) + join antar-entity (RFC-0031).
 /// Dibuat oleh [`PgStore::query`].
 pub struct Query<'a, T: PgComponent> {
@@ -374,6 +401,8 @@ pub struct Query<'a, T: PgComponent> {
     order: Vec<(&'static str, Dir)>,
     limit: Option<i64>,
     offset: Option<i64>,
+    /// Hidrasi selektif: tabel komponen yang dimuat (`None` = semua terdaftar).
+    only: Option<&'static [&'static str]>,
 }
 
 impl<'a, T: PgComponent> Query<'a, T> {
@@ -385,6 +414,7 @@ impl<'a, T: PgComponent> Query<'a, T> {
             order: Vec::new(),
             limit: None,
             offset: None,
+            only: None,
         }
     }
 
@@ -448,6 +478,24 @@ impl<'a, T: PgComponent> Query<'a, T> {
     /// Lewati `n` baris pertama (`OFFSET`).
     pub fn offset(mut self, n: u64) -> Self {
         self.offset = Some(n as i64);
+        self
+    }
+
+    /// **Hidrasi selektif**: muat hanya komponen dalam `S` untuk entity yang
+    /// cocok — satu komponen (`only::<Health>()`) atau tuple
+    /// (`only::<(Health, Position)>()`). Round-trip turun dari `2 + R` (R = semua
+    /// komponen terdaftar) menjadi `2 + |S|`. `S` **tidak** harus memuat `T`.
+    ///
+    /// Komponen di luar `S` tak disentuh di `World` (tak dimuat, tak dilepas).
+    /// Entity yang **baru** dimuat lewat jalur ini dicatat **parsial**: pada
+    /// `update_entity`/`save_incremental`, tabel yang tak dimuat untuknya
+    /// **dilewati** (tidak di-DELETE), sehingga komponen yang tak dimuat tetap
+    /// utuh di DB. Status parsial dilepas bila entity itu kemudian dimuat penuh
+    /// (tanpa `only`) ke World yang sama. `save()` (overwrite penuh) **tidak**
+    /// dijaga — sama seperti working-set parsial `load_where`, pakai
+    /// `save_incremental`/`update_entity`.
+    pub fn only<S: ComponentSet>(mut self) -> Self {
+        self.only = Some(S::TABLES);
         self
     }
 
@@ -607,6 +655,7 @@ impl<'a, T: PgComponent> Query<'a, T> {
             .collect();
 
         let store = self.store;
+        let only = self.only;
         // Muat **aditif**: jembatan pid↔entity tidak di-reset, sehingga beberapa
         // `load` ke satu World (pola per-request: `fork()` → beberapa query →
         // `save_incremental`) saling melengkapi; pid yang sudah termuat di-refresh
@@ -616,9 +665,11 @@ impl<'a, T: PgComponent> Query<'a, T> {
         // yang sudah ter-materialize di `entity_of`. Filter-saja (tanpa target) →
         // relasi utama menggantung (handle sentinel), entity tetap termuat.
         for (sql, params) in targets {
-            store.load_by_query(sql, params, world).await?;
+            store.load_by_query(sql, params, world, only).await?;
         }
-        store.load_by_query(main_sql, main_params, world).await
+        store
+            .load_by_query(main_sql, main_params, world, only)
+            .await
     }
 
     /// Mulai **path relasi bertipe** (RFC-0032): hop pertama `T →(rel)→ Next`.
@@ -757,11 +808,11 @@ impl<'a> PathLoad<'a> {
         // terakhir agar `leader`/dst me-resolve. `n` = jumlah entity **root**.
         for sql in level_loads.into_iter().rev() {
             store
-                .load_by_query(sql, self.leaf_params.clone(), world)
+                .load_by_query(sql, self.leaf_params.clone(), world, None)
                 .await?;
         }
         let n = store
-            .load_by_query(root_sql, self.leaf_params.clone(), world)
+            .load_by_query(root_sql, self.leaf_params.clone(), world, None)
             .await?;
         Ok(n.len())
     }
@@ -818,7 +869,7 @@ impl<'a> RecursiveLoad<'a> {
         // jembatan) dan di-refresh di tempat, bukan digandakan.
         Ok(self
             .store
-            .load_by_query(self.sql, self.params, world)
+            .load_by_query(self.sql, self.params, world, None)
             .await?
             .len())
     }

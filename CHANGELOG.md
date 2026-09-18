@@ -7,6 +7,18 @@ rilis juga ada di [GitHub Releases](https://github.com/dalfiannur/arke/releases)
 
 ## [Unreleased]
 
+### Added
+
+- **`arke-postgres`: hidrasi selektif `Query::only::<S>()`.** `S` = satu
+  komponen atau tuple 1–8 (`only::<(Health, Position)>()`); `load`/`load_pids`
+  hanya membaca tabel komponen dalam `S` (round-trip `2 + |S|`, bukan `2 + R`
+  untuk R komponen terdaftar). Komponen di luar `S` tak disentuh di `World`.
+  Entity yang dimuat parsial dicatat di store: `update_entity`/`save_incremental`
+  melewati tabel yang tak dimuat **dan** tak diisi pemanggil, sehingga komponen
+  yang tak dimuat tak terhapus; muat penuh ke World yang sama melepas status
+  parsial. `save()` overwrite penuh tetap tak dijaga (seperti `load_where`).
+  Trait `ComponentSet` diekspor.
+
 ### Changed
 
 - **`arke-postgres`: `#[pg(check)]` ber-nama-stabil (content-addressed).**

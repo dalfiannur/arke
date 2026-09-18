@@ -107,6 +107,27 @@ let n = store.query::<Meeting>().filter(f)
 # }
 ```
 
+**Hidrasi selektif** — `load` memuat *seluruh* komponen terdaftar untuk tiap
+entity yang cocok (1 round-trip per tabel). Bila endpoint hanya butuh sebagian,
+`.only::<(A, B)>()` (atau `.only::<A>()`) membatasi ke tabel itu saja; komponen
+lain tak disentuh di `World`, dan `update_entity`/`save_incremental` **tidak**
+menghapus komponen yang tak dimuat (kecuali kamu menyisipkannya sendiri di
+World — itu ditulis). `save()` overwrite penuh tetap tak dijaga, sama seperti
+working-set parsial `load_where`.
+
+```rust,no_run
+# use arke::World;
+# use arke_postgres::{PgComponent, PgStore};
+# #[derive(PgComponent)] struct Meeting { start: i64 }
+# #[derive(PgComponent)] struct Room { code: String }
+# async fn f(store: &mut PgStore, world: &mut World) -> Result<(), sqlx::Error> {
+let n = store.query::<Meeting>().filter(Meeting::start().gte(0))
+    .only::<(Meeting, Room)>()   // 2 + 2 round-trip, bukan 2 + R
+    .load(world).await?;
+# Ok(())
+# }
+```
+
 ### World per-request (REST/axum)
 
 `PgStore` memegang jembatan pid↔entity dan rekam `save_incremental` yang
