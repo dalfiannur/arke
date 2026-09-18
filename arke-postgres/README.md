@@ -378,6 +378,43 @@ struct Enemy {
   huruf besar jadi case-sensitive). Dua struct bernama sama di modul berbeda
   butuh ini agar tak bertabrakan di `cmp_<nama>`.
 
+## Batas operasional (service publik)
+
+`connect(url)` = 5 koneksi, tanpa batas sisi server. Untuk service yang
+menghadap publik pakai `connect_with` — tiga batas yang menjaga hal berbeda:
+
+```rust,no_run
+# use std::time::Duration;
+# use arke_postgres::{ConnectOptions, FailureKind, PgStore, failure_kind};
+# async fn f(url: &str) -> Result<(), sqlx::Error> {
+let mut store = PgStore::connect_with(url, &ConnectOptions {
+    max_connections: 16,                                  // admission: pool = semaphore
+    acquire_timeout: Duration::from_millis(500),          // antre > 500 ms → ditolak di pintu
+    statement_timeout: Some(Duration::from_secs(5)),      // server batalkan query kabur
+    lock_timeout: Some(Duration::from_secs(2)),
+    application_name: Some("booking-api".into()),
+    ..ConnectOptions::default()
+}).await?;
+
+// Handler memilih respons dari jenis batas yang menyala, tanpa mengorek SQLSTATE:
+match store.query::<Meeting>().count().await {
+    Ok(n) => { /* … */ }
+    Err(e) => match failure_kind(&e) {
+        FailureKind::PoolTimeout => { /* 503 Retry-After — server tak disentuh */ }
+        FailureKind::StatementTimeout | FailureKind::LockTimeout => { /* 504 */ }
+        FailureKind::ConnectionLost | FailureKind::Other => { /* 500 */ }
+    },
+}
+let stats = store.pool_stats(); // size / idle / max → health endpoint
+# let _ = stats; Ok(())
+# }
+# #[derive(arke_postgres::PgComponent)] struct Meeting { start: i64 }
+```
+
+Deadline **total** per-request (antre + eksekusi) tidak diduplikasi di sini —
+bungkus dengan `tokio::time::timeout(d, fut)` di pemanggil; itu membatasi
+pemanggil, sedangkan slot server tetap dijaga `statement_timeout`.
+
 ## Menjalankan uji
 
 Uji integrasi butuh Postgres nyata; di-*skip* bila `DATABASE_URL` tak diset:

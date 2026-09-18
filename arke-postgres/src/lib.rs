@@ -96,6 +96,9 @@ pub use store::{
 pub mod cache;
 pub use cache::ComponentCache;
 
+pub mod limits;
+pub use limits::{ConnectOptions, FailureKind, PoolStats, failure_kind};
+
 pub mod tx;
 pub use tx::PgTx;
 

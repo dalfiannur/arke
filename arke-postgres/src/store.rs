@@ -11,10 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use arke::{Component, Entity, QueryData, World, WorldId};
-use sqlx::{
-    PgConnection, PgPool, Postgres, Row, postgres::PgArguments, postgres::PgPoolOptions,
-    query::Query,
-};
+use sqlx::{PgConnection, PgPool, Postgres, Row, postgres::PgArguments, query::Query};
 
 use crate::tx::PgTx;
 
@@ -209,8 +206,23 @@ pub struct PgStore {
 impl PgStore {
     /// Menyambung ke Postgres pada `url` (pool koneksi).
     pub async fn connect(url: &str) -> Result<Self, sqlx::Error> {
-        let pool = PgPoolOptions::new().max_connections(5).connect(url).await?;
-        Ok(Self::from_pool(pool))
+        Self::connect_with(url, &crate::ConnectOptions::default()).await
+    }
+
+    /// Seperti [`connect`](Self::connect) dengan batas operasional eksplisit
+    /// (ukuran pool/admission, `acquire_timeout`, `statement_timeout`,
+    /// `lock_timeout`, …) — lihat [`crate::limits`]. Untuk service publik,
+    /// setel minimal `acquire_timeout` pendek + `statement_timeout`.
+    pub async fn connect_with(
+        url: &str,
+        opts: &crate::ConnectOptions,
+    ) -> Result<Self, sqlx::Error> {
+        Ok(Self::from_pool(opts.build_pool(url).await?))
+    }
+
+    /// Potret pool (koneksi terbuka/idle/maks) untuk health endpoint & metrik.
+    pub fn pool_stats(&self) -> crate::PoolStats {
+        crate::PoolStats::of(&self.pool)
     }
 
     /// Membangun dari `PgPool` yang sudah ada.

@@ -19,6 +19,16 @@ rilis juga ada di [GitHub Releases](https://github.com/dalfiannur/arke/releases)
   `sqlx::Error::Protocol`); `count()` mengabaikan kursor. Tipe baru: `Cursor`,
   `CursorError`, `Page`, `PageError`.
 
+- **`arke-postgres`: batas operasional** — `PgStore::connect_with(url,
+  &ConnectOptions { max_connections, min_connections, acquire_timeout,
+  statement_timeout, lock_timeout, idle_in_transaction_session_timeout,
+  application_name })`; batas sisi server dipasang lewat `SET` per koneksi
+  (`after_connect`, kompatibel PgBouncer session mode). `failure_kind(&err)
+  → FailureKind { PoolTimeout, StatementTimeout, LockTimeout, ConnectionLost,
+  Other }` memetakan `PoolTimedOut`/SQLSTATE agar handler memilih 503/504
+  tanpa mengorek `sqlx::Error`. `PgStore::pool_stats() → PoolStats { size,
+  idle, max }`. `connect(url)` tak berubah (= `ConnectOptions::default()`).
+
 - **`arke-postgres`: agregasi lanjutan** — `Query::count_distinct(field)`,
   `group_by` **multi-kunci** (tuple 2–4 `Field` → hasil `((K1, K2), …)`; trait
   `GroupKey`), dan `Grouped::having(..)` dengan builder typed di modul
