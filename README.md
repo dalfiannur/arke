@@ -56,7 +56,7 @@ Dua pendirian yang membedakannya:
 [dependencies]
 arke = "0.6"
 # Opsional — persistensi PostgreSQL (Postgres sebagai sumber kebenaran):
-arke-postgres = "0.11"
+arke-postgres = "0.17"
 ```
 
 Atau lewat Cargo:
