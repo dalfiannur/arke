@@ -1187,13 +1187,18 @@ impl<'a, T: PgComponent> Query<'a, T> {
         )
     }
 
-    /// Kelompokkan atas satu kunci `key` → terminal `count()`/`sum()`/… per
-    /// kunci (lihat [`crate::aggregate`]).
-    pub fn group_by<K: crate::FromPgScalar>(
+    /// Kelompokkan atas `key` — satu `Field` atau tuple 2–4 `Field`
+    /// (`group_by((T::a(), T::b()))`) → terminal `count()`/`sum()`/… per kunci,
+    /// opsional `.having(..)` (lihat [`crate::aggregate`]).
+    pub fn group_by<G: crate::aggregate::GroupKey<T>>(
         self,
-        key: Field<T, K>,
-    ) -> crate::aggregate::Grouped<'a, T, K> {
-        crate::aggregate::Grouped { query: self, key }
+        key: G,
+    ) -> crate::aggregate::Grouped<'a, T, G> {
+        crate::aggregate::Grouped {
+            query: self,
+            key,
+            having: None,
+        }
     }
 
     fn exists_query(&self) -> (String, Vec<(PgType, PgValue)>) {

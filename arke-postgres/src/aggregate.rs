@@ -1,5 +1,6 @@
-//! Agregasi typed di atas [`Query`] (`SUM`/`MIN`/`MAX`/`AVG`/`COUNT` +
-//! `GROUP BY` satu kunci) — hasilnya skalar, bukan entity.
+//! Agregasi typed di atas [`Query`] (`SUM`/`MIN`/`MAX`/`AVG`/`COUNT`/
+//! `COUNT(DISTINCT)` + `GROUP BY` satu/multi-kunci + `HAVING`) — hasilnya
+//! skalar, bukan entity.
 //!
 //! ```ignore
 //! let total: Option<i64> = store.query::<Booking>()
@@ -13,14 +14,26 @@
 //! (`SUM(x)::bigint`), sehingga aturan Postgres `SUM(int)→bigint`,
 //! `SUM(bigint)→numeric`, `AVG→numeric` tidak bocor ke pemanggil. Untuk nilai
 //! eksak di luar `i64`/`f64` (uang di NUMERIC), minta `String` (`::text`).
-//! Agregat atas nol baris → `None`. `HAVING`, multi-kunci, dan window function
-//! tidak ada — pakai `load_where`/SQL.
+//! Agregat atas nol baris → `None`.
+//!
+//! ```ignore
+//! use arke_postgres::aggregate as agg;
+//! // Per (room, kind) yang total menitnya ≥ 200:
+//! let rows: Vec<((i64, String), Option<i64>)> = store.query::<Booking>()
+//!     .group_by((Booking::room(), Booking::kind()))
+//!     .having(agg::sum(Booking::minutes()).gte(200))
+//!     .sum::<i64>(Booking::minutes()).await?;
+//! ```
+//!
+//! Window function tidak ada — pakai `load_where`/SQL.
 
 use sqlx::postgres::PgRow;
 use sqlx::{Row, ValueRef};
 
-use crate::query::{Field, Query, fetch_scalar_rows, renumber};
-use crate::{PgComponent, quote_ident};
+use std::marker::PhantomData;
+
+use crate::query::{Field, IntoPgValue, Query, fetch_scalar_rows, renumber};
+use crate::{PgComponent, PgType, PgValue, quote_ident};
 
 /// Tipe hasil agregat/kunci grup yang dapat dibaca dari satu kolom hasil.
 pub trait FromPgScalar: Sized {
@@ -115,22 +128,201 @@ pub(crate) fn agg_sql(
     )
 }
 
-/// `SELECT key AS k, <expr> AS v FROM table [WHERE …] GROUP BY key ORDER BY key`.
-/// `expr` = `COUNT(*)::bigint` atau `F(col)cast`.
+/// `SELECT k0cast AS k0, k1cast AS k1, <expr> AS v FROM table [WHERE …]
+/// GROUP BY k0, k1 [HAVING …] ORDER BY k0, k1`. `expr` = `COUNT(*)::bigint`
+/// atau `F(col)cast`. Placeholder `?` belum dinomori; param `having` mengikuti
+/// param `where` (urutan tekstual).
 pub(crate) fn group_sql(
     table: &str,
     where_sql: Option<&str>,
-    key: &str,
-    key_cast: &str,
+    keys: &[(&str, &str)],
     expr: &str,
+    having_sql: Option<&str>,
 ) -> String {
     let w = where_sql.map(|w| format!(" WHERE {w}")).unwrap_or_default();
-    let key = quote_ident(key);
-    let table = quote_ident(table);
+    let h = having_sql
+        .map(|h| format!(" HAVING {h}"))
+        .unwrap_or_default();
+    let selects: Vec<String> = keys
+        .iter()
+        .enumerate()
+        .map(|(i, (col, cast))| format!("{}{cast} AS k{i}", quote_ident(col)))
+        .collect();
+    let groups: Vec<String> = keys
+        .iter()
+        .map(|(col, _)| quote_ident(col).into_owned())
+        .collect();
+    let groups = groups.join(", ");
     format!(
-        "SELECT {key}{key_cast} AS k, {expr} AS v FROM {table}{w} GROUP BY {key} ORDER BY {key}"
+        "SELECT {}, {expr} AS v FROM {}{w} GROUP BY {groups}{h} ORDER BY {groups}",
+        selects.join(", "),
+        quote_ident(table)
     )
 }
+
+/// Kunci `GROUP BY`: satu [`Field`] atau tuple 2–4 `Field` komponen `T`.
+/// `Out` = tipe nilai kunci yang dibaca per baris (`K` atau tuple `K`).
+pub trait GroupKey<T> {
+    /// Nilai kunci per baris hasil.
+    type Out;
+    /// `(kolom, cast)` tiap kunci, urut.
+    fn columns(&self) -> Vec<(&'static str, &'static str)>;
+    /// Baca kunci dari kolom `k<base>`, `k<base+1>`, ….
+    fn read(row: &PgRow, base: usize) -> Result<Self::Out, sqlx::Error>;
+}
+
+impl<T, K: FromPgScalar> GroupKey<T> for Field<T, K> {
+    type Out = K;
+    fn columns(&self) -> Vec<(&'static str, &'static str)> {
+        vec![(self.column, K::CAST)]
+    }
+    fn read(row: &PgRow, base: usize) -> Result<K, sqlx::Error> {
+        K::from_row(row, &format!("k{base}"))
+    }
+}
+
+macro_rules! group_key_tuple {
+    ($($f:ident : $k:ident => $i:tt),+) => {
+        impl<T, $($k: FromPgScalar),+> GroupKey<T> for ($(Field<T, $k>,)+) {
+            type Out = ($($k,)+);
+            fn columns(&self) -> Vec<(&'static str, &'static str)> {
+                vec![$((self.$i.column, $k::CAST)),+]
+            }
+            fn read(row: &PgRow, base: usize) -> Result<Self::Out, sqlx::Error> {
+                Ok(($($k::from_row(row, &format!("k{}", base + $i))?,)+))
+            }
+        }
+    };
+}
+group_key_tuple!(a: K0 => 0, b: K1 => 1);
+group_key_tuple!(a: K0 => 0, b: K1 => 1, c: K2 => 2);
+group_key_tuple!(a: K0 => 0, b: K1 => 1, c: K2 => 2, d: K3 => 3);
+
+/// Predikat `HAVING` typed atas agregat komponen `T` (lihat [`count`],
+/// [`sum`], …); gabung dengan [`Having::and`]/[`Having::or`]/[`Having::not`].
+pub struct Having<T> {
+    pub(crate) sql: String,
+    pub(crate) params: Vec<(PgType, PgValue)>,
+    _pd: PhantomData<fn() -> T>,
+}
+
+impl<T> Having<T> {
+    fn raw(sql: String, params: Vec<(PgType, PgValue)>) -> Self {
+        Self {
+            sql,
+            params,
+            _pd: PhantomData,
+        }
+    }
+    /// `(self) AND (other)`.
+    pub fn and(mut self, other: Having<T>) -> Having<T> {
+        self.sql = format!("({}) AND ({})", self.sql, other.sql);
+        self.params.extend(other.params);
+        self
+    }
+    /// `(self) OR (other)`.
+    pub fn or(mut self, other: Having<T>) -> Having<T> {
+        self.sql = format!("({}) OR ({})", self.sql, other.sql);
+        self.params.extend(other.params);
+        self
+    }
+    /// `NOT (self)`.
+    // Metode fluent sengaja (rantai `.and().or().not()`), bukan trait `Not`.
+    #[allow(clippy::should_implement_trait)]
+    pub fn not(mut self) -> Having<T> {
+        self.sql = format!("NOT ({})", self.sql);
+        self
+    }
+}
+
+/// Ekspresi agregat untuk `HAVING` (`COUNT(*)`, `SUM(col)`, …); bandingkan
+/// dengan nilai lewat `gt`/`gte`/`lt`/`lte`/`eq`/`ne` → [`Having`].
+pub struct AggExpr<T> {
+    sql: String,
+    _pd: PhantomData<fn() -> T>,
+}
+
+impl<T> AggExpr<T> {
+    fn cmp(self, op: &str, v: impl IntoPgValue) -> Having<T> {
+        let v = v.into_pg_value();
+        let ty = bind_type(&v);
+        Having::raw(
+            format!("{} {op} ?{}", self.sql, cast_for(ty)),
+            vec![(ty, v)],
+        )
+    }
+    /// `expr > v`.
+    pub fn gt(self, v: impl IntoPgValue) -> Having<T> {
+        self.cmp(">", v)
+    }
+    /// `expr >= v`.
+    pub fn gte(self, v: impl IntoPgValue) -> Having<T> {
+        self.cmp(">=", v)
+    }
+    /// `expr < v`.
+    pub fn lt(self, v: impl IntoPgValue) -> Having<T> {
+        self.cmp("<", v)
+    }
+    /// `expr <= v`.
+    pub fn lte(self, v: impl IntoPgValue) -> Having<T> {
+        self.cmp("<=", v)
+    }
+    /// `expr = v`.
+    pub fn eq(self, v: impl IntoPgValue) -> Having<T> {
+        self.cmp("=", v)
+    }
+    /// `expr <> v`.
+    pub fn ne(self, v: impl IntoPgValue) -> Having<T> {
+        self.cmp("<>", v)
+    }
+}
+
+/// Tipe bind untuk nilai literal `HAVING` (tak ada kolom acuan).
+fn bind_type(v: &PgValue) -> PgType {
+    match v {
+        PgValue::Int(_) | PgValue::Ref(_) => PgType::BigInt,
+        PgValue::Float(_) => PgType::DoublePrecision,
+        PgValue::Numeric(_) => PgType::Numeric,
+        PgValue::Bool(_) => PgType::Boolean,
+        PgValue::Text(_) | PgValue::Null => PgType::Text,
+        PgValue::Json(_) => PgType::Jsonb,
+    }
+}
+
+fn cast_for(ty: PgType) -> &'static str {
+    match ty {
+        PgType::Numeric => "::numeric",
+        PgType::Jsonb => "::jsonb",
+        _ => "",
+    }
+}
+
+/// `COUNT(*)` untuk `HAVING`.
+pub fn count<T>() -> AggExpr<T> {
+    AggExpr {
+        sql: "COUNT(*)".to_string(),
+        _pd: PhantomData,
+    }
+}
+/// `COUNT(DISTINCT field)` untuk `HAVING`.
+pub fn count_distinct<T>(field: impl ColumnOf<T>) -> AggExpr<T> {
+    AggExpr {
+        sql: format!("COUNT(DISTINCT {})", quote_ident(field.column())),
+        _pd: PhantomData,
+    }
+}
+macro_rules! having_fn {
+    ($($name:ident => $sql:literal),*) => { $(
+        #[doc = concat!("`", $sql, "(field)` untuk `HAVING`.")]
+        pub fn $name<T>(field: impl ColumnOf<T>) -> AggExpr<T> {
+            AggExpr {
+                sql: format!("{}({})", $sql, quote_ident(field.column())),
+                _pd: PhantomData,
+            }
+        }
+    )* };
+}
+having_fn!(sum => "SUM", min => "MIN", max => "MAX", avg => "AVG");
 
 impl<T: PgComponent> Query<'_, T> {
     async fn agg_one<A: FromPgScalar>(
@@ -185,29 +377,64 @@ impl<T: PgComponent> Query<'_, T> {
     ) -> Result<Option<A>, sqlx::Error> {
         self.agg_one(Agg::Avg, field).await
     }
+
+    /// `COUNT(DISTINCT field)` atas entity yang cocok (`NULL` tak dihitung).
+    pub async fn count_distinct(self, field: impl ColumnOf<T>) -> Result<u64, sqlx::Error> {
+        let (where_opt, params) = self.where_clause();
+        let w = where_opt.map(|w| format!(" WHERE {w}")).unwrap_or_default();
+        let sql = renumber(&format!(
+            "SELECT COUNT(DISTINCT {})::bigint AS v FROM {}{w}",
+            quote_ident(field.column()),
+            quote_ident(T::TABLE)
+        ));
+        let rows = fetch_scalar_rows(self.store.pool(), &sql, &params).await?;
+        let row = rows.first().ok_or(sqlx::Error::RowNotFound)?;
+        let n: i64 = row.try_get("v")?;
+        Ok(u64::try_from(n).unwrap_or(0))
+    }
 }
 
-/// [`Query`] yang sudah dikelompokkan atas satu kunci `K` (dari
-/// [`Query::group_by`]); terminalnya mengembalikan `Vec<(K, …)>` urut kunci.
-pub struct Grouped<'a, T: PgComponent, K> {
+/// [`Query`] yang sudah dikelompokkan atas kunci `G` ([`GroupKey`]: satu
+/// `Field` atau tuple `Field`, dari [`Query::group_by`]); terminalnya
+/// mengembalikan `Vec<(G::Out, …)>` urut kunci. [`Self::having`] menyaring grup.
+pub struct Grouped<'a, T: PgComponent, G: GroupKey<T>> {
     pub(crate) query: Query<'a, T>,
-    pub(crate) key: Field<T, K>,
+    pub(crate) key: G,
+    pub(crate) having: Option<Having<T>>,
 }
 
-impl<T: PgComponent, K: FromPgScalar> Grouped<'_, T, K> {
-    async fn run<A: FromPgScalar>(self, expr: String) -> Result<Vec<(K, Option<A>)>, sqlx::Error> {
-        let (where_opt, params) = self.query.where_clause();
+impl<T: PgComponent, G: GroupKey<T>> Grouped<'_, T, G> {
+    /// Saring grup dengan predikat agregat (`HAVING`); dipanggil >1× →
+    /// digabung `AND`. Bangun lewat [`count`]/[`count_distinct`]/[`sum`]/
+    /// [`min`]/[`max`]/[`avg`] + `gt`/`gte`/…, gabung `and`/`or`/`not`.
+    pub fn having(mut self, h: Having<T>) -> Self {
+        self.having = Some(match self.having.take() {
+            Some(existing) => existing.and(h),
+            None => h,
+        });
+        self
+    }
+
+    async fn run<A: FromPgScalar>(
+        self,
+        expr: String,
+    ) -> Result<Vec<(G::Out, Option<A>)>, sqlx::Error> {
+        let (where_opt, mut params) = self.query.where_clause();
+        let having_sql = self.having.as_ref().map(|h| h.sql.as_str());
+        if let Some(h) = &self.having {
+            params.extend(h.params.iter().cloned());
+        }
         let sql = renumber(&group_sql(
             T::TABLE,
             where_opt.as_deref(),
-            self.key.column,
-            K::CAST,
+            &self.key.columns(),
             &expr,
+            having_sql,
         ));
         let rows = fetch_scalar_rows(self.query.store.pool(), &sql, &params).await?;
         rows.iter()
             .map(|row| {
-                let k = K::from_row(row, "k")?;
+                let k = G::read(row, 0)?;
                 let v = if row.try_get_raw("v")?.is_null() {
                     None
                 } else {
@@ -219,8 +446,20 @@ impl<T: PgComponent, K: FromPgScalar> Grouped<'_, T, K> {
     }
 
     /// `COUNT(*)` per kunci.
-    pub async fn count(self) -> Result<Vec<(K, u64)>, sqlx::Error> {
-        let rows: Vec<(K, Option<i64>)> = self.run("COUNT(*)::bigint".to_string()).await?;
+    pub async fn count(self) -> Result<Vec<(G::Out, u64)>, sqlx::Error> {
+        let rows: Vec<(G::Out, Option<i64>)> = self.run("COUNT(*)::bigint".to_string()).await?;
+        Ok(rows
+            .into_iter()
+            .map(|(k, v)| (k, u64::try_from(v.unwrap_or(0)).unwrap_or(0)))
+            .collect())
+    }
+    /// `COUNT(DISTINCT field)` per kunci.
+    pub async fn count_distinct(
+        self,
+        field: impl ColumnOf<T>,
+    ) -> Result<Vec<(G::Out, u64)>, sqlx::Error> {
+        let expr = format!("COUNT(DISTINCT {})::bigint", quote_ident(field.column()));
+        let rows: Vec<(G::Out, Option<i64>)> = self.run(expr).await?;
         Ok(rows
             .into_iter()
             .map(|(k, v)| (k, u64::try_from(v.unwrap_or(0)).unwrap_or(0)))
@@ -230,7 +469,7 @@ impl<T: PgComponent, K: FromPgScalar> Grouped<'_, T, K> {
     pub async fn sum<A: FromPgScalar>(
         self,
         field: impl ColumnOf<T>,
-    ) -> Result<Vec<(K, Option<A>)>, sqlx::Error> {
+    ) -> Result<Vec<(G::Out, Option<A>)>, sqlx::Error> {
         self.run(format!("SUM({}){}", quote_ident(field.column()), A::CAST))
             .await
     }
@@ -238,7 +477,7 @@ impl<T: PgComponent, K: FromPgScalar> Grouped<'_, T, K> {
     pub async fn min<A: FromPgScalar>(
         self,
         field: impl ColumnOf<T>,
-    ) -> Result<Vec<(K, Option<A>)>, sqlx::Error> {
+    ) -> Result<Vec<(G::Out, Option<A>)>, sqlx::Error> {
         self.run(format!("MIN({}){}", quote_ident(field.column()), A::CAST))
             .await
     }
@@ -246,7 +485,7 @@ impl<T: PgComponent, K: FromPgScalar> Grouped<'_, T, K> {
     pub async fn max<A: FromPgScalar>(
         self,
         field: impl ColumnOf<T>,
-    ) -> Result<Vec<(K, Option<A>)>, sqlx::Error> {
+    ) -> Result<Vec<(G::Out, Option<A>)>, sqlx::Error> {
         self.run(format!("MAX({}){}", quote_ident(field.column()), A::CAST))
             .await
     }
@@ -254,7 +493,7 @@ impl<T: PgComponent, K: FromPgScalar> Grouped<'_, T, K> {
     pub async fn avg<A: FromPgScalar>(
         self,
         field: impl ColumnOf<T>,
-    ) -> Result<Vec<(K, Option<A>)>, sqlx::Error> {
+    ) -> Result<Vec<(G::Out, Option<A>)>, sqlx::Error> {
         self.run(format!("AVG({}){}", quote_ident(field.column()), A::CAST))
             .await
     }
@@ -284,12 +523,49 @@ mod tests {
             renumber(&group_sql(
                 "cmp_b",
                 Some("x > ?"),
-                "room",
-                "::bigint",
-                "COUNT(*)::bigint"
+                &[("room", "::bigint")],
+                "COUNT(*)::bigint",
+                None
             )),
-            "SELECT room::bigint AS k, COUNT(*)::bigint AS v FROM cmp_b WHERE x > $1 GROUP BY room ORDER BY room"
+            "SELECT room::bigint AS k0, COUNT(*)::bigint AS v FROM cmp_b WHERE x > $1 GROUP BY room ORDER BY room"
         );
+        // Multi-kunci + HAVING: param HAVING dinomori setelah WHERE.
+        assert_eq!(
+            renumber(&group_sql(
+                "cmp_b",
+                Some("x > ?"),
+                &[("room", "::bigint"), ("kind", "::text")],
+                "SUM(minutes)::bigint",
+                Some("SUM(minutes) >= ?")
+            )),
+            "SELECT room::bigint AS k0, kind::text AS k1, SUM(minutes)::bigint AS v FROM cmp_b \
+             WHERE x > $1 GROUP BY room, kind HAVING SUM(minutes) >= $2 ORDER BY room, kind"
+        );
+    }
+
+    #[test]
+    fn having_builder_sql() {
+        struct B;
+        let h = count::<B>()
+            .gt(1)
+            .and(sum(Field::<B, i32>::new("minutes", PgType::Integer)).gte(200))
+            .or(avg(Field::<B, i32>::new("minutes", PgType::Integer))
+                .lt(40.0)
+                .not());
+        assert_eq!(
+            h.sql,
+            "((COUNT(*) > ?) AND (SUM(minutes) >= ?)) OR (NOT (AVG(minutes) < ?))"
+        );
+        assert_eq!(
+            h.params,
+            vec![
+                (PgType::BigInt, PgValue::Int(1)),
+                (PgType::BigInt, PgValue::Int(200)),
+                (PgType::DoublePrecision, PgValue::Float(40.0)),
+            ]
+        );
+        let d = count_distinct(Field::<B, String>::new("kind", PgType::Text)).eq(2);
+        assert_eq!(d.sql, "COUNT(DISTINCT kind) = ?");
     }
 
     #[test]

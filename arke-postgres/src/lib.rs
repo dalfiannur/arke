@@ -103,7 +103,7 @@ pub mod mutate;
 pub use mutate::{DeleteWhere, UpdateWhere};
 
 pub mod aggregate;
-pub use aggregate::{ColumnOf, FromPgScalar, Grouped};
+pub use aggregate::{AggExpr, ColumnOf, FromPgScalar, GroupKey, Grouped, Having};
 
 pub mod query;
 pub use query::{

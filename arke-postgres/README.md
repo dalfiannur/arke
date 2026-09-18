@@ -258,12 +258,19 @@ let per_room: Vec<(String, u64)> = store.query::<Booking>()
     .group_by(Booking::room_code()).count().await?;
 let avg_per_room: Vec<(String, Option<f64>)> = store.query::<Booking>()
     .group_by(Booking::room_code()).avg::<f64>(Booking::minutes()).await?;
+// Multi-kunci (tuple Field), COUNT(DISTINCT), dan HAVING typed:
+use arke_postgres::aggregate as agg;
+let rooms_used: u64 = store.query::<Booking>().count_distinct(Booking::room_code()).await?;
+let busy: Vec<((String, String), u64)> = store.query::<Booking>()
+    .group_by((Booking::room_code(), Booking::status()))
+    .having(agg::count::<Booking>().gt(1).and(agg::sum(Booking::minutes()).gte(200)))
+    .count().await?;
 # Ok(())
 # }
 ```
 
 Yang sengaja **tidak** ada (tetap `load_where`/SQL): join berproyeksi kolom
-lintas tabel, `HAVING`, multi-kunci `GROUP BY`, window function, UPSERT massal.
+lintas tabel, window function, UPSERT massal.
 
 ### Transaksi milik pemanggil (cek-lalu-tulis atomik)
 
