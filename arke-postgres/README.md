@@ -113,7 +113,9 @@ dengan kursor opaque aman-URL (`Cursor` ↔ `String` via `Display`/`FromStr`).
 `ORDER BY` selalu diikat `pid` (deterministik); arah seragam → row-value compare
 `(k, pid) > ($1, $2)` yang ramah index. Kursor divalidasi terhadap `order_by`
 query (`PageError::Cursor(Mismatch)` bila beda). Kunci bernilai `NULL` tak
-terjangkau keyset — filter atau beri default.
+terjangkau keyset — filter atau beri default. Butuh "≈ total" tanpa memindai
+tabel? `count_estimate()` membaca estimasi planner (`EXPLAIN`, O(1)) — akurat
+sejauh statistik `ANALYZE`; `count()` tetap untuk angka eksak.
 
 ```rust,no_run
 # use arke::World;

@@ -991,6 +991,26 @@ impl<'a, T: PgComponent> Query<'a, T> {
         Ok(u64::try_from(n).unwrap_or(0))
     }
 
+    /// **Estimasi** jumlah baris yang cocok dari planner Postgres
+    /// (`EXPLAIN` → `rows=`), **tanpa** memindai tabel — O(1) terhadap ukuran
+    /// tabel, cocok untuk "≈ N hasil"/total halaman kasar di list screen
+    /// (padukan dengan [`load_page`](Self::load_page) yang sudah memberi
+    /// `next`). Akurasinya bergantung statistik (`ANALYZE`/autovacuum) dan bisa
+    /// meleset jauh untuk predikat berkorelasi; tabel kosong/baru bisa memberi
+    /// ≥ 1. Untuk angka eksak pakai [`count`](Self::count). `WHERE` sama dengan
+    /// `count()`; `order_by`/`limit`/`offset`/kursor diabaikan.
+    pub async fn count_estimate(self) -> Result<u64, sqlx::Error> {
+        let (where_opt, params) = self.where_clause();
+        let sql = renumber(&explain_sql(&quote_ident(T::TABLE), where_opt.as_deref()));
+        let rows = fetch_scalar_rows(self.store.pool(), &sql, &params).await?;
+        let first: String = rows
+            .first()
+            .ok_or_else(|| sqlx::Error::Protocol("EXPLAIN tanpa baris".into()))?
+            .try_get(0)?;
+        parse_explain_rows(&first)
+            .ok_or_else(|| sqlx::Error::Protocol(format!("EXPLAIN tanpa `rows=`: {first}")))
+    }
+
     /// Seperti [`count`](Self::count) tetapi lewat koneksi transaksi `tx` milik
     /// pemanggil — melihat baris yang belum di-commit oleh `tx` itu (lihat
     /// [`crate::tx`]).
@@ -1409,6 +1429,23 @@ fn count_sql(table: &str, where_sql: Option<&str>) -> String {
     }
 }
 
+/// SQL `EXPLAIN` (format teks, tanpa eksekusi) atas `table` dengan `WHERE`
+/// opsional — baris pertama memuat `rows=<estimasi>` simpul akar.
+fn explain_sql(table: &str, where_sql: Option<&str>) -> String {
+    match where_sql {
+        Some(w) => format!("EXPLAIN SELECT pid FROM {table} WHERE {w}"),
+        None => format!("EXPLAIN SELECT pid FROM {table}"),
+    }
+}
+
+/// Ambil `rows=<n>` dari satu baris teks `EXPLAIN`
+/// (`Seq Scan on t  (cost=0.00..35.50 rows=850 width=8)`).
+fn parse_explain_rows(line: &str) -> Option<u64> {
+    let i = line.find("rows=")? + "rows=".len();
+    let digits: String = line[i..].chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
 /// SQL `EXISTS` atas `table` dengan `WHERE` opsional (placeholder `?`, belum
 /// dinomori). Dipisah dari [`Query::exists`] agar dapat diuji tanpa DB.
 fn exists_sql(table: &str, where_sql: Option<&str>) -> String {
@@ -1635,6 +1672,26 @@ mod tests {
             keyset_where(&keys, &json, Bound::After),
             Err(CursorError::Mismatch(_))
         ));
+    }
+
+    #[test]
+    fn explain_rows_terparse() {
+        assert_eq!(
+            parse_explain_rows("Seq Scan on cmp_health  (cost=0.00..35.50 rows=850 width=8)"),
+            Some(850)
+        );
+        assert_eq!(
+            parse_explain_rows("Index Only Scan using x on t  (cost=0.29..8.31 rows=1 width=8)"),
+            Some(1)
+        );
+        assert_eq!(
+            parse_explain_rows("Result  (cost=0.00..0.01 width=8)"),
+            None
+        );
+        assert_eq!(
+            explain_sql("cmp_health", Some("hp < ?")),
+            "EXPLAIN SELECT pid FROM cmp_health WHERE hp < ?"
+        );
     }
 
     #[test]

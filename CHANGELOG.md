@@ -19,6 +19,11 @@ rilis juga ada di [GitHub Releases](https://github.com/dalfiannur/arke/releases)
   `sqlx::Error::Protocol`); `count()` mengabaikan kursor. Tipe baru: `Cursor`,
   `CursorError`, `Page`, `PageError`.
 
+- **`arke-postgres`: `Query::count_estimate()`** — estimasi jumlah baris dari
+  planner (`EXPLAIN` → `rows=`) tanpa memindai tabel, `WHERE` sama dengan
+  `count()`. Untuk "≈ N hasil"/total halaman kasar; akurasi bergantung
+  statistik `ANALYZE`, tabel kosong bisa memberi ≥ 1. `count()` tetap eksak.
+
 - **`arke-postgres`: hidrasi selektif `Query::only::<S>()`.** `S` = satu
   komponen atau tuple 1–8 (`only::<(Health, Position)>()`); `load`/`load_pids`
   hanya membaca tabel komponen dalam `S` (round-trip `2 + |S|`, bukan `2 + R`
