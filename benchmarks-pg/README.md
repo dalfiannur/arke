@@ -73,7 +73,8 @@ cd bunsane && DB_CONNECTION_URL=postgres://postgres:postgres@localhost:5432/buns
 |---|---|---|
 | `save` | INSERT per-entity, `C` transaksi konkuren (`--concurrency`) | `Entity.save()` per entity, `C` konkuren (`SAVE_CONCURRENCY`) |
 | `load` | `PgStore::load` — muat seluruh state | `Query().with(...).eagerLoad(...).exec()` |
-| `filter` | `load_where::<Health>("hp < 20")` | `Query().with(Health, {filters:[hp<20]})` |
+| `filter` | `load_where::<Health>("hp < 20")` — memuat **semua** komponen | `Query().with(Health, {filters:[hp<20]})` — hanya Health |
+| `filter_only` | `query::<Health>().filter(hp.lt(20)).only::<Health>()` — hanya Health (**apel-ke-apel** dengan `filter` BunSane) | — |
 | `incremental` | `UPDATE cmp_health` ~10% entity, `C` konkuren | `set()` + `save()` ~10% entity, `C` konkuren |
 
 ## Membaca hasil — PENTING
@@ -98,24 +99,27 @@ lokal — ms rata-rata (konkurensi tulis disamakan kedua sisi):
 
 ```
   save                   C=1       C=4      C=8     C=16    scaling
-  arke-postgres      23875.1   12613.5   6076.0   3149.1     7.58×
-  bunsane            33813.0   11308.5   8854.2   5521.2     6.12×
+  arke-postgres      26660.0   12351.2   6783.3   3409.3     7.82×
+  bunsane            37093.0   15191.1   8249.2   5007.5     7.41×
 
   incremental            C=1       C=4      C=8     C=16    scaling
-  arke-postgres       2908.6     909.6    651.6    337.6     8.61×
-  bunsane             3901.2    1156.7    801.7    469.5     8.31×
+  arke-postgres       2918.3    1062.0    749.7    287.5    10.15×
+  bunsane             3863.3    1398.5    885.8    448.8     8.61×
 
-  load  (query tunggal, ~datar)     arke ≈ 48-56 ms   bunsane ≈ 108-128 ms
-  filter (query tunggal, ~datar)    arke ≈ 11-14 ms   bunsane ≈ 30-32 ms
+  load        (query tunggal, ~datar)   arke ≈ 49-56 ms   bunsane ≈ 104-109 ms
+  filter      (query tunggal, ~datar)   arke ≈ 12-14 ms   bunsane ≈ 33 ms
+  filter_only (query tunggal, ~datar)   arke ≈  8-12 ms   (bunsane: = `filter`)
 ```
 
 Bacaan:
 - **Tulis** (`save`/`incremental`): keduanya skala baik dgn konkurensi. arke lebih
-  cepat di **tiap** level, & scaling `save` lebih tinggi (7.6× vs 6.1×). Di C=4
-  `save` sempat berdekatan (bunsane sedikit unggul di titik itu — noise), tapi arke
-  memimpin di C=1/8/16 dan menang telak di C=16 (3149 vs 5521 ms).
-- **Baca** (`load`/`filter`): datar terhadap konkurensi (query tunggal), arke ~2.5×
-  lebih cepat — overhead per-op lebih rendah (kolom typed vs JSONB).
+  cepat di **tiap** level, & scaling lebih tinggi (`save` 7.8× vs 7.4×,
+  `incremental` 10.2× vs 8.6×); di C=16 `save` 3409 vs 5008 ms.
+- **Baca** (`load`/`filter`): datar terhadap konkurensi (query tunggal), arke ~2×
+  (`load`) dan ~2.5× (`filter`) lebih cepat — overhead per-op lebih rendah
+  (kolom typed vs JSONB) — **padahal `filter` arke memuat semua komponen**,
+  sedangkan `filter` BunSane hanya Health. `filter_only` (hidrasi selektif
+  `only::<Health>()`, apel-ke-apel) ≈ 8-12 ms → **~3-4× lebih cepat** dari BunSane.
 
 ## Struktur
 

@@ -28,7 +28,7 @@ const W = 12;
 console.log(`\n  Sweep konkurensi — N = ${N}  (angka = ms rata-rata, makin kecil makin baik)\n`);
 
 for (const wl of workloads) {
-  const flat = wl === "load" || wl === "filter";
+  const flat = wl === "load" || wl === "filter" || wl === "filter_only";
   console.log(`  ${wl}${flat ? "  (baca: query tunggal, ~independen konkurensi)" : ""}`);
   // header
   let head = padR("    engine", 18);

@@ -68,7 +68,7 @@ fn build_rows(n: usize) -> Vec<Row> {
     let mut rng = Lcg::new(0xA42E_5EED);
     (0..n)
         .map(|i| Row {
-            id: i as i64,
+            id: i as i64 + 1, // pid BIGSERIAL: mulai 1
             x: i as f64,
             y: (n - i) as f64,
             hp: (rng.next_u32() % 100) as i32,
@@ -80,17 +80,17 @@ fn build_rows(n: usize) -> Vec<Row> {
 /// meniru granularitas `Entity.save()` BunSane.
 async fn insert_one(pool: &PgPool, r: &Row) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
-    sqlx::query("INSERT INTO arke_entities (entity_id, generation, version) VALUES ($1, 0, 0)")
+    sqlx::query("INSERT INTO arke_entities (pid, version) VALUES ($1, 0)")
         .bind(r.id)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("INSERT INTO cmp_position (entity_id, x, y) VALUES ($1, $2, $3)")
+    sqlx::query("INSERT INTO cmp_position (pid, x, y) VALUES ($1, $2, $3)")
         .bind(r.id)
         .bind(r.x)
         .bind(r.y)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("INSERT INTO cmp_health (entity_id, hp) VALUES ($1, $2)")
+    sqlx::query("INSERT INTO cmp_health (pid, hp) VALUES ($1, $2)")
         .bind(r.id)
         .bind(r.hp)
         .execute(&mut *tx)
@@ -115,7 +115,7 @@ async fn save_concurrent(pool: &PgPool, rows: &[Row], c: usize) {
 async fn update_concurrent(pool: &PgPool, ids: &[i64], c: usize) {
     stream::iter(ids.iter())
         .map(|&id| {
-            sqlx::query("UPDATE cmp_health SET hp = hp + 1 WHERE entity_id = $1")
+            sqlx::query("UPDATE cmp_health SET hp = hp + 1 WHERE pid = $1")
                 .bind(id)
                 .execute(pool)
         })
@@ -249,6 +249,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         store.load_where::<Health>(&mut w, "hp < 20").await.unwrap();
     });
     stats.push(summarize("filter", matched, &s));
+
+    // 3b) filter_only: query builder + hidrasi selektif `only::<Health>()` —
+    // apel-ke-apel dengan `filter` BunSane, yang memang hanya memuat Health
+    // (tanpa eagerLoad Position). `filter` di atas memuat SEMUA komponen.
+    let s = bench!(iters, {
+        let mut w = World::new();
+        store
+            .query::<Health>()
+            .filter(Health::hp().lt(20))
+            .only::<Health>()
+            .load(&mut w)
+            .await
+            .unwrap();
+    });
+    stats.push(summarize("filter_only", matched, &s));
 
     // 4) incremental: UPDATE hp pada ~10% entity, `C` konkuren.
     let s = bench!(iters, {
