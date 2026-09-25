@@ -9,6 +9,11 @@ rilis juga ada di [GitHub Releases](https://github.com/dalfiannur/arke/releases)
 
 ### Added
 
+- **`arke-postgres`: `Query::include(T::rel())`** (RFC-0041) — muat entity
+  target relasi bertipe untuk baris hasil query (ikut limit/order/kursor)
+  sebelum entity utama, sehingga `Ref<R>` langsung resolve di World
+  per-request. Tidak menyaring; `None` tetap `None`.
+
 - **`arke-postgres`: penguncian baris** (RFC-0040) — `Query::for_update()
   [.skip_locked() | .nowait()].pids_in(&mut tx)` → `FOR UPDATE OF cmp_t`.
   Tipe `Locked` hanya punya terminal ber-transaksi (tanpa tx gagal kompilasi).

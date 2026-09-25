@@ -855,6 +855,8 @@ pub struct Query<'a, T: PgComponent> {
     /// Kondisi **lintas komponen** pada entity yang sama
     /// (`with`/`with_where`/`without`): SQL + param.
     archetype: Vec<(String, Vec<(PgType, PgValue)>)>,
+    /// Kolom relasi bertipe yang targetnya ikut dimuat (`include`, RFC-0041).
+    includes: Vec<&'static str>,
 }
 
 impl<'a, T: PgComponent> Query<'a, T> {
@@ -869,6 +871,7 @@ impl<'a, T: PgComponent> Query<'a, T> {
             only: None,
             cursor: None,
             archetype: Vec::new(),
+            includes: Vec::new(),
         }
     }
 
@@ -921,6 +924,16 @@ impl<'a, T: PgComponent> Query<'a, T> {
     /// bersarang (`matches`) untuk relasi 3–4 deep.
     pub fn join<R: PgComponent>(self, relation: Field<T, EntityRef>, filter: Filter<R>) -> Self {
         self.filter(relation.matches(filter))
+    }
+
+    /// Muat juga entity target relasi bertipe `rel` (`Ref<R>`/`Option<Ref<R>>`)
+    /// untuk baris `T` yang dimuat — hanya baris hasil (ikut `limit`/`order_by`/
+    /// kursor), bukan semua yang cocok filter. Target dimuat lebih dulu sehingga
+    /// relasi entity utama resolve ke entity-nya di `world`. Tidak menyaring:
+    /// relasi `None` tetap `None` (RFC-0041). Boleh dipanggil untuk beberapa relasi.
+    pub fn include<R: PgComponent>(mut self, rel: Field<T, RelRef<R>>) -> Self {
+        self.includes.push(rel.column);
+        self
     }
 
     /// Seperti [`Self::join`], **plus** memuat entity `R` yang menjadi target
@@ -1260,12 +1273,25 @@ impl<'a, T: PgComponent> Query<'a, T> {
         world: &mut World,
     ) -> Result<Vec<(i64, Entity)>, sqlx::Error> {
         // Susun semua SQL (pinjam-baca `self`) sebelum menyentuh `self.store`.
-        let targets: Vec<(String, Vec<(PgType, PgValue)>)> = self
+        let mut targets: Vec<(String, Vec<(PgType, PgValue)>)> = self
             .joins
             .iter()
             .filter(|j| j.load)
             .map(|j| self.target_load_sql(j.rel_column))
             .collect();
+        // `include`: target dari baris hasil SQL utama saja (SQL utama sudah
+        // bernomor `$n` dan dibungkus apa adanya, jadi param-nya dipakai ulang).
+        for rel in &self.includes {
+            targets.push((
+                format!(
+                    "SELECT DISTINCT t.{rel} AS pid FROM {tbl} t \
+                     WHERE t.pid IN (SELECT m.pid FROM ({main_sql}) m) AND t.{rel} IS NOT NULL",
+                    rel = quote_ident(rel),
+                    tbl = quote_ident(T::TABLE),
+                ),
+                main_params.clone(),
+            ));
+        }
 
         let store = self.store;
         let only = self.only;
