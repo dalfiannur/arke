@@ -188,6 +188,21 @@ pub struct StagedInsert {
     rows: Vec<(usize, Vec<PgValue>)>, // (index registered, params)
 }
 
+impl StagedInsert {
+    /// Baris per komponen: `(index registered, params)`.
+    pub(crate) fn rows(&self) -> &[(usize, Vec<PgValue>)] {
+        &self.rows
+    }
+
+    /// Params komponen `registered[ci]`, bila entity punya komponen itu.
+    pub(crate) fn params_of(&self, ci: usize) -> Option<&[PgValue]> {
+        self.rows
+            .iter()
+            .find(|(c, _)| *c == ci)
+            .map(|(_, p)| p.as_slice())
+    }
+}
+
 /// Komponen owned satu entity untuk `commit_update` (RFC-0034). `None` = komponen
 /// tak ada pada entity (baris komponen itu dihapus).
 pub struct StagedUpdate {
@@ -418,7 +433,7 @@ impl PgStore {
     /// Sisipkan satu baris komponen `registered[ci]` untuk `pid`. Per-op:
     /// `pid_of` kosong → relasi lintas-op menggantung → NULL (RFC-0034 Am.3);
     /// konsumen per-op memakai id-string, bukan `EntityRef`.
-    async fn insert_row(
+    pub(crate) async fn insert_row(
         &self,
         conn: &mut PgConnection,
         ci: usize,
@@ -523,6 +538,17 @@ impl PgStore {
     /// Pool koneksi store ini (dipakai [`Self::begin`]).
     pub(crate) fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    /// **Upsert** entity `staged` berkunci komponen `T` (RFC-0038) — lihat
+    /// [`crate::upsert`].
+    pub fn upsert<T: PgComponent>(&self, staged: StagedInsert) -> crate::Upsert<'_, T> {
+        crate::Upsert::new(self, staged)
+    }
+
+    /// Index `registered` untuk tabel komponen `table`.
+    pub(crate) fn registered_index(&self, table: &str) -> Option<usize> {
+        self.registered.iter().position(|r| r.table == table)
     }
 
     /// **UPDATE massal ber-filter** atas kolom komponen `T` (lihat
@@ -1355,6 +1381,11 @@ impl PgStore {
     /// jembatan store. Lihat [`resolve_refs_with`].
     fn resolve_refs(&self, params: &[PgValue]) -> Vec<PgValue> {
         resolve_refs_with(&self.pid_of, params)
+    }
+
+    /// [`Self::resolve_refs`] untuk modul lain di crate ini.
+    pub(crate) fn resolve_refs_pub(&self, params: &[PgValue]) -> Vec<PgValue> {
+        self.resolve_refs(params)
     }
 
     /// **Baca (RFC-0034 Am.3):** untuk kolom `entity_ref`, `Int(pid)` → `Ref(indeks

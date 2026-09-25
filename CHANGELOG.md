@@ -9,6 +9,12 @@ rilis juga ada di [GitHub Releases](https://github.com/dalfiannur/arke/releases)
 
 ### Added
 
+- **`arke-postgres`: upsert** (RFC-0038) — `PgStore::upsert::<T>(staged)
+  .on(..).update(..)/.update_coalesce(..).execute()/.execute_in(tx)` →
+  `Upserted { pid, inserted }`. `INSERT … ON CONFLICT` dengan pid yang dilepas
+  saat konflik, komponen lain hanya untuk entity baru, `version` naik dan cache
+  di-invalidate pada DO UPDATE, aman terhadap upsert serentak.
+
 - **`arke-postgres`: indeks komposit** (RFC-0037) — level-tipe
   `#[pg(index(a, b))]`/`#[pg(unique(a, b))]` → `PgComponent::COMPOSITE_INDEXES`
   (`CompositeIndexDef`, default kosong). Field relasi dipetakan ke `<name>_id`.

@@ -105,6 +105,9 @@ pub use tx::PgTx;
 pub mod mutate;
 pub use mutate::{DeleteWhere, UpdateWhere};
 
+pub mod upsert;
+pub use upsert::{Upsert, Upserted};
+
 pub mod aggregate;
 pub use aggregate::{AggExpr, ColumnOf, FromPgScalar, GroupKey, Grouped, Having};
 
