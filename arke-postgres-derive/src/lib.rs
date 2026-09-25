@@ -14,6 +14,7 @@ use proc_macro::{Delimiter, TokenStream, TokenTree};
 /// field `#[pg(index)]`/`#[pg(unique)]` → indeks; `#[pg(fts)]`/`#[pg(fts =
 /// "<regconfig>")]` (hanya `String`/`Option<String>`) → indeks GIN full-text
 /// (default config `simple`); tipe `#[pg(check = "…")]` → constraint `CHECK`.
+/// Tipe `#[pg(index(a, b))]`/`#[pg(unique(a, b))]` → indeks komposit (RFC-0037).
 /// Field `#[pg(text)]` (`T`/`Option<T>` dengan `T: Display + FromStr`, mis. enum)
 /// → kolom `TEXT`. `uuid::Uuid` → `UUID` & `chrono::DateTime<Utc>` →
 /// `TIMESTAMPTZ` (fitur `uuid`/`chrono` pada `arke-postgres`).
@@ -51,6 +52,8 @@ enum PgItem {
     Table(String),
     Fts(String),
     Text,
+    /// `index(a, b)`/`unique(a, b)` level-tipe: (unik, nama field).
+    Composite(bool, Vec<String>),
 }
 
 /// Parse isi bracket `#[pg(...)]` → daftar item. Bracket non-`pg` → kosong.
@@ -71,8 +74,29 @@ fn parse_pg_items(bracket_stream: TokenStream) -> Result<Vec<PgItem>, String> {
     while j < inner.len() {
         if let TokenTree::Ident(key) = &inner[j] {
             match key.to_string().as_str() {
-                "index" => items.push(PgItem::Index),
-                "unique" => items.push(PgItem::Unique),
+                kw @ ("index" | "unique") => match inner.get(j + 1) {
+                    Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Parenthesis => {
+                        let mut names = Vec::new();
+                        for t in g.stream() {
+                            match t {
+                                TokenTree::Ident(id) => names.push(id.to_string()),
+                                TokenTree::Punct(p) if p.as_char() == ',' => {}
+                                _ => {
+                                    return Err(format!(
+                                        "pg({kw}(..)): daftar nama field tak valid"
+                                    ));
+                                }
+                            }
+                        }
+                        if names.is_empty() {
+                            return Err(format!("pg({kw}(..)): daftar field kosong"));
+                        }
+                        items.push(PgItem::Composite(kw == "unique", names));
+                        j += 1;
+                    }
+                    _ if kw == "unique" => items.push(PgItem::Unique),
+                    _ => items.push(PgItem::Index),
+                },
                 "text" => items.push(PgItem::Text),
                 "fts" => match (inner.get(j + 1), inner.get(j + 2)) {
                     (Some(TokenTree::Punct(p)), Some(TokenTree::Literal(lit)))
@@ -133,6 +157,7 @@ fn expand(input: TokenStream) -> Result<String, String> {
     let mut i = 0;
     let mut checks: Vec<String> = Vec::new();
     let mut table: Option<String> = None;
+    let mut composites: Vec<(bool, Vec<String>)> = Vec::new();
 
     // Lewati atribut & visibilitas; temukan `struct` (tolak enum/union).
     // Atribut tipe `#[pg(check = "...")]` / `#[pg(table = "...")]` dikumpulkan.
@@ -146,6 +171,7 @@ fn expand(input: TokenStream) -> Result<String, String> {
                         match item {
                             PgItem::Check(expr) => checks.push(expr),
                             PgItem::Table(name) => table = Some(name),
+                            PgItem::Composite(unique, names) => composites.push((unique, names)),
                             PgItem::Index | PgItem::Unique | PgItem::Fts(_) | PgItem::Text => {
                                 return Err(
                                     "pg(index)/pg(unique)/pg(fts)/pg(text) hanya valid di level-field"
@@ -202,7 +228,7 @@ fn expand(input: TokenStream) -> Result<String, String> {
         return Err("derive(PgComponent): struct tanpa field tak didukung".to_string());
     }
 
-    gen_impl(&name, table.as_deref(), &fields, &checks)
+    gen_impl(&name, table.as_deref(), &fields, &checks, &composites)
 }
 
 fn parse_named_fields(stream: TokenStream) -> Result<Vec<Field>, String> {
@@ -226,8 +252,11 @@ fn parse_named_fields(stream: TokenStream) -> Result<Vec<Field>, String> {
                         PgItem::Unique => unique = true,
                         PgItem::Fts(cfg) => fts = Some(cfg),
                         PgItem::Text => text = true,
-                        PgItem::Check(_) | PgItem::Table(_) => {
-                            return Err("pg(check)/pg(table) hanya valid di level-tipe".to_string());
+                        PgItem::Check(_) | PgItem::Table(_) | PgItem::Composite(..) => {
+                            return Err(
+                                "pg(check)/pg(table)/pg(index(..))/pg(unique(..)) hanya valid di level-tipe"
+                                    .to_string(),
+                            );
                         }
                     }
                 }
@@ -580,6 +609,7 @@ fn gen_impl(
     table: Option<&str>,
     fields: &[Field],
     checks: &[String],
+    composites: &[(bool, Vec<String>)],
 ) -> Result<String, String> {
     // Nama tabel: `#[pg(table = "…")]` (dipakai verbatim, di-quote oleh store —
     // huruf besar/kata kunci aman) atau default `cmp_<nama struct huruf kecil>`.
@@ -620,6 +650,28 @@ fn gen_impl(
                 f.col
             ));
         }
+    }
+
+    // Indeks komposit: nama field → kolom SQL (relasi → `<name>_id`).
+    let mut composite_defs = String::new();
+    for (unique, names) in composites {
+        let mut cols = String::new();
+        for n in names {
+            let Some(f) = fields.iter().find(|f| f.col == *n || f.name == *n) else {
+                return Err(format!(
+                    "derive(PgComponent): pg(index/unique(..)) menyebut field tak dikenal `{n}`"
+                ));
+            };
+            let col = if is_entity_ty(&f.ty) || ref_target(&f.ty).is_some() {
+                format!("{}_id", f.col)
+            } else {
+                f.col.clone()
+            };
+            cols.push_str(&format!("{col:?}, "));
+        }
+        composite_defs.push_str(&format!(
+            "::arke_postgres::CompositeIndexDef {{ columns: &[{cols}], unique: {unique} }}, "
+        ));
     }
 
     let mut checks_str = String::new();
@@ -681,6 +733,7 @@ fn gen_impl(
             const TABLE: &'static str = {table:?};\n\
             const COLUMNS: &'static [::arke_postgres::ColumnDef] = &[{columns}];\n\
             const INDEXES: &'static [::arke_postgres::IndexDef] = &[{indexes}];\n\
+            const COMPOSITE_INDEXES: &'static [::arke_postgres::CompositeIndexDef] = &[{composite_defs}];\n\
             const FTS: &'static [::arke_postgres::FtsDef] = &[{fts_defs}];\n\
             const CHECKS: &'static [&'static str] = &[{checks_str}];\n\
             fn to_params(&self) -> ::std::vec::Vec<::arke_postgres::PgValue> {{\n\

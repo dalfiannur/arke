@@ -241,6 +241,25 @@ pub struct IndexDef {
     pub unique: bool,
 }
 
+/// Indeks **komposit** level-tipe (`#[pg(index(a, b))]`/`#[pg(unique(a, b))]`,
+/// RFC-0037). `columns` adalah nama kolom SQL berurutan — field relasi
+/// (`Entity`/`Ref<T>`) sudah dipetakan ke `<name>_id`.
+///
+/// Nama field yang tak ada ditolak saat kompilasi:
+///
+/// ```compile_fail
+/// #[derive(arke_postgres::PgComponent)]
+/// #[pg(unique(a, nope))]
+/// struct Bad { a: i32 }
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompositeIndexDef {
+    /// Kolom yang di-index, berurutan.
+    pub columns: &'static [&'static str],
+    /// Apakah indeks `UNIQUE`.
+    pub unique: bool,
+}
+
 /// Kolom **full-text search** (`#[pg(fts)]`): indeks GIN ekspresi
 /// `to_tsvector('<config>', <column>)`, dipakai [`Field::search`] dan
 /// [`Query::order_by_rank`].
@@ -310,6 +329,9 @@ pub trait PgComponent {
     const COLUMNS: &'static [ColumnDef];
     /// Indeks kustom (`#[pg(index)]`/`#[pg(unique)]`); kosong bila tak ada.
     const INDEXES: &'static [IndexDef] = &[];
+    /// Indeks komposit level-tipe (`#[pg(index(..))]`/`#[pg(unique(..))]`,
+    /// RFC-0037); kosong bila tak ada.
+    const COMPOSITE_INDEXES: &'static [CompositeIndexDef] = &[];
     /// Kolom full-text (`#[pg(fts)]`); kosong bila tak ada.
     const FTS: &'static [FtsDef] = &[];
     /// Ekspresi `CHECK` level-tabel (`#[pg(check = "…")]`); kosong bila tak ada.

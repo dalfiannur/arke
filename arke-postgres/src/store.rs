@@ -18,8 +18,8 @@ use crate::tx::PgTx;
 use crate::cache::{ComponentCache, decode_row, encode_row};
 use crate::query::tsvector_expr;
 use crate::{
-    ColumnDef, FtsDef, IndexDef, PgComponent, PgType, PgValue, create_table_sql_from, pack_entity,
-    quote_ident, unpack_entity,
+    ColumnDef, CompositeIndexDef, FtsDef, IndexDef, PgComponent, PgType, PgValue,
+    create_table_sql_from, pack_entity, quote_ident, unpack_entity,
 };
 
 /// Satu baris komponen yang di-dump: `(entity, nilai-kolom)`.
@@ -48,6 +48,8 @@ struct Registered {
     cache_ns: String,
     columns: &'static [ColumnDef],
     indexes: &'static [IndexDef],
+    /// Indeks komposit (RFC-0037).
+    composites: &'static [CompositeIndexDef],
     /// Kolom full-text (`#[pg(fts)]`) → indeks GIN ekspresi.
     fts: &'static [FtsDef],
     checks: &'static [&'static str],
@@ -103,6 +105,26 @@ fn check_constraint_name(table: &str, expr: &str) -> String {
         t = &t[..cut];
     }
     format!("chk_{t}_{hash}")
+}
+
+/// Nama indeks komposit **content-addressed** (RFC-0037):
+/// `cidx_<tabel>_<fnv64(unik|kolom)>`. Definisi yang berubah = nama baru, jadi
+/// `migrate` cukup membandingkan nama — pola yang sama dengan
+/// [`check_constraint_name`].
+fn composite_index_name(table: &str, def: &CompositeIndexDef) -> String {
+    let kind: &[u8] = if def.unique { b"u" } else { b"i" };
+    let cols = def.columns.join(",");
+    let hash = format!("{:016x}", fnv1a(&[kind, b"|", cols.as_bytes()]));
+    // "cidx_" (5) + tabel + "_" (1) + 16 hex ≤ 63 → tabel ≤ 41 byte.
+    let mut t = table;
+    while t.len() > 41 {
+        let mut cut = t.len() - 1;
+        while !t.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        t = &t[..cut];
+    }
+    format!("cidx_{t}_{hash}")
 }
 
 fn dump_of<T: PgComponent + Component>(world: &World) -> Vec<ComponentRow> {
@@ -316,6 +338,7 @@ impl PgStore {
             cache_ns: format!("{}@{:016x}", T::TABLE, schema_fingerprint(T::COLUMNS)),
             columns: T::COLUMNS,
             indexes: T::INDEXES,
+            composites: T::COMPOSITE_INDEXES,
             fts: T::FTS,
             checks: T::CHECKS,
             dump: dump_of::<T>,
@@ -699,6 +722,53 @@ impl PgStore {
                 quote_ident(&name),
                 quote_ident(r.table),
                 quote_ident(idx.column)
+            ))
+            .execute(&self.pool)
+            .await?;
+        }
+
+        // Indeks komposit (RFC-0037), nama content-addressed: yang tak lagi
+        // diinginkan (awalan `cidx_<tabel>_` pada tabel ini) di-DROP, yang belum
+        // ada dibuat. Baris yang melanggar UNIQUE baru membuat CREATE gagal keras.
+        let prefix = composite_index_name(
+            r.table,
+            &CompositeIndexDef {
+                columns: &[],
+                unique: false,
+            },
+        );
+        let prefix = &prefix[..prefix.len() - 16];
+        let desired: Vec<(String, &CompositeIndexDef)> = r
+            .composites
+            .iter()
+            .map(|d| (composite_index_name(r.table, d), d))
+            .collect();
+        let existing: Vec<String> = sqlx::query_scalar(
+            "SELECT indexname::text FROM pg_indexes \
+             WHERE schemaname = current_schema() AND tablename = $1 AND starts_with(indexname, $2)",
+        )
+        .bind(r.table)
+        .bind(prefix)
+        .fetch_all(&self.pool)
+        .await?;
+        for name in &existing {
+            if !desired.iter().any(|(n, _)| n == name) {
+                sqlx::query(&format!("DROP INDEX {}", quote_ident(name)))
+                    .execute(&self.pool)
+                    .await?;
+            }
+        }
+        for (name, def) in &desired {
+            if existing.contains(name) {
+                continue;
+            }
+            let cols: Vec<_> = def.columns.iter().map(|c| quote_ident(c)).collect();
+            let unique = if def.unique { "UNIQUE " } else { "" };
+            sqlx::query(&format!(
+                "CREATE {unique}INDEX {} ON {} ({})",
+                quote_ident(name),
+                quote_ident(r.table),
+                cols.join(", ")
             ))
             .execute(&self.pool)
             .await?;

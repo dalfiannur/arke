@@ -9,6 +9,12 @@ rilis juga ada di [GitHub Releases](https://github.com/dalfiannur/arke/releases)
 
 ### Added
 
+- **`arke-postgres`: indeks komposit** (RFC-0037) — level-tipe
+  `#[pg(index(a, b))]`/`#[pg(unique(a, b))]` → `PgComponent::COMPOSITE_INDEXES`
+  (`CompositeIndexDef`, default kosong). Field relasi dipetakan ke `<name>_id`.
+  `migrate` membuatnya idempoten dengan nama `cidx_<tabel>_<hash>` dan membuang
+  yang tak lagi dideklarasikan.
+
 - **`arke-postgres`: kolom `UUID`, `TIMESTAMPTZ`, dan `#[pg(text)]`.** Fitur
   opsional `uuid` (`uuid::Uuid` → `UUID`) dan `chrono` (`DateTime<Utc>` →
   `TIMESTAMPTZ`), termasuk `Option<…>`, token field typed, filter, dan kunci
