@@ -9,6 +9,13 @@ rilis juga ada di [GitHub Releases](https://github.com/dalfiannur/arke/releases)
 
 ### Added
 
+- **`arke-postgres`: baca di dalam transaksi** (RFC-0042) —
+  `Query::load_pids_in(&mut tx, world)` dan `PgStore::fetch_in(&mut tx, world,
+  pid)` melihat tulisan transaksi yang belum di-commit (termasuk target
+  `include`), memetakan entity sehingga `Ref` ke sana resolve untuk tulisan
+  berikutnya di transaksi yang sama. Cache read-through dilewati di dalam
+  transaksi.
+
 - **`arke-postgres`: `Query::include(T::rel())`** (RFC-0041) — muat entity
   target relasi bertipe untuk baris hasil query (ikut limit/order/kursor)
   sebelum entity utama, sehingga `Ref<R>` langsung resolve di World

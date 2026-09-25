@@ -1257,7 +1257,29 @@ impl<'a, T: PgComponent> Query<'a, T> {
         let (main_sql, main_params, reversed) = self
             .build_with(self.limit, false)
             .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
-        let mut loaded = self.run_load(main_sql, main_params, world).await?;
+        let mut loaded = self.run_load(main_sql, main_params, world, None).await?;
+        if reversed {
+            loaded.reverse();
+        }
+        Ok(loaded)
+    }
+
+    /// Seperti [`load_pids`](Self::load_pids) tetapi dijalankan di transaksi
+    /// `tx` (RFC-0042): melihat tulisan `tx` yang belum di-commit (mis. hasil
+    /// upsert sebelumnya), termasuk target `include`/`join_load`. Cache
+    /// read-through dilewati. Entity yang dimuat terpetakan di store, sehingga
+    /// relasi `Ref` ke entity itu resolve untuk tulisan berikutnya di `tx`.
+    pub async fn load_pids_in(
+        self,
+        tx: &mut PgTx<'_>,
+        world: &mut World,
+    ) -> Result<Vec<(i64, Entity)>, sqlx::Error> {
+        let (main_sql, main_params, reversed) = self
+            .build_with(self.limit, false)
+            .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+        let mut loaded = self
+            .run_load(main_sql, main_params, world, Some(tx.conn()))
+            .await?;
         if reversed {
             loaded.reverse();
         }
@@ -1271,6 +1293,7 @@ impl<'a, T: PgComponent> Query<'a, T> {
         main_sql: String,
         main_params: Vec<(PgType, PgValue)>,
         world: &mut World,
+        mut conn: Option<&mut sqlx::PgConnection>,
     ) -> Result<Vec<(i64, Entity)>, sqlx::Error> {
         // Susun semua SQL (pinjam-baca `self`) sebelum menyentuh `self.store`.
         let mut targets: Vec<(String, Vec<(PgType, PgValue)>)> = self
@@ -1304,10 +1327,12 @@ impl<'a, T: PgComponent> Query<'a, T> {
         // yang sudah ter-materialize di `entity_of`. Filter-saja (tanpa target) →
         // relasi utama menggantung (handle sentinel), entity tetap termuat.
         for (sql, params) in targets {
-            store.load_by_query(sql, params, world, only).await?;
+            store
+                .load_by_query_on(sql, params, world, only, conn.as_deref_mut())
+                .await?;
         }
         store
-            .load_by_query(main_sql, main_params, world, only)
+            .load_by_query_on(main_sql, main_params, world, only, conn)
             .await
     }
 
@@ -1359,7 +1384,7 @@ impl<'a, T: PgComponent> Query<'a, T> {
                 list.join(", "),
                 list.join(", ")
             );
-            self.run_load(page_sql, Vec::new(), world).await?
+            self.run_load(page_sql, Vec::new(), world, None).await?
         };
 
         let first = edges.first().cloned();

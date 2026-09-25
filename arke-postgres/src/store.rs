@@ -492,6 +492,20 @@ impl PgStore {
         Ok(loaded.first().map(|&(_, e)| e))
     }
 
+    /// Seperti [`Self::fetch`] tetapi dibaca di transaksi `tx` (RFC-0042):
+    /// melihat tulisan `tx` yang belum di-commit; cache read-through dilewati.
+    pub async fn fetch_in(
+        &mut self,
+        tx: &mut PgTx<'_>,
+        world: &mut World,
+        pid: i64,
+    ) -> Result<Option<Entity>, sqlx::Error> {
+        let loaded = self
+            .load_ids_only_on(world, &[pid], None, Some(tx.conn()))
+            .await?;
+        Ok(loaded.first().map(|&(_, e)| e))
+    }
+
     /// **Fase 1 (sync)**: kumpulkan komponen `entity` jadi owned [`StagedUpdate`].
     pub fn stage_update(&self, world: &World, entity: Entity) -> StagedUpdate {
         let rows = self
@@ -1219,13 +1233,25 @@ impl PgStore {
         world: &mut World,
         only: Option<&[&'static str]>,
     ) -> Result<Vec<(i64, Entity)>, sqlx::Error> {
+        self.load_by_query_on(sql, params, world, only, None).await
+    }
+
+    /// [`Self::load_by_query`] pada koneksi transaksi `conn` bila ada.
+    pub(crate) async fn load_by_query_on(
+        &mut self,
+        sql: String,
+        params: Vec<(PgType, PgValue)>,
+        world: &mut World,
+        only: Option<&[&'static str]>,
+        mut conn: Option<&mut PgConnection>,
+    ) -> Result<Vec<(i64, Entity)>, sqlx::Error> {
         let ids: Vec<i64> = self
-            .fetch_rows(&sql, &params)
+            .fetch_rows_on(&sql, &params, conn.as_deref_mut())
             .await?
             .iter()
             .map(|r| r.try_get("pid"))
             .collect::<Result<_, _>>()?;
-        self.load_ids_only(world, &ids, only).await
+        self.load_ids_only_on(world, &ids, only, conn).await
     }
 
     /// Jalankan `sql` ter-parameterisasi, kembalikan baris mentah.
@@ -1234,22 +1260,36 @@ impl PgStore {
         sql: &str,
         params: &[(PgType, PgValue)],
     ) -> Result<Vec<sqlx::postgres::PgRow>, sqlx::Error> {
+        self.fetch_rows_on(sql, params, None).await
+    }
+
+    /// [`Self::fetch_rows`] pada koneksi transaksi `conn` bila ada (RFC-0042).
+    pub(crate) async fn fetch_rows_on(
+        &self,
+        sql: &str,
+        params: &[(PgType, PgValue)],
+        conn: Option<&mut PgConnection>,
+    ) -> Result<Vec<sqlx::postgres::PgRow>, sqlx::Error> {
         let mut q = sqlx::query(sql);
         for (ty, val) in params {
             q = bind_value(q, *ty, val);
         }
-        q.fetch_all(&self.pool).await
+        match conn {
+            Some(c) => q.fetch_all(c).await,
+            None => q.fetch_all(&self.pool).await,
+        }
     }
 
     /// Materialisasi `ids` (hidrasi selektif `only`) + selaraskan rekam sinkron.
     /// Hasil **urut mengikuti `ids`** (urutan query), bukan `ORDER BY pid`.
-    pub(crate) async fn load_ids_only(
+    async fn load_ids_only_on(
         &mut self,
         world: &mut World,
         ids: &[i64],
         only: Option<&[&'static str]>,
+        conn: Option<&mut PgConnection>,
     ) -> Result<Vec<(i64, Entity)>, sqlx::Error> {
-        let loaded = self.materialize_only(world, ids, only).await?;
+        let loaded = self.materialize_on(world, ids, only, conn).await?;
         self.last = self.dump_state(world);
         let by_pid: HashMap<i64, Entity> = loaded.into_iter().collect();
         Ok(ids
@@ -1283,6 +1323,20 @@ impl PgStore {
         ids: &[i64],
         only: Option<&[&'static str]>,
     ) -> Result<Vec<(i64, Entity)>, sqlx::Error> {
+        self.materialize_on(world, ids, only, None).await
+    }
+
+    /// Inti materialisasi. Dengan `conn` (transaksi, RFC-0042) semua baca lewat
+    /// koneksi itu dan **cache dilewati sepenuhnya**: baris yang belum di-commit
+    /// tak boleh disajikan dari, maupun ditulis ke, cache bersama.
+    async fn materialize_on(
+        &mut self,
+        world: &mut World,
+        ids: &[i64],
+        only: Option<&[&'static str]>,
+        mut conn: Option<&mut PgConnection>,
+    ) -> Result<Vec<(i64, Entity)>, sqlx::Error> {
+        let use_cache = conn.is_none();
         self.bind_world(world);
         if ids.is_empty() {
             return Ok(Vec::new());
@@ -1291,10 +1345,12 @@ impl PgStore {
         // di-refresh di tempat (muat aditif, mis. beberapa `Query::load` ke satu
         // World per-request); selebihnya spawn entity lokal baru (indeks
         // ephemeral, RFC-0034) + catat jembatan Entity↔pid.
-        let rows = sqlx::query("SELECT pid FROM arke_entities WHERE pid = ANY($1) ORDER BY pid")
-            .bind(ids)
-            .fetch_all(&self.pool)
-            .await?;
+        let q =
+            sqlx::query("SELECT pid FROM arke_entities WHERE pid = ANY($1) ORDER BY pid").bind(ids);
+        let rows = match conn.as_deref_mut() {
+            Some(c) => q.fetch_all(c).await?,
+            None => q.fetch_all(&self.pool).await?,
+        };
         let mut by_id: HashMap<i64, Entity> = HashMap::with_capacity(rows.len());
         let mut entities: Vec<(i64, Entity)> = Vec::with_capacity(rows.len());
         let mut refreshed: HashSet<Entity> = HashSet::new();
@@ -1361,8 +1417,8 @@ impl PgStore {
             // Read-through cache (RFC-0033): layani hit dari cache, ambil miss dari
             // Postgres lalu isi cache. Tanpa cache → jalur langsung.
             let cached = match &self.cache {
-                Some(c) => c.get_many(&r.cache_ns, ids).await,
-                None => vec![None; ids.len()],
+                Some(c) if use_cache => c.get_many(&r.cache_ns, ids).await,
+                _ => vec![None; ids.len()],
             };
             // Entity refresh yang barisnya ditemukan; sisanya → komponen dilepas.
             let mut found: HashSet<i64> = HashSet::new();
@@ -1386,10 +1442,12 @@ impl PgStore {
                 }
             }
             if !miss_ids.is_empty() {
-                let rows = sqlx::query(&select_sql(r, Some("pid = ANY($1)")))
-                    .bind(&miss_ids)
-                    .fetch_all(&self.pool)
-                    .await?;
+                let sql = select_sql(r, Some("pid = ANY($1)"));
+                let q = sqlx::query(&sql).bind(&miss_ids);
+                let rows = match conn.as_deref_mut() {
+                    Some(c) => q.fetch_all(c).await?,
+                    None => q.fetch_all(&self.pool).await?,
+                };
                 let mut to_cache: Vec<(i64, Vec<u8>)> = Vec::new();
                 for row in rows {
                     let id: i64 = row.try_get("pid")?;
@@ -1400,7 +1458,7 @@ impl PgStore {
                     // Cache disimpan dengan pid mentah (sebelum terjemahan) agar
                     // valid lintas-World; terjemahkan pid→Ref hanya untuk apply
                     // (RFC-0034 Am.3).
-                    if self.cache.is_some() {
+                    if self.cache.is_some() && use_cache {
                         to_cache.push((id, encode_row(&values)));
                     }
                     self.translate_refs(r, &mut values);
