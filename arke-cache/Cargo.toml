@@ -1,6 +1,6 @@
 [package]
 name = "arke-cache"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Redis/DragonflyDB-backed read-through cache for arke-postgres (ComponentCache)."
@@ -12,7 +12,7 @@ categories = ["database", "caching"]
 include = ["/src", "/Cargo.toml", "/README.md", "/LICENSE-MIT"]
 
 [dependencies]
-arke-postgres = { version = "0.17", path = "../arke-postgres" }
+arke-postgres = { version = "0.18", path = "../arke-postgres" }
 async-trait = "0.1"
 redis = { version = "0.27", default-features = false, features = ["tokio-comp", "connection-manager"] }
 
