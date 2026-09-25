@@ -9,6 +9,13 @@ rilis juga ada di [GitHub Releases](https://github.com/dalfiannur/arke/releases)
 
 ### Added
 
+- **`arke-postgres`: aksi hapus relasi** (RFC-0039) — field relasi
+  `#[pg(on_delete = "cascade"|"set_null"|"restrict")]` → `PgComponent::ON_DELETE`
+  (`OnDeleteDef`, `OnDelete`). `migrate` memasang FK ke `arke_entities(pid)`,
+  indeks kolom, dan untuk `cascade` trigger `AFTER DELETE` yang menghapus entity
+  perujuk utuh (rekursif, siklus aman). `cascade`/`restrict` memakai FK deferred
+  sehingga overwrite penuh `save` tetap sah. Relasi tanpa atribut tak berubah.
+
 - **`arke-postgres`: upsert** (RFC-0038) — `PgStore::upsert::<T>(staged)
   .on(..).update(..)/.update_coalesce(..).execute()/.execute_in(tx)` →
   `Upserted { pid, inserted }`. `INSERT … ON CONFLICT` dengan pid yang dilepas

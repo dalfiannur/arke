@@ -18,8 +18,8 @@ use crate::tx::PgTx;
 use crate::cache::{ComponentCache, decode_row, encode_row};
 use crate::query::tsvector_expr;
 use crate::{
-    ColumnDef, CompositeIndexDef, FtsDef, IndexDef, PgComponent, PgType, PgValue,
-    create_table_sql_from, pack_entity, quote_ident, unpack_entity,
+    ColumnDef, CompositeIndexDef, FtsDef, IndexDef, OnDelete, OnDeleteDef, PgComponent, PgType,
+    PgValue, create_table_sql_from, pack_entity, quote_ident, unpack_entity,
 };
 
 /// Satu baris komponen yang di-dump: `(entity, nilai-kolom)`.
@@ -50,6 +50,8 @@ struct Registered {
     indexes: &'static [IndexDef],
     /// Indeks komposit (RFC-0037).
     composites: &'static [CompositeIndexDef],
+    /// Aksi hapus relasi (RFC-0039).
+    on_delete: &'static [OnDeleteDef],
     /// Kolom full-text (`#[pg(fts)]`) → indeks GIN ekspresi.
     fts: &'static [FtsDef],
     checks: &'static [&'static str],
@@ -96,15 +98,21 @@ fn schema_fingerprint(columns: &[ColumnDef]) -> u64 {
 fn check_constraint_name(table: &str, expr: &str) -> String {
     let hash = format!("{:016x}", fnv1a(&[expr.trim().as_bytes()]));
     // "chk_" (4) + tabel + "_" (1) + 16 hex ≤ 63 → tabel ≤ 42 byte.
-    let mut t = table;
-    while t.len() > 42 {
+    format!("chk_{}_{hash}", truncate_ident(table, 42))
+}
+
+/// Potong `s` ke paling banyak `max` byte di batas karakter — nama identifier
+/// Postgres dibatasi 63 byte dan dipotong diam-diam bila lebih.
+fn truncate_ident(s: &str, max: usize) -> &str {
+    let mut t = s;
+    while t.len() > max {
         let mut cut = t.len() - 1;
         while !t.is_char_boundary(cut) {
             cut -= 1;
         }
         t = &t[..cut];
     }
-    format!("chk_{t}_{hash}")
+    t
 }
 
 /// Nama indeks komposit **content-addressed** (RFC-0037):
@@ -116,15 +124,32 @@ fn composite_index_name(table: &str, def: &CompositeIndexDef) -> String {
     let cols = def.columns.join(",");
     let hash = format!("{:016x}", fnv1a(&[kind, b"|", cols.as_bytes()]));
     // "cidx_" (5) + tabel + "_" (1) + 16 hex ≤ 63 → tabel ≤ 41 byte.
-    let mut t = table;
-    while t.len() > 41 {
-        let mut cut = t.len() - 1;
-        while !t.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        t = &t[..cut];
-    }
-    format!("cidx_{t}_{hash}")
+    format!("cidx_{}_{hash}", truncate_ident(table, 41))
+}
+
+/// Nama objek aksi hapus (RFC-0039) untuk kolom relasi `def` di `table`:
+/// `(fk, indeks, trigger)`. FK & indeks memuat nama tabel (disaring per tabel
+/// saat rekonsiliasi); trigger hidup di `arke_entities` yang dipakai bersama
+/// semua tabel, jadi awalannya memakai hash tabel agar tak pernah bertumpang
+/// dengan awalan tabel lain.
+fn on_delete_names(table: &str, def: &OnDeleteDef) -> (String, String, String) {
+    let action: &[u8] = match def.action {
+        OnDelete::Cascade => b"c",
+        OnDelete::SetNull => b"n",
+        OnDelete::Restrict => b"r",
+    };
+    let t = truncate_ident(table, 41);
+    let col = def.column.as_bytes();
+    (
+        format!("afk_{t}_{:016x}", fnv1a(&[col, b"|", action])),
+        format!("aidx_{}_{:016x}", truncate_ident(table, 40), fnv1a(&[col])),
+        format!("{}{:016x}", on_delete_trigger_prefix(table), fnv1a(&[col])),
+    )
+}
+
+/// Awalan trigger cascade milik `table` di `arke_entities`.
+fn on_delete_trigger_prefix(table: &str) -> String {
+    format!("arke_ondel_{:016x}_", fnv1a(&[table.as_bytes()]))
 }
 
 fn dump_of<T: PgComponent + Component>(world: &World) -> Vec<ComponentRow> {
@@ -354,6 +379,7 @@ impl PgStore {
             columns: T::COLUMNS,
             indexes: T::INDEXES,
             composites: T::COMPOSITE_INDEXES,
+            on_delete: T::ON_DELETE,
             fts: T::FTS,
             checks: T::CHECKS,
             dump: dump_of::<T>,
@@ -800,6 +826,8 @@ impl PgStore {
             .await?;
         }
 
+        self.reconcile_on_delete(r).await?;
+
         // Indeks full-text (`#[pg(fts)]`): GIN atas ekspresi
         // `to_tsvector('<cfg>', col)` — persis ekspresi yang dipakai
         // `Field::search`/`order_by_rank`, sehingga planner mencocokkannya.
@@ -872,6 +900,160 @@ impl PgStore {
                 "ALTER TABLE {} ADD CONSTRAINT {} CHECK ({expr})",
                 quote_ident(r.table),
                 quote_ident(name)
+            ))
+            .execute(&self.pool)
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Aksi hapus relasi (RFC-0039), nama content-addressed per jenis objek:
+    ///
+    /// - FK kolom → `arke_entities(pid)`: `set_null` = `ON DELETE SET NULL`;
+    ///   `cascade`/`restrict` = `NO ACTION DEFERRABLE INITIALLY DEFERRED` (cek
+    ///   saat commit, jadi overwrite penuh `save` yang menghapus lalu menulis
+    ///   ulang semua entity tetap sah).
+    /// - Indeks btree pada kolom (trigger & aksi FK mencari perujuk lewat kolom ini).
+    /// - `cascade`: trigger `AFTER DELETE` baris pada `arke_entities` yang
+    ///   menghapus **entity** perujuk. AFTER (bukan BEFORE) sehingga sasaran
+    ///   pernyataan luar sudah terhapus saat trigger jalan — tak ada bentrok
+    ///   "baris sudah diubah perintah ini", dan siklus berhenti sendiri.
+    ///
+    /// Objek usang (awalan milik tabel ini, tak lagi dideklarasikan) di-DROP.
+    /// Baris lama yang melanggar FK baru membuat `migrate` gagal keras.
+    async fn reconcile_on_delete(&self, r: &Registered) -> Result<(), sqlx::Error> {
+        let qtable = quote_ident(r.table);
+        let desired: Vec<(String, String, String, &OnDeleteDef)> = r
+            .on_delete
+            .iter()
+            .map(|d| {
+                let (fk, idx, trg) = on_delete_names(r.table, d);
+                (fk, idx, trg, d)
+            })
+            .collect();
+
+        // FK.
+        let fk_prefix = format!("afk_{}_", truncate_ident(r.table, 41));
+        let existing: Vec<String> = sqlx::query_scalar(
+            "SELECT conname::text FROM pg_constraint \
+             WHERE conrelid = $1::regclass AND contype = 'f' AND starts_with(conname, $2)",
+        )
+        .bind(qtable.as_ref())
+        .bind(&fk_prefix)
+        .fetch_all(&self.pool)
+        .await?;
+        for name in &existing {
+            if !desired.iter().any(|(fk, ..)| fk == name) {
+                sqlx::query(&format!(
+                    "ALTER TABLE {qtable} DROP CONSTRAINT {}",
+                    quote_ident(name)
+                ))
+                .execute(&self.pool)
+                .await?;
+            }
+        }
+        for (fk, _, _, d) in &desired {
+            if existing.contains(fk) {
+                continue;
+            }
+            let action = match d.action {
+                OnDelete::SetNull => "ON DELETE SET NULL",
+                OnDelete::Cascade | OnDelete::Restrict => "DEFERRABLE INITIALLY DEFERRED",
+            };
+            sqlx::query(&format!(
+                "ALTER TABLE {qtable} ADD CONSTRAINT {} FOREIGN KEY ({}) \
+                 REFERENCES arke_entities(pid) {action}",
+                quote_ident(fk),
+                quote_ident(d.column)
+            ))
+            .execute(&self.pool)
+            .await?;
+        }
+
+        // Indeks kolom relasi.
+        let idx_prefix = format!("aidx_{}_", truncate_ident(r.table, 40));
+        let existing: Vec<String> = sqlx::query_scalar(
+            "SELECT indexname::text FROM pg_indexes \
+             WHERE schemaname = current_schema() AND tablename = $1 AND starts_with(indexname, $2)",
+        )
+        .bind(r.table)
+        .bind(&idx_prefix)
+        .fetch_all(&self.pool)
+        .await?;
+        for name in &existing {
+            if !desired.iter().any(|(_, idx, ..)| idx == name) {
+                sqlx::query(&format!("DROP INDEX {}", quote_ident(name)))
+                    .execute(&self.pool)
+                    .await?;
+            }
+        }
+        for (_, idx, _, d) in &desired {
+            if existing.contains(idx) {
+                continue;
+            }
+            sqlx::query(&format!(
+                "CREATE INDEX {} ON {qtable} ({})",
+                quote_ident(idx),
+                quote_ident(d.column)
+            ))
+            .execute(&self.pool)
+            .await?;
+        }
+
+        // Trigger cascade di `arke_entities`.
+        let trg_prefix = on_delete_trigger_prefix(r.table);
+        let existing: Vec<String> = sqlx::query_scalar(
+            "SELECT tgname::text FROM pg_trigger \
+             WHERE tgrelid = 'arke_entities'::regclass AND starts_with(tgname, $1)",
+        )
+        .bind(&trg_prefix)
+        .fetch_all(&self.pool)
+        .await?;
+        let cascades: Vec<_> = desired
+            .iter()
+            .filter(|(.., d)| d.action == OnDelete::Cascade)
+            .collect();
+        for name in &existing {
+            if !cascades.iter().any(|(_, _, trg, _)| trg == name) {
+                let q = quote_ident(name);
+                sqlx::query(&format!("DROP TRIGGER {q} ON arke_entities"))
+                    .execute(&self.pool)
+                    .await?;
+                sqlx::query(&format!("DROP FUNCTION IF EXISTS {q}()"))
+                    .execute(&self.pool)
+                    .await?;
+            }
+        }
+        for (_, _, trg, d) in cascades {
+            let q = quote_ident(trg);
+            // SQL dinamis dijaga `to_regclass`: tabel perujuk yang di-DROP (komponen
+            // dibuang) meninggalkan trigger ini, dan SQL statis akan membuat setiap
+            // DELETE entity gagal "relation does not exist". Isi fungsi selalu
+            // diganti agar fungsi dari versi lama ikut diperbarui.
+            let lit = |x: &str| format!("'{}'", x.replace('\'', "''"));
+            let delete = format!(
+                "DELETE FROM arke_entities WHERE pid IN (SELECT pid FROM {qtable} WHERE {} = $1)",
+                quote_ident(d.column)
+            );
+            sqlx::query(&format!(
+                "CREATE OR REPLACE FUNCTION {q}() RETURNS trigger LANGUAGE plpgsql AS $arke$ \
+                 BEGIN \
+                   IF to_regclass({}) IS NOT NULL THEN \
+                     EXECUTE {} USING OLD.pid; \
+                   END IF; \
+                   RETURN NULL; \
+                 END $arke$",
+                lit(&qtable),
+                lit(&delete)
+            ))
+            .execute(&self.pool)
+            .await?;
+            if existing.contains(trg) {
+                continue;
+            }
+            sqlx::query(&format!(
+                "CREATE TRIGGER {q} AFTER DELETE ON arke_entities \
+                 FOR EACH ROW EXECUTE FUNCTION {q}()"
             ))
             .execute(&self.pool)
             .await?;

@@ -15,6 +15,8 @@ use proc_macro::{Delimiter, TokenStream, TokenTree};
 /// "<regconfig>")]` (hanya `String`/`Option<String>`) → indeks GIN full-text
 /// (default config `simple`); tipe `#[pg(check = "…")]` → constraint `CHECK`.
 /// Tipe `#[pg(index(a, b))]`/`#[pg(unique(a, b))]` → indeks komposit (RFC-0037).
+/// Field relasi `#[pg(on_delete = "cascade"|"set_null"|"restrict")]` → FK +
+/// aksi hapus (RFC-0039).
 /// Field `#[pg(text)]` (`T`/`Option<T>` dengan `T: Display + FromStr`, mis. enum)
 /// → kolom `TEXT`. `uuid::Uuid` → `UUID` & `chrono::DateTime<Utc>` →
 /// `TIMESTAMPTZ` (fitur `uuid`/`chrono` pada `arke-postgres`).
@@ -42,6 +44,8 @@ struct Field {
     fts: Option<String>,
     /// `#[pg(text)]`: disimpan `TEXT` via `Display`/`FromStr`.
     text: bool,
+    /// `#[pg(on_delete = "…")]`: varian `OnDelete`.
+    on_delete: Option<&'static str>,
 }
 
 /// Satu item atribut `#[pg(...)]`.
@@ -54,6 +58,8 @@ enum PgItem {
     Text,
     /// `index(a, b)`/`unique(a, b)` level-tipe: (unik, nama field).
     Composite(bool, Vec<String>),
+    /// `on_delete = "…"` level-field: varian `OnDelete`.
+    OnDelete(&'static str),
 }
 
 /// Parse isi bracket `#[pg(...)]` → daftar item. Bracket non-`pg` → kosong.
@@ -115,6 +121,26 @@ fn parse_pg_items(bracket_stream: TokenStream) -> Result<Vec<PgItem>, String> {
                     }
                     _ => items.push(PgItem::Fts("simple".to_string())),
                 },
+                "on_delete" => match (inner.get(j + 1), inner.get(j + 2)) {
+                    (Some(TokenTree::Punct(p)), Some(TokenTree::Literal(lit)))
+                        if p.as_char() == '=' =>
+                    {
+                        let action = match unquote(&lit.to_string()).as_str() {
+                            "cascade" => "Cascade",
+                            "set_null" => "SetNull",
+                            "restrict" => "Restrict",
+                            _ => {
+                                return Err(
+                                    "pg(on_delete = \"...\"): harus cascade/set_null/restrict"
+                                        .to_string(),
+                                );
+                            }
+                        };
+                        items.push(PgItem::OnDelete(action));
+                        j += 2;
+                    }
+                    _ => return Err("pg(on_delete = \"...\") tak valid".to_string()),
+                },
                 "check" => match (inner.get(j + 1), inner.get(j + 2)) {
                     (Some(TokenTree::Punct(p)), Some(TokenTree::Literal(lit)))
                         if p.as_char() == '=' =>
@@ -172,9 +198,13 @@ fn expand(input: TokenStream) -> Result<String, String> {
                             PgItem::Check(expr) => checks.push(expr),
                             PgItem::Table(name) => table = Some(name),
                             PgItem::Composite(unique, names) => composites.push((unique, names)),
-                            PgItem::Index | PgItem::Unique | PgItem::Fts(_) | PgItem::Text => {
+                            PgItem::Index
+                            | PgItem::Unique
+                            | PgItem::Fts(_)
+                            | PgItem::Text
+                            | PgItem::OnDelete(_) => {
                                 return Err(
-                                    "pg(index)/pg(unique)/pg(fts)/pg(text) hanya valid di level-field"
+                                    "pg(index)/pg(unique)/pg(fts)/pg(text)/pg(on_delete) hanya valid di level-field"
                                         .to_string(),
                                 );
                             }
@@ -241,6 +271,7 @@ fn parse_named_fields(stream: TokenStream) -> Result<Vec<Field>, String> {
         let mut unique = false;
         let mut fts: Option<String> = None;
         let mut text = false;
+        let mut on_delete: Option<&'static str> = None;
         while matches!(toks.get(i), Some(TokenTree::Punct(p)) if p.as_char() == '#') {
             i += 1;
             if let Some(TokenTree::Group(g)) = toks.get(i)
@@ -252,6 +283,7 @@ fn parse_named_fields(stream: TokenStream) -> Result<Vec<Field>, String> {
                         PgItem::Unique => unique = true,
                         PgItem::Fts(cfg) => fts = Some(cfg),
                         PgItem::Text => text = true,
+                        PgItem::OnDelete(action) => on_delete = Some(action),
                         PgItem::Check(_) | PgItem::Table(_) | PgItem::Composite(..) => {
                             return Err(
                                 "pg(check)/pg(table)/pg(index(..))/pg(unique(..)) hanya valid di level-tipe"
@@ -315,6 +347,7 @@ fn parse_named_fields(stream: TokenStream) -> Result<Vec<Field>, String> {
             unique,
             fts,
             text,
+            on_delete,
         });
     }
     Ok(fields)
@@ -674,6 +707,28 @@ fn gen_impl(
         ));
     }
 
+    // Aksi hapus relasi (RFC-0039): hanya field relasi; set_null butuh Option.
+    let mut on_delete_defs = String::new();
+    for f in fields {
+        let Some(action) = f.on_delete else { continue };
+        if !(is_entity_ty(&f.ty) || ref_target(&f.ty).is_some()) {
+            return Err(format!(
+                "derive(PgComponent): pg(on_delete) hanya untuk field relasi Entity/Ref<T> (field `{}`)",
+                f.col
+            ));
+        }
+        if action == "SetNull" && !f.ty.starts_with("Option<") {
+            return Err(format!(
+                "derive(PgComponent): pg(on_delete = \"set_null\") butuh Option<…> (field `{}`)",
+                f.col
+            ));
+        }
+        on_delete_defs.push_str(&format!(
+            "::arke_postgres::OnDeleteDef {{ column: {:?}, action: ::arke_postgres::OnDelete::{action} }}, ",
+            format!("{}_id", f.col)
+        ));
+    }
+
     let mut checks_str = String::new();
     for c in checks {
         checks_str.push_str(&format!("{c:?}, "));
@@ -734,6 +789,7 @@ fn gen_impl(
             const COLUMNS: &'static [::arke_postgres::ColumnDef] = &[{columns}];\n\
             const INDEXES: &'static [::arke_postgres::IndexDef] = &[{indexes}];\n\
             const COMPOSITE_INDEXES: &'static [::arke_postgres::CompositeIndexDef] = &[{composite_defs}];\n\
+            const ON_DELETE: &'static [::arke_postgres::OnDeleteDef] = &[{on_delete_defs}];\n\
             const FTS: &'static [::arke_postgres::FtsDef] = &[{fts_defs}];\n\
             const CHECKS: &'static [&'static str] = &[{checks_str}];\n\
             fn to_params(&self) -> ::std::vec::Vec<::arke_postgres::PgValue> {{\n\

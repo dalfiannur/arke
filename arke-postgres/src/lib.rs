@@ -263,6 +263,41 @@ pub struct CompositeIndexDef {
     pub unique: bool,
 }
 
+/// Aksi saat entity yang **dirujuk** relasi dihapus (`#[pg(on_delete = "…")]`,
+/// RFC-0039).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnDelete {
+    /// Entity perujuk ikut dihapus utuh (semua komponennya), rekursif.
+    Cascade,
+    /// Kolom relasi perujuk dikosongkan (`NULL`); hanya untuk `Option<…>`.
+    SetNull,
+    /// Penghapusan ditolak selama masih ada perujuk (diperiksa saat commit).
+    Restrict,
+}
+
+/// Aksi hapus untuk satu kolom relasi (`<name>_id`), RFC-0039.
+///
+/// Hanya untuk field relasi, dan `set_null` hanya untuk `Option<…>`:
+///
+/// ```compile_fail
+/// #[derive(arke_postgres::PgComponent)]
+/// struct Bad { #[pg(on_delete = "cascade")] hp: i32 }
+/// ```
+///
+/// ```compile_fail
+/// #[derive(arke_postgres::PgComponent)]
+/// struct P { x: i32 }
+/// #[derive(arke_postgres::PgComponent)]
+/// struct Bad { #[pg(on_delete = "set_null")] p: arke_postgres::Ref<P> }
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OnDeleteDef {
+    /// Kolom relasi (`<name>_id`).
+    pub column: &'static str,
+    /// Aksi saat entity yang dirujuk dihapus.
+    pub action: OnDelete,
+}
+
 /// Kolom **full-text search** (`#[pg(fts)]`): indeks GIN ekspresi
 /// `to_tsvector('<config>', <column>)`, dipakai [`Field::search`] dan
 /// [`Query::order_by_rank`].
@@ -335,6 +370,9 @@ pub trait PgComponent {
     /// Indeks komposit level-tipe (`#[pg(index(..))]`/`#[pg(unique(..))]`,
     /// RFC-0037); kosong bila tak ada.
     const COMPOSITE_INDEXES: &'static [CompositeIndexDef] = &[];
+    /// Aksi hapus relasi (`#[pg(on_delete = "…")]`, RFC-0039); kosong bila tak
+    /// ada — relasi tanpa atribut tetap tanpa FK (RFC-0034 Am.3).
+    const ON_DELETE: &'static [OnDeleteDef] = &[];
     /// Kolom full-text (`#[pg(fts)]`); kosong bila tak ada.
     const FTS: &'static [FtsDef] = &[];
     /// Ekspresi `CHECK` level-tabel (`#[pg(check = "…")]`); kosong bila tak ada.
