@@ -9,6 +9,16 @@ rilis juga ada di [GitHub Releases](https://github.com/dalfiannur/arke/releases)
 
 ### Added
 
+- **`arke-postgres`: kolom `UUID`, `TIMESTAMPTZ`, dan `#[pg(text)]`.** Fitur
+  opsional `uuid` (`uuid::Uuid` → `UUID`) dan `chrono` (`DateTime<Utc>` →
+  `TIMESTAMPTZ`), termasuk `Option<…>`, token field typed, filter, dan kunci
+  keyset. Nilai dibawa sebagai teks di batas driver (pola `NUMERIC`): di-cast
+  saat bind, dibaca sebagai teks — `TIMESTAMPTZ` diformat RFC 3339 UTC
+  berpresisi mikrodetik, tak bergantung `TimeZone` sesi. Field `#[pg(text)]`
+  (`T: Display + FromStr`, mis. enum) → kolom `TEXT`; padukan dengan
+  `#[pg(check = "…")]` untuk membatasi nilainya. `PgType` mendapat varian
+  `Uuid`/`TimestampTz`.
+
 - **`arke-postgres`: paginasi keyset `Query::after`/`before`/`load_page`.**
   `load_page` mengambil `limit + 1` baris → `Page { items, next, prev }` tanpa
   `COUNT(*)`; `Cursor` opaque aman-URL (JSON `arke::Value` + base64url, 0-dep;

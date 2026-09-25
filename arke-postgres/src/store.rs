@@ -1550,23 +1550,14 @@ fn default_sql(ty: PgType) -> &'static str {
         PgType::Boolean => "false",
         PgType::Text => "''",
         PgType::Jsonb => "'null'::jsonb",
+        PgType::Uuid => "'00000000-0000-0000-0000-000000000000'::uuid",
+        PgType::TimestampTz => "'epoch'::timestamptz",
     }
 }
 
-/// Cast eksplisit placeholder INSERT untuk tipe yang di-bind sebagai teks
-/// (Postgres tak meng-cast text→jsonb/numeric implisit).
+/// Cast eksplisit placeholder INSERT untuk tipe yang di-bind sebagai teks.
 fn insert_cast(ty: PgType) -> &'static str {
-    match ty {
-        PgType::Jsonb => "::jsonb",
-        PgType::Numeric => "::numeric",
-        _ => "",
-    }
-}
-
-/// Apakah kolom `ty` dibaca sebagai teks (`col::text`) — JSONB & NUMERIC, agar
-/// tak butuh dependensi serde/bigdecimal.
-fn read_as_text(ty: PgType) -> bool {
-    matches!(ty, PgType::Jsonb | PgType::Numeric)
+    ty.bind_cast()
 }
 
 /// `INSERT INTO cmp_x (pid, c1, c2::jsonb, …) VALUES ($1, $2, $3::jsonb, …)`.
@@ -1588,16 +1579,16 @@ fn insert_sql(r: &Registered) -> String {
 
 /// `SELECT pid, c1, c2::text AS c2, … FROM cmp_x [WHERE <filter>] ORDER BY pid`.
 ///
-/// Kolom `JSONB`/`NUMERIC` dibaca sebagai teks (`::text`).
+/// Kolom `JSONB`/`NUMERIC`/`UUID`/`TIMESTAMPTZ` dibaca sebagai teks
+/// ([`PgType::read_expr`]) — tanpa dependensi serde/bigdecimal/uuid/chrono.
 fn select_sql(r: &Registered, filter: Option<&str>) -> String {
     let mut cols = String::from("pid");
     for col in r.columns {
         cols.push_str(", ");
         let name = quote_ident(col.name);
-        if read_as_text(col.ty) {
-            cols.push_str(&format!("{name}::text AS {name}"));
-        } else {
-            cols.push_str(&name);
+        match col.ty.read_expr(&name) {
+            Some(expr) => cols.push_str(&format!("{expr} AS {name}")),
+            None => cols.push_str(&name),
         }
     }
     let where_clause = match filter {
@@ -1625,7 +1616,7 @@ enum Typed {
     F32(Option<f32>),
     F64(Option<f64>),
     Bool(Option<bool>),
-    /// TEXT / JSONB / NUMERIC (dua terakhir di-cast di SQL).
+    /// TEXT / JSONB / NUMERIC / UUID / TIMESTAMPTZ (selain TEXT di-cast di SQL).
     Text(Option<String>),
 }
 
@@ -1651,10 +1642,12 @@ fn typed(col_ty: PgType, value: &PgValue) -> Typed {
             PgValue::Bool(b) => Some(*b),
             _ => None,
         }),
-        PgType::Text | PgType::Jsonb | PgType::Numeric => Typed::Text(match value {
-            PgValue::Text(s) | PgValue::Json(s) | PgValue::Numeric(s) => Some(s.clone()),
-            _ => None,
-        }),
+        PgType::Text | PgType::Jsonb | PgType::Numeric | PgType::Uuid | PgType::TimestampTz => {
+            Typed::Text(match value {
+                PgValue::Text(s) | PgValue::Json(s) | PgValue::Numeric(s) => Some(s.clone()),
+                _ => None,
+            })
+        }
     }
 }
 
@@ -1693,7 +1686,9 @@ impl TypedVec {
             PgType::Real => TypedVec::F32(Vec::new()),
             PgType::DoublePrecision => TypedVec::F64(Vec::new()),
             PgType::Boolean => TypedVec::Bool(Vec::new()),
-            PgType::Text | PgType::Jsonb | PgType::Numeric => TypedVec::Text(Vec::new()),
+            PgType::Text | PgType::Jsonb | PgType::Numeric | PgType::Uuid | PgType::TimestampTz => {
+                TypedVec::Text(Vec::new())
+            }
         }
     }
 
@@ -1717,7 +1712,9 @@ impl TypedVec {
             PgType::Real => "float4[]",
             PgType::DoublePrecision => "float8[]",
             PgType::Boolean => "bool[]",
-            PgType::Text | PgType::Jsonb | PgType::Numeric => "text[]",
+            PgType::Text | PgType::Jsonb | PgType::Numeric | PgType::Uuid | PgType::TimestampTz => {
+                "text[]"
+            }
         }
     }
 
@@ -1811,7 +1808,8 @@ fn read_value(row: &sqlx::postgres::PgRow, col: &ColumnDef) -> Result<PgValue, s
 }
 
 /// Baca kolom `name` bertipe `ty` dari `row` sebagai [`PgValue`] (`NULL` → `Null`).
-/// JSONB/NUMERIC diharapkan sudah di-`::text` oleh SQL pemanggil.
+/// JSONB/NUMERIC/UUID/TIMESTAMPTZ diharapkan sudah dibaca sebagai teks oleh SQL
+/// pemanggil ([`PgType::read_expr`]).
 pub(crate) fn read_typed(
     row: &sqlx::postgres::PgRow,
     name: &str,
@@ -1849,6 +1847,10 @@ pub(crate) fn read_typed(
         },
         PgType::Numeric => match row.try_get::<Option<String>, _>(name)? {
             Some(v) => PgValue::Numeric(v),
+            None => PgValue::Null,
+        },
+        PgType::Uuid | PgType::TimestampTz => match row.try_get::<Option<String>, _>(name)? {
+            Some(v) => PgValue::Text(v),
             None => PgValue::Null,
         },
     })

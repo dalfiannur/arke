@@ -91,6 +91,18 @@ impl IntoPgValue for &str {
         PgValue::Text(self.to_string())
     }
 }
+#[cfg(feature = "uuid")]
+impl IntoPgValue for uuid::Uuid {
+    fn into_pg_value(self) -> PgValue {
+        PgValue::Text(self.to_string())
+    }
+}
+#[cfg(feature = "chrono")]
+impl IntoPgValue for chrono::DateTime<chrono::Utc> {
+    fn into_pg_value(self) -> PgValue {
+        PgValue::Text(crate::__private::ts_to_text(&self))
+    }
+}
 /// Field array (`Vec<V>` → JSONB): nilai di-encode via `arke::Serialize` —
 /// representasi sama dengan yang ditulis `to_params`. Dipakai `set` massal.
 impl<T: arke::Serialize> IntoPgValue for Vec<T> {
@@ -133,13 +145,9 @@ impl<C, V> Field<C, V> {
         quote_ident(self.column)
     }
 
-    /// Cast placeholder yang dibutuhkan tipe kolom (`NUMERIC`/`JSONB` di-bind teks).
+    /// Cast placeholder yang dibutuhkan tipe kolom (tipe yang di-bind teks).
     pub(crate) fn cast(&self) -> &'static str {
-        match self.ty {
-            PgType::Numeric => "::numeric",
-            PgType::Jsonb => "::jsonb",
-            _ => "",
-        }
+        self.ty.bind_cast()
     }
 }
 
@@ -711,6 +719,7 @@ fn keyset_where(
             (PgType::Boolean, PgValue::Bool(_)) => true,
             (PgType::Text, PgValue::Text(_)) => true,
             (PgType::Numeric, PgValue::Numeric(_)) => true,
+            (PgType::Uuid | PgType::TimestampTz, PgValue::Text(_)) => true,
             (_, PgValue::Null) => {
                 return Err(CursorError::Mismatch(format!(
                     "kunci `{}` NULL — keyset butuh kunci non-NULL",
@@ -798,13 +807,9 @@ fn fts_config<C: PgComponent>(column: &str) -> &'static str {
         .map_or("simple", |f| f.config)
 }
 
-/// Cast placeholder untuk tipe kolom (NUMERIC/JSONB di-bind sebagai teks).
+/// Cast placeholder untuk tipe kolom (tipe yang di-bind sebagai teks).
 fn cast_of(ty: PgType) -> &'static str {
-    match ty {
-        PgType::Numeric => "::numeric",
-        PgType::Jsonb => "::jsonb",
-        _ => "",
-    }
+    ty.bind_cast()
 }
 
 /// Himpunan komponen untuk **hidrasi selektif** ([`Query::only`]): satu
@@ -1062,17 +1067,21 @@ impl<'a, T: PgComponent> Query<'a, T> {
 
         let mut select = String::from("pid");
         if select_keys {
-            // NUMERIC di-`::text` agar terbaca sebagai `PgValue::Numeric` (lihat
+            // NUMERIC/UUID/TIMESTAMPTZ dibaca sebagai teks (`read_expr`, lihat
             // `read_typed`); JSONB ditolak `keyset_where`. Kunci ekspresi
             // di-alias dengan `column`-nya.
             for k in &self.order {
                 let (ksql, p) = k.sql();
                 params.extend_from_slice(p);
                 let alias = quote_ident(k.column);
-                match (k.ty, &k.expr) {
-                    (PgType::Numeric, _) => select.push_str(&format!(", {ksql}::text AS {alias}")),
-                    (_, Some(_)) => select.push_str(&format!(", {ksql} AS {alias}")),
-                    (_, None) => select.push_str(&format!(", {ksql}")),
+                // JSONB tetap dibaca apa adanya (ditolak `keyset_where`).
+                let text = (k.ty != PgType::Jsonb)
+                    .then(|| k.ty.read_expr(&ksql))
+                    .flatten();
+                match (text, &k.expr) {
+                    (Some(expr), _) => select.push_str(&format!(", {expr} AS {alias}")),
+                    (None, Some(_)) => select.push_str(&format!(", {ksql} AS {alias}")),
+                    (None, None) => select.push_str(&format!(", {ksql}")),
                 }
             }
         }

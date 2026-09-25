@@ -290,11 +290,7 @@ fn bind_type(v: &PgValue) -> PgType {
 }
 
 fn cast_for(ty: PgType) -> &'static str {
-    match ty {
-        PgType::Numeric => "::numeric",
-        PgType::Jsonb => "::jsonb",
-        _ => "",
-    }
+    ty.bind_cast()
 }
 
 /// `COUNT(*)` untuk `HAVING`.

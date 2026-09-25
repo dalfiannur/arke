@@ -133,6 +133,11 @@ pub enum PgType {
     Text,
     /// `JSONB` (fallback field non-skalar).
     Jsonb,
+    /// `UUID` (`uuid::Uuid`, fitur `uuid`). Dibawa sebagai teks kanonik.
+    Uuid,
+    /// `TIMESTAMPTZ` (`chrono::DateTime<Utc>`, fitur `chrono`). Dibawa sebagai
+    /// teks RFC 3339 UTC berpresisi mikrodetik.
+    TimestampTz,
 }
 
 impl PgType {
@@ -147,7 +152,53 @@ impl PgType {
             PgType::Boolean => "BOOLEAN",
             PgType::Text => "TEXT",
             PgType::Jsonb => "JSONB",
+            PgType::Uuid => "UUID",
+            PgType::TimestampTz => "TIMESTAMPTZ",
         }
+    }
+
+    /// Cast placeholder untuk tipe yang di-bind sebagai teks (Postgres tak
+    /// meng-cast text→jsonb/numeric/uuid/timestamptz implisit).
+    pub(crate) fn bind_cast(self) -> &'static str {
+        match self {
+            PgType::Numeric => "::numeric",
+            PgType::Jsonb => "::jsonb",
+            PgType::Uuid => "::uuid",
+            PgType::TimestampTz => "::timestamptz",
+            _ => "",
+        }
+    }
+
+    /// Ekspresi baca untuk kolom `col` (SQL ter-quote) yang dibaca sebagai teks,
+    /// atau `None` bila dibaca apa adanya. `TIMESTAMPTZ` diformat eksplisit di
+    /// UTC agar tak bergantung `TimeZone`/`DateStyle` sesi.
+    pub(crate) fn read_expr(self, col: &str) -> Option<String> {
+        match self {
+            PgType::Jsonb | PgType::Numeric | PgType::Uuid => Some(format!("{col}::text")),
+            PgType::TimestampTz => Some(format!(
+                "to_char({col} AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')"
+            )),
+            _ => None,
+        }
+    }
+}
+
+/// Pembantu kode hasil `#[derive(PgComponent)]`; bukan API publik.
+#[doc(hidden)]
+pub mod __private {
+    /// `DateTime<Utc>` → teks RFC 3339 UTC berpresisi mikrodetik (presisi
+    /// `TIMESTAMPTZ`; nanodetik dipotong).
+    #[cfg(feature = "chrono")]
+    pub fn ts_to_text(v: &chrono::DateTime<chrono::Utc>) -> String {
+        v.to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
+    }
+
+    /// Kebalikan [`ts_to_text`]; `None` bila teks bukan RFC 3339.
+    #[cfg(feature = "chrono")]
+    pub fn ts_from_text(v: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+        chrono::DateTime::parse_from_rfc3339(v)
+            .ok()
+            .map(|t| t.with_timezone(&chrono::Utc))
     }
 }
 

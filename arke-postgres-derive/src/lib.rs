@@ -14,6 +14,9 @@ use proc_macro::{Delimiter, TokenStream, TokenTree};
 /// field `#[pg(index)]`/`#[pg(unique)]` → indeks; `#[pg(fts)]`/`#[pg(fts =
 /// "<regconfig>")]` (hanya `String`/`Option<String>`) → indeks GIN full-text
 /// (default config `simple`); tipe `#[pg(check = "…")]` → constraint `CHECK`.
+/// Field `#[pg(text)]` (`T`/`Option<T>` dengan `T: Display + FromStr`, mis. enum)
+/// → kolom `TEXT`. `uuid::Uuid` → `UUID` & `chrono::DateTime<Utc>` →
+/// `TIMESTAMPTZ` (fitur `uuid`/`chrono` pada `arke-postgres`).
 /// Tipe tak didukung, generic, atau non-struct → `compile_error!`.
 #[proc_macro_derive(PgComponent, attributes(pg))]
 pub fn derive_pg_component(input: TokenStream) -> TokenStream {
@@ -36,6 +39,8 @@ struct Field {
     /// `#[pg(fts)]`/`#[pg(fts = "<config>")]`: konfigurasi text search
     /// (`None` = tanpa FTS; `Some("simple")` bila tanpa nilai).
     fts: Option<String>,
+    /// `#[pg(text)]`: disimpan `TEXT` via `Display`/`FromStr`.
+    text: bool,
 }
 
 /// Satu item atribut `#[pg(...)]`.
@@ -45,6 +50,7 @@ enum PgItem {
     Check(String),
     Table(String),
     Fts(String),
+    Text,
 }
 
 /// Parse isi bracket `#[pg(...)]` → daftar item. Bracket non-`pg` → kosong.
@@ -67,6 +73,7 @@ fn parse_pg_items(bracket_stream: TokenStream) -> Result<Vec<PgItem>, String> {
             match key.to_string().as_str() {
                 "index" => items.push(PgItem::Index),
                 "unique" => items.push(PgItem::Unique),
+                "text" => items.push(PgItem::Text),
                 "fts" => match (inner.get(j + 1), inner.get(j + 2)) {
                     (Some(TokenTree::Punct(p)), Some(TokenTree::Literal(lit)))
                         if p.as_char() == '=' =>
@@ -139,9 +146,9 @@ fn expand(input: TokenStream) -> Result<String, String> {
                         match item {
                             PgItem::Check(expr) => checks.push(expr),
                             PgItem::Table(name) => table = Some(name),
-                            PgItem::Index | PgItem::Unique | PgItem::Fts(_) => {
+                            PgItem::Index | PgItem::Unique | PgItem::Fts(_) | PgItem::Text => {
                                 return Err(
-                                    "pg(index)/pg(unique)/pg(fts) hanya valid di level-field"
+                                    "pg(index)/pg(unique)/pg(fts)/pg(text) hanya valid di level-field"
                                         .to_string(),
                                 );
                             }
@@ -207,6 +214,7 @@ fn parse_named_fields(stream: TokenStream) -> Result<Vec<Field>, String> {
         let mut index = false;
         let mut unique = false;
         let mut fts: Option<String> = None;
+        let mut text = false;
         while matches!(toks.get(i), Some(TokenTree::Punct(p)) if p.as_char() == '#') {
             i += 1;
             if let Some(TokenTree::Group(g)) = toks.get(i)
@@ -217,6 +225,7 @@ fn parse_named_fields(stream: TokenStream) -> Result<Vec<Field>, String> {
                         PgItem::Index => index = true,
                         PgItem::Unique => unique = true,
                         PgItem::Fts(cfg) => fts = Some(cfg),
+                        PgItem::Text => text = true,
                         PgItem::Check(_) | PgItem::Table(_) => {
                             return Err("pg(check)/pg(table) hanya valid di level-tipe".to_string());
                         }
@@ -276,6 +285,7 @@ fn parse_named_fields(stream: TokenStream) -> Result<Vec<Field>, String> {
             index,
             unique,
             fts,
+            text,
         });
     }
     Ok(fields)
@@ -320,8 +330,43 @@ fn inner_scalar(ty: &str) -> Option<Scalar> {
         "f64" => s("DoublePrecision", "Float", "*v", "*v"),
         "bool" => s("Boolean", "Bool", "*v", "*v"),
         "String" => s("Text", "Text", "v.clone()", "v.clone()"),
+        "Uuid" | "uuid::Uuid" | "::uuid::Uuid" => {
+            s("Uuid", "Text", "v.to_string()", "v.parse().ok()?")
+        }
+        _ if is_utc_datetime(ty) => s(
+            "TimestampTz",
+            "Text",
+            "::arke_postgres::__private::ts_to_text(v)",
+            "::arke_postgres::__private::ts_from_text(v)?",
+        ),
         _ => return None,
     })
+}
+
+/// `DateTime<Utc>` dalam ejaan path apa pun (`chrono::DateTime<chrono::Utc>`, …).
+fn is_utc_datetime(ty: &str) -> bool {
+    let Some(inner) = ty.strip_suffix('>') else {
+        return false;
+    };
+    let Some((head, arg)) = inner.split_once('<') else {
+        return false;
+    };
+    let last = |p: &str| p.rsplit("::").next().unwrap_or(p).to_string();
+    last(head) == "DateTime" && last(arg) == "Utc"
+}
+
+/// Skalar untuk field `f` bertipe (dalam) `ty`: `#[pg(text)]` → `TEXT` via
+/// `Display`/`FromStr`, selain itu [`inner_scalar`].
+fn field_scalar(f: &Field, ty: &str) -> Option<Scalar> {
+    if f.text {
+        return Some(Scalar {
+            pg_type: "Text",
+            value: "Text",
+            to_ref: "::std::string::ToString::to_string(v)",
+            from_expr: "v.parse().ok()?",
+        });
+    }
+    inner_scalar(ty)
 }
 
 /// Fragmen kode SQL/serde untuk satu field.
@@ -433,7 +478,7 @@ fn field_sql(f: &Field, idx: usize) -> Result<FieldSql, String> {
         f.ty.strip_prefix("Option<")
             .and_then(|r| r.strip_suffix('>'))
     {
-        return Ok(match inner_scalar(inner) {
+        return Ok(match field_scalar(f, inner) {
             Some(s) => FieldSql {
                 column: column_def(col, s.pg_type, true),
                 to_param: format!(
@@ -470,7 +515,7 @@ fn field_sql(f: &Field, idx: usize) -> Result<FieldSql, String> {
     }
 
     // Skalar biasa (non-null).
-    if let Some(s) = inner_scalar(&f.ty) {
+    if let Some(s) = field_scalar(f, &f.ty) {
         return Ok(FieldSql {
             column: column_def(col, s.pg_type, false),
             to_param: format!(
@@ -606,7 +651,7 @@ fn gen_impl(
                 field = f.name,
                 col = format!("{}_id", f.col),
             ));
-        } else if let Some(sc) = inner_scalar(inner) {
+        } else if let Some(sc) = field_scalar(f, inner) {
             tokens.push_str(&format!(
                 "    pub fn {field}() -> ::arke_postgres::Field<Self, {inner}> {{ \
                      ::arke_postgres::Field::new({col:?}, ::arke_postgres::PgType::{pg}) }}\n",
