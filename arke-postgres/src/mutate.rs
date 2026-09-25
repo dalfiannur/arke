@@ -60,6 +60,16 @@ impl<'a, T: PgComponent> UpdateWhere<'a, T> {
         self
     }
 
+    /// `SET col = v` untuk kolom **nullable** (`Option<V>`): `Some(v)` mengisi,
+    /// `None` mengosongkan (`NULL`). Token field kolom `Option<V>` bertipe
+    /// `Field<T, V>`, jadi [`Self::set`] tak dapat mengungkapkan `NULL`. Pada
+    /// kolom `NOT NULL`, `None` ditolak Postgres.
+    pub fn set_opt<V: IntoPgValue>(mut self, field: Field<T, V>, v: Option<V>) -> Self {
+        self.sets
+            .push((field.column, field.cast(), field.ty, v.into_pg_value()));
+        self
+    }
+
     /// `(sql ter-renumber, params)`; `None` bila tak ada `set`.
     fn build(&self) -> Option<(String, Vec<(PgType, PgValue)>)> {
         update_sql(T::TABLE, &self.sets, self.filter.as_ref())

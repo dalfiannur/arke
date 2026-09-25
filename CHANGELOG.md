@@ -9,6 +9,11 @@ rilis juga ada di [GitHub Releases](https://github.com/dalfiannur/arke/releases)
 
 ### Added
 
+- **`arke-postgres`: `UpdateWhere::set_opt(field, Option<V>)`** — isi atau
+  kosongkan (`None` → `NULL`) kolom nullable pada UPDATE massal; token field
+  kolom `Option<V>` bertipe `Field<T, V>`, jadi `set` tak dapat mengungkapkan
+  `NULL`.
+
 - **`arke-postgres`: baca di dalam transaksi** (RFC-0042) —
   `Query::load_pids_in(&mut tx, world)` dan `PgStore::fetch_in(&mut tx, world,
   pid)` melihat tulisan transaksi yang belum di-commit (termasuk target
