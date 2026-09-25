@@ -113,8 +113,8 @@ pub use aggregate::{AggExpr, ColumnOf, FromPgScalar, GroupKey, Grouped, Having};
 
 pub mod query;
 pub use query::{
-    ComponentSet, Cursor, CursorError, Dir, EntityRef, Field, Filter, IntoPgValue, Page, PageError,
-    PathLoad, PathQuery, Query, Recursive, RecursiveLoad, RelRef,
+    ComponentSet, Cursor, CursorError, Dir, EntityRef, Field, Filter, IntoPgValue, Locked, Page,
+    PageError, PathLoad, PathQuery, Query, Recursive, RecursiveLoad, RelRef,
 };
 
 /// Tipe kolom SQL yang dipetakan dari tipe field Rust (RFC-0021 §2/§3).

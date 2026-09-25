@@ -9,6 +9,10 @@ rilis juga ada di [GitHub Releases](https://github.com/dalfiannur/arke/releases)
 
 ### Added
 
+- **`arke-postgres`: penguncian baris** (RFC-0040) — `Query::for_update()
+  [.skip_locked() | .nowait()].pids_in(&mut tx)` → `FOR UPDATE OF cmp_t`.
+  Tipe `Locked` hanya punya terminal ber-transaksi (tanpa tx gagal kompilasi).
+
 - **`arke-postgres`: aksi hapus relasi** (RFC-0039) — field relasi
   `#[pg(on_delete = "cascade"|"set_null"|"restrict")]` → `PgComponent::ON_DELETE`
   (`OnDeleteDef`, `OnDelete`). `migrate` memasang FK ke `arke_entities(pid)`,

@@ -1225,6 +1225,16 @@ impl<'a, T: PgComponent> Query<'a, T> {
         Ok(self.load_pids(world).await?.len())
     }
 
+    /// Kunci baris `T` yang cocok (`SELECT … FOR UPDATE`, RFC-0040). Hasilnya
+    /// hanya dapat dijalankan di transaksi ([`Locked::pids_in`]) — kunci di luar
+    /// transaksi lepas seketika dan tak berarti.
+    pub fn for_update(self) -> Locked<'a, T> {
+        Locked {
+            query: self,
+            wait: LockWait::Wait,
+        }
+    }
+
     /// Seperti [`load`](Self::load) tetapi mengembalikan pasangan `(pid, Entity)`
     /// entity `T` yang dimuat (urut `ORDER BY` query) — id persisten untuk
     /// `remove(pid)`/`commit_update(pid)`/respons API, tanpa `load_where`.
@@ -2256,5 +2266,73 @@ mod tests {
         let a = renumber(&recursive_sql("cmp_emp", "manager_id", RecurDir::Ancestors));
         assert!(a.contains("SELECT manager_id AS pid"));
         assert!(a.contains("t.manager_id IS NOT NULL AND rec.depth < $2"));
+    }
+}
+
+/// Perilaku saat baris yang diminta sedang dikunci transaksi lain.
+#[derive(Clone, Copy)]
+enum LockWait {
+    /// Tunggu hingga kunci lepas (bawaan Postgres).
+    Wait,
+    /// Lewati baris terkunci (`SKIP LOCKED`).
+    SkipLocked,
+    /// Gagal seketika, SQLSTATE `55P03` (`NOWAIT`).
+    NoWait,
+}
+
+/// Query `T` yang mengunci baris hasilnya (`FOR UPDATE OF cmp_t`, RFC-0040).
+/// Dibuat lewat [`Query::for_update`]; hanya punya terminal ber-transaksi.
+///
+/// Tanpa transaksi tidak dapat dijalankan:
+///
+/// ```compile_fail
+/// # use arke_postgres::{PgComponent, PgStore};
+/// #[derive(PgComponent)]
+/// struct Job { n: i32 }
+/// async fn f(store: &mut PgStore, w: &mut arke::World) {
+///     store.query::<Job>().for_update().load(w).await;
+/// }
+/// ```
+pub struct Locked<'a, T: PgComponent> {
+    query: Query<'a, T>,
+    wait: LockWait,
+}
+
+impl<T: PgComponent> Locked<'_, T> {
+    /// `SKIP LOCKED`: baris yang dikunci transaksi lain dilewati — pola antrean
+    /// kerja (klaim satu job tanpa menunggu worker lain).
+    pub fn skip_locked(mut self) -> Self {
+        self.wait = LockWait::SkipLocked;
+        self
+    }
+
+    /// `NOWAIT`: gagal seketika (SQLSTATE `55P03`) bila ada baris terkunci.
+    pub fn nowait(mut self) -> Self {
+        self.wait = LockWait::NoWait;
+        self
+    }
+
+    /// Kunci baris yang cocok di transaksi `tx` dan kembalikan `pid`-nya (urut
+    /// `ORDER BY` query). Kunci bertahan hingga `tx` commit/rollback.
+    pub async fn pids_in(self, tx: &mut PgTx<'_>) -> Result<Vec<i64>, sqlx::Error> {
+        let (mut sql, params, reversed) = self
+            .query
+            .build_with(self.query.limit, false)
+            .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+        sql.push_str(&format!(" FOR UPDATE OF {}", quote_ident(T::TABLE)));
+        match self.wait {
+            LockWait::Wait => {}
+            LockWait::SkipLocked => sql.push_str(" SKIP LOCKED"),
+            LockWait::NoWait => sql.push_str(" NOWAIT"),
+        }
+        let rows = fetch_scalar_rows(tx.conn(), &sql, &params).await?;
+        let mut pids = rows
+            .iter()
+            .map(|r| r.try_get::<i64, _>("pid"))
+            .collect::<Result<Vec<_>, _>>()?;
+        if reversed {
+            pids.reverse();
+        }
+        Ok(pids)
     }
 }
